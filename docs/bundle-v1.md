@@ -76,7 +76,9 @@ of the following before any provider call:
 - every element of each such array is an object carrying that array's `key` and every field listed
   in its `fields[]`; unrelated extra fields on an element are allowed;
 - each key value is a string or number that is not `null`, and a string key is not empty after
-  normalization; projected field values may be `null`;
+  normalization;
+- each projected `fields[]` value is a JSON scalar or `null`; an object or array is not a scalar
+  comparison value;
 - normalized key values are unique within the array.
 
 Any violation fails preflight with the stable code `truth_contract_invalid`. An invalid truth must
@@ -95,12 +97,16 @@ comparison policy, or any past attempt output; they stay on the comparison side 
 - `critical`: pointers whose failure is evaluated separately from an average score;
 - `normalization`: explicit string operations and exact number comparison.
 
-`normalization.strings` may contain each of these operations at most once, applied to the truth
-string and the actual string independently, in this fixed order regardless of declaration order:
+`normalization.strings` may contain each of these operations at most once. Only operations declared
+in that array are enabled. Enabled operations are applied to the truth string and the actual string
+independently, in this canonical order regardless of declaration order:
 
 - `nfkc`: Unicode NFKC normalization;
 - `trim`: remove leading and trailing whitespace;
 - `collapse-whitespace`: replace each whitespace run with a single U+0020 SPACE.
+
+Omitting `nfkc` therefore preserves compatibility characters exactly; it is never applied as an
+implicit baseline operation.
 
 `trim` and `collapse-whitespace` use one fixed set of Unicode whitespace characters: U+0009, U+000A,
 U+000B, U+000C, U+000D, U+0020, U+0085, U+00A0, U+1680, U+2000 through U+200A, U+2028, U+2029,
@@ -116,6 +122,35 @@ that names the affected paths explicitly.
 
 Bundle v1 does not define semantic similarity, edit-distance acceptance, fuzzy row matching, or an
 LLM judge. A missing or duplicate array key must not be silently paired with an arbitrary element.
+
+#### Absence and field denominators
+
+Field-level `total`, `matched`, `missed`, `fabricated`, and `wrong` use the following rules after
+applying declared normalization:
+
+| Truth value | Actual value | Outcome | Field `total` |
+| --- | --- | --- | --- |
+| `null` | `null` | no mismatch; not `matched` | do not increment |
+| `null` | present scalar | `fabricated` | increment once |
+| present scalar | `null` | `missed` | increment once |
+| present scalar | present scalar | `matched` or `wrong` | increment once |
+| missing path | any | preflight failure for truth, or `comparison_error` for output | do not treat as a normal field value |
+
+An empty string, number `0`, and boolean `false` are present values. A string that becomes empty
+after normalization remains a present string. Different JSON scalar types are `wrong`; they are not
+coerced.
+
+Array membership and field denominators are separate:
+
+- every truth element absent from output increments array `missing` once as `missing_item`;
+- for that missing element, only truth-side non-`null` entries explicitly listed in `fields[]`
+  increment their field `missed` and `total`;
+- every output element absent from truth increments array `extra` once as `extra_item`;
+- for that extra element, only actual-side non-`null` entries explicitly listed in `fields[]`
+  increment their field `fabricated` and `total`;
+- `null` fields inside missing or extra elements do not enter a field denominator;
+- the alignment `key` belongs to membership accounting and key-critical gates. It enters ordinary
+  field accounting only when the same pointer is also explicitly listed in `fields[]`.
 
 #### Comparison pointer language
 
