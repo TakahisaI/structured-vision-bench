@@ -178,7 +178,7 @@ async function readJsonFile(file: string, label: string): Promise<JsonValue> {
   try {
     info = await stat(file);
   } catch {
-    throw new BundleValidationError("json_file_missing", `${label} is missing");
+    throw new BundleValidationError("json_file_missing", `${label} is missing`);
   }
   if (info.size > MAX_JSON_BYTES) {
     throw new BundleValidationError("json_file_too_large", `${label} exceeds the 4 MiB limit`);
@@ -188,7 +188,7 @@ async function readJsonFile(file: string, label: string): Promise<JsonValue> {
   try {
     source = await readFile(file, "utf8");
   } catch {
-    throw new BundleValidationError("json_file_unreadable", `${label} could not be read");
+    throw new BundleValidationError("json_file_unreadable", `${label} could not be read`);
   }
   try {
     return parseJson(source, label);
