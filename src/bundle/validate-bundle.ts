@@ -37,8 +37,10 @@ export async function validateBundle(
 ): Promise<BundleValidationResult> {
   await assertBundleRoot(bundleDirectory);
   const root = await realpath(bundleDirectory);
+  const manifestPath = path.join(root, MANIFEST_NAME);
+  await assertManifestFile(manifestPath);
 
-  const manifest = await readJsonFile(path.join(root, MANIFEST_NAME), MANIFEST_NAME);
+  const manifest = await readJsonFile(manifestPath, MANIFEST_NAME);
   const contractSchema = await readJsonFile(contractSchemaPath, "bundle v1 schema");
   const schemaIssues = validateJsonSchema(contractSchema, manifest);
   if (schemaIssues.length > 0) {
@@ -65,7 +67,6 @@ export async function validateBundle(
       throw new BundleValidationError(
         "digest_mismatch",
         `${label} digest does not match bundle.json`,
-        [`${reference.path}: expected ${reference.sha256}, received ${digest}`],
       );
     }
   }
@@ -103,6 +104,21 @@ async function assertBundleRoot(bundleDirectory: string): Promise<void> {
   }
 }
 
+async function assertManifestFile(manifestPath: string): Promise<void> {
+  let info;
+  try {
+    info = await lstat(manifestPath);
+  } catch {
+    throw new BundleValidationError("bundle_manifest_missing", "bundle.json is missing");
+  }
+  if (info.isSymbolicLink()) {
+    throw new BundleValidationError("bundle_manifest_symlink", "bundle.json must not be a symlink");
+  }
+  if (!info.isFile()) {
+    throw new BundleValidationError("bundle_manifest_not_regular", "bundle.json must be a regular file");
+  }
+}
+
 function collectReferences(inputs: Record<string, JsonValue>): [string, FileReference][] {
   const keys = ["image", "schema", "system", "instruction", "truth"];
   const references: [string, FileReference][] = [];
@@ -132,44 +148,41 @@ async function resolveReferencedFile(root: string, manifestPath: string, label: 
   try {
     info = await lstat(absolute);
   } catch {
-    throw new BundleValidationError("referenced_file_missing", `${label} is missing`, [manifestPath]);
+    throw new BundleValidationError("referenced_file_missing", `${label} is missing`);
   }
   if (info.isSymbolicLink()) {
-    throw new BundleValidationError("referenced_file_symlink", `${label} must not be a symlink`, [
-      manifestPath,
-    ]);
+    throw new BundleValidationError("referenced_file_symlink", `${label} must not be a symlink`);
   }
   if (!info.isFile()) {
-    throw new BundleValidationError("referenced_file_not_regular", `${label} must be a regular file`, [
-      manifestPath,
-    ]);
+    throw new BundleValidationError("referenced_file_not_regular", `${label} must be a regular file`);
   }
 
   const canonical = await realpath(absolute);
   const relative = path.relative(root, canonical);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new BundleValidationError("referenced_file_outside_bundle", `${label} resolves outside bundle`, [
-      manifestPath,
-    ]);
+  const outsideRoot =
+    relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+  if (outsideRoot) {
+    throw new BundleValidationError(
+      "referenced_file_outside_bundle",
+      `${label} resolves outside bundle`,
+    );
   }
   return canonical;
 }
 
 function assertSafeRelativePath(value: string, label: string): void {
   if (value.length === 0 || value.includes("\\") || value.includes("\0")) {
-    throw new BundleValidationError("unsafe_reference_path", `${label} has an unsafe path`, [value]);
+    throw new BundleValidationError("unsafe_reference_path", `${label} has an unsafe path`);
   }
   if (path.posix.isAbsolute(value)) {
-    throw new BundleValidationError("unsafe_reference_path", `${label} must use a relative path`, [value]);
+    throw new BundleValidationError("unsafe_reference_path", `${label} must use a relative path`);
   }
   const segments = value.split("/");
   if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
-    throw new BundleValidationError("unsafe_reference_path", `${label} has an unsafe path segment`, [
-      value,
-    ]);
+    throw new BundleValidationError("unsafe_reference_path", `${label} has an unsafe path segment`);
   }
   if (path.posix.normalize(value) !== value) {
-    throw new BundleValidationError("unsafe_reference_path", `${label} path must be normalized`, [value]);
+    throw new BundleValidationError("unsafe_reference_path", `${label} path must be normalized`);
   }
 }
 
