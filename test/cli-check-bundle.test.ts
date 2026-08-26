@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { access, chmod, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -108,6 +109,108 @@ test("comparison contract failures keep pointer values out of the whole summary"
   });
 });
 
+test("keeps duplicate-member diagnostics fixed and bounded", async () => {
+  await runCli(async (cli) => {
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-"));
+    try {
+      const marker = "/tmp/SYNTHETIC_PRIVATE_PATH";
+      const source = `{"bundleVersion":1,"${marker}":1,"${marker}":2}`;
+      await writeFile(path.join(temporary, "bundle.json"), source, "utf8");
+
+      for (const flags of [["--json"], []]) {
+        const result = spawnSync(process.execPath, [cli, temporary, ...flags], {
+          encoding: "utf8",
+        });
+        assert.equal(result.status, 1);
+        const rendered = `${result.stdout}${result.stderr}`;
+        assert.ok(rendered.length < 2_000, "JSON diagnostics must stay bounded");
+        assert.ok(!rendered.includes(marker), "duplicate member names must not be echoed");
+        if (flags.length > 0) {
+          const summary = JSON.parse(result.stdout) as {
+            error: { code: string; message: string; details: string[] };
+          };
+          assert.equal(summary.error.code, "json_file_invalid");
+          assert.ok(summary.error.message.includes("invalid"));
+        }
+      }
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+});
+
+test("keeps a maximum-size overflow number out of CLI diagnostics", async () => {
+  await runCli(async (cli) => {
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-"));
+    try {
+      const prefix = '{"bundleVersion":1,"overflow":';
+      const suffix = "}";
+      const literal = `1${"0".repeat(4 * 1024 * 1024 - Buffer.byteLength(prefix) - suffix.length - 1)}`;
+      await writeFile(path.join(temporary, "bundle.json"), `${prefix}${literal}${suffix}`, "utf8");
+
+      for (const flags of [["--json"], []]) {
+        const result = spawnSync(process.execPath, [cli, temporary, ...flags], {
+          encoding: "utf8",
+          maxBuffer: 10_000,
+        });
+        assert.equal(result.status, 1);
+        const rendered = `${result.stdout}${result.stderr}`;
+        assert.ok(rendered.length < 2_000, "overflow diagnostics must stay bounded");
+        if (flags.length > 0) {
+          const summary = JSON.parse(result.stdout) as {
+            error: { code: string; message: string; details: string[] };
+          };
+          assert.equal(summary.error.code, "json_file_invalid");
+        }
+      }
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+});
+
+test("classifies invalid UTF-8 as input errors at the CLI boundary", async () => {
+  await runCli(async (cli) => {
+    const invalidManifestDirectory = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-"));
+    try {
+      await writeFile(
+        path.join(invalidManifestDirectory, "bundle.json"),
+        Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d]),
+      );
+      assert.equal(
+        runJsonCli(cli, invalidManifestDirectory).error.code,
+        "json_file_invalid",
+      );
+    } finally {
+      await rm(invalidManifestDirectory, { recursive: true, force: true });
+    }
+
+    for (const key of ["schema", "truth", "system", "instruction"] as const) {
+      const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-"));
+      try {
+        await cp(FIXTURE, temporary, { recursive: true });
+        const fileName = key === "schema" || key === "truth" ? `${key}.json` : `${key}.txt`;
+        const bytes = Buffer.from([0x73, 0x79, 0x6e, 0xff, 0x74, 0x68]);
+        await writeFile(path.join(temporary, fileName), bytes);
+        const manifestPath = path.join(temporary, "bundle.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+          inputs: Record<string, { sha256: string }>;
+        };
+        manifest.inputs[key]!.sha256 = createHash("sha256").update(bytes).digest("hex");
+        await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+        const summary = runJsonCli(cli, temporary);
+        assert.equal(
+          summary.error.code,
+          key === "system" || key === "instruction" ? "text_file_invalid" : "json_file_invalid",
+        );
+      } finally {
+        await rm(temporary, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
 test("unexpected runtime errors become internal_error with exit code 2", async () => {
   await runCli(async (cli) => {
     // A valid argument that triggers an unexpected failure inside the
@@ -161,4 +264,14 @@ async function ensureCompiled(): Promise<void> {
 async function runCli(run: (cli: string) => Promise<void>): Promise<void> {
   await ensureCompiled();
   await run(CLI);
+}
+
+function runJsonCli(
+  cli: string,
+  bundle: string,
+): { error: { code: string; message: string; details: string[] } } {
+  const result = spawnSync(process.execPath, [cli, bundle, "--json"], { encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assert.ok(result.stdout.length < 2_000, "CLI diagnostics must stay bounded");
+  return JSON.parse(result.stdout) as { error: { code: string; message: string; details: string[] } };
 }

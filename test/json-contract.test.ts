@@ -23,8 +23,47 @@ test("parseJson rejects duplicate object members", () => {
   assert.deepEqual(parseJson('{"amount":100,"other":200}', "probe"), { amount: 100, other: 200 });
 });
 
+test("decodes escaped strings without skipping the following character", () => {
+  const cases: Array<[string, unknown]> = [
+    ['"\\u0061"', "a"],
+    ['"x\\u0061"', "xa"],
+    ['"\\u0061x"', "ax"],
+    ['{"name":"\\u0061"}', { name: "a" }],
+    ['["\\u0061", "x"]', ["a", "x"]],
+  ];
+
+  for (const [source, expected] of cases) {
+    assert.deepEqual(parseJson(source, "probe"), expected, source);
+  }
+});
+
+test("rejects duplicate object members after decoding escaped names", () => {
+  const duplicateKeys = [
+    '{"a/b":1,"a\\/b":2}',
+    '{"a\\"b":1,"a\\u0022b":2}',
+    '{"a\\\\b":1,"a\\u005Cb":2}',
+    '{"ax":1,"\\u0061x":2}',
+    '{"😀":1,"\\uD83D\\uDE00":2}',
+  ];
+
+  for (const source of duplicateKeys) {
+    assert.throws(
+      () => parseJson(source, "probe"),
+      (error: unknown) =>
+        error instanceof JsonContractError &&
+        error.message === "probe is not valid JSON: contains a duplicate object member",
+      source,
+    );
+  }
+});
+
 test("parseJson rejects numbers outside the binary64 domain", () => {
-  assert.throws(() => parseJson("1e400", "probe")); // would become Infinity
+  assert.throws(
+    () => parseJson("1e400", "probe"),
+    (error: unknown) =>
+      error instanceof JsonContractError &&
+      error.message === "probe is not valid JSON: contains a number outside the binary64 domain",
+  );
   assert.throws(() => parseJson('{"n":-1e400}', "probe"));
   // Large-but-finite integers are allowed; binary64 rounding is the declared
   // v1 semantics and documented in docs/bundle-v1.md.

@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   BundleValidationError,
+  MAX_ERROR_MESSAGE_LENGTH,
   MAX_JSON_BYTES,
   normalizeKeyForComparison,
   validateBundle,
@@ -105,6 +106,33 @@ test("rejects a digest mismatch without echoing digest values", async () => {
     assert.equal(error.code, "digest_mismatch");
     assert.deepEqual(error.details, []);
   });
+});
+
+test("rejects invalid UTF-8 in referenced JSON with a stable validation error", async () => {
+  for (const key of ["schema", "truth"] as const) {
+    await withFixture(async (bundle) => {
+      await replaceInputBytes(bundle, key, Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d]));
+      const error = await captureError(bundle);
+      assert.equal(error.code, "json_file_invalid");
+      assert.ok(error.message.length <= MAX_ERROR_MESSAGE_LENGTH);
+    });
+  }
+});
+
+test("rejects invalid UTF-8 in system and instruction inputs", async () => {
+  for (const key of ["system", "instruction"] as const) {
+    await withFixture(async (bundle) => {
+      await replaceInputBytes(bundle, key, Buffer.from([0x73, 0x79, 0x6e, 0xff, 0x74, 0x68]));
+      const error = await captureError(bundle);
+      assert.equal(error.code, "text_file_invalid");
+      assert.ok(error.message.length <= MAX_ERROR_MESSAGE_LENGTH);
+    });
+  }
+});
+
+test("bounds BundleValidationError messages", () => {
+  const error = new BundleValidationError("synthetic_error", "x".repeat(MAX_ERROR_MESSAGE_LENGTH + 100));
+  assert.equal(error.message.length, MAX_ERROR_MESSAGE_LENGTH);
 });
 
 test("rejects a symlinked input", { skip: process.platform === "win32" }, async () => {
@@ -547,6 +575,20 @@ async function readManifest(bundle: string): Promise<Manifest> {
 
 async function writeManifest(bundle: string, manifest: Manifest): Promise<void> {
   await writeFile(path.join(bundle, "bundle.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
+
+async function replaceInputBytes(
+  bundle: string,
+  key: "schema" | "truth" | "system" | "instruction",
+  bytes: Buffer,
+): Promise<void> {
+  const fileName = key === "schema" || key === "truth" ? `${key}.json` : `${key}.txt`;
+  await writeFile(path.join(bundle, fileName), bytes);
+  const manifest = await readManifest(bundle);
+  const reference = manifest.inputs[key];
+  if (reference === undefined) assert.fail(`fixture is missing inputs.${key}`);
+  reference.sha256 = createHash("sha256").update(bytes).digest("hex");
+  await writeManifest(bundle, manifest);
 }
 
 async function rewriteTruth(bundle: string, mutate: (truth: Truth) => void): Promise<void> {

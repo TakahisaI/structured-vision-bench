@@ -225,7 +225,8 @@ A conforming reader refuses to parse any of the three JSON files above 4 MiB (`4
 | referenced output schema (`inputs.schema`) | 4 MiB | `json_file_too_large` |
 | referenced truth (`inputs.truth`) | 4 MiB | `json_file_too_large` |
 
-Image and text inputs have no size limit at this layer; their bytes are verified by digest only.
+Image and text inputs have no size limit at this layer. Image bytes are verified by digest; text
+bytes are verified by digest and strict UTF-8 decoding.
 Raising or lowering a limit changes machine behavior and requires a new `bundleVersion`.
 
 ## Byte-exactness contract
@@ -273,7 +274,8 @@ A conforming implementation validates in this order:
 3. The manifest conforms to bundle v1 and uses a known version.
 4. Every reference passes path and regular-file checks.
 5. Every referenced digest matches.
-6. Referenced schema and optional truth files parse as JSON.
+6. Referenced schema and optional truth files parse as JSON; `system.txt` and `instruction.txt`
+   decode as strict UTF-8.
 7. Runner-specific or provider-specific checks occur only after bundle preflight succeeds.
 
 A failed preflight must not call a provider.

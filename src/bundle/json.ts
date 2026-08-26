@@ -81,27 +81,70 @@ function scanJsonContract(source: string, label: string): void {
 
   function scanString(): string {
     position += 1; // opening quote
-    while (position < length && source[position] !== '"') {
-      const code = source.charCodeAt(position);
-      if (code < 0x20) fail("unescaped control character in string");
-      if (code === 0x5c) {
+    let value = "";
+    while (position < length) {
+      const character = source[position]!;
+      if (character === '"') {
         position += 1;
-        const escape = source[position];
-        if (escape === "u") {
-          position += 1;
-          for (let digit = 0; digit < 4; digit += 1) {
-            if (!/[0-9a-fA-F]/u.test(source[position] ?? "")) fail("invalid \\u escape");
-            position += 1;
-          }
-        } else if (!JSON_STRING_ESCAPE.test(escape ?? "")) {
-          fail("invalid escape sequence");
-        }
+        return value;
       }
+      const code = character.charCodeAt(0);
+      if (code < 0x20) fail("unescaped control character in string");
+      if (character !== "\\") {
+        value += character;
+        position += 1;
+        continue;
+      }
+
+      position += 1;
+      const escape = source[position];
+      if (escape === undefined) fail("unterminated string");
+      if (escape === "u") {
+        value += scanUnicodeEscape();
+        continue;
+      }
+      if (!JSON_STRING_ESCAPE.test(escape)) fail("invalid escape sequence");
+      value += decodeSimpleEscape(escape);
       position += 1;
     }
-    if (source[position] !== '"') fail("unterminated string");
-    position += 1;
-    return "";
+    fail("unterminated string");
+  }
+
+  function scanUnicodeEscape(): string {
+    position += 1; // the "u" in the escape
+    let codePoint = 0;
+    for (let digit = 0; digit < 4; digit += 1) {
+      const character = source[position];
+      if (character === undefined || !/[0-9a-fA-F]/u.test(character)) {
+        fail("invalid \\u escape");
+      }
+      codePoint = codePoint * 16 + Number.parseInt(character, 16);
+      position += 1;
+    }
+    return String.fromCharCode(codePoint);
+  }
+
+  function decodeSimpleEscape(escape: string): string {
+    switch (escape) {
+      case '"':
+        return '"';
+      case "\\":
+        return "\\";
+      case "/":
+        return "/";
+      case "b":
+        return "\b";
+      case "f":
+        return "\f";
+      case "n":
+        return "\n";
+      case "r":
+        return "\r";
+      case "t":
+        return "\t";
+      default:
+        fail("invalid escape sequence");
+    }
   }
 
   function scanNumber(): void {
@@ -127,7 +170,7 @@ function scanJsonContract(source: string, label: string): void {
       while (JSON_DIGIT.test(source[position] ?? "")) position += 1;
     }
     if (!Number.isFinite(Number(source.slice(start, position)))) {
-      fail(`number ${source.slice(start, position)} overflows the binary64 domain`);
+      fail("contains a number outside the binary64 domain");
     }
   }
 
@@ -166,10 +209,8 @@ function scanJsonContract(source: string, label: string): void {
     for (;;) {
       skipWhitespace();
       if (source[position] !== '"') fail("expected object key");
-      const keyStart = position;
-      scanString();
-      const key = source.slice(keyStart, position);
-      if (members.has(key)) fail(`duplicate object member ${key}`);
+      const key = scanString();
+      if (members.has(key)) fail("contains a duplicate object member");
       members.add(key);
       skipWhitespace();
       if (source[position] !== ":") fail('expected ":"');

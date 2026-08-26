@@ -8,6 +8,10 @@ import { validateJsonSchema } from "./schema-validator.js";
 
 const MANIFEST_NAME = "bundle.json";
 export const MAX_JSON_BYTES = 4 * 1024 * 1024;
+export const MAX_ERROR_MESSAGE_LENGTH = 240;
+const MAX_DETAIL_MESSAGES = 20;
+const MAX_DETAIL_LENGTH = 240;
+const UTF8_TEXT_INPUT_LABELS = new Set(["inputs.system", "inputs.instruction"]);
 
 type FileReference = {
   path: string;
@@ -25,10 +29,10 @@ export class BundleValidationError extends Error {
   readonly details: string[];
 
   constructor(code: string, message: string, details: string[] = []) {
-    super(message);
+    super(truncateText(message, MAX_ERROR_MESSAGE_LENGTH));
     this.name = "BundleValidationError";
     this.code = code;
-    this.details = details;
+    this.details = boundDetails(details);
   }
 }
 
@@ -82,13 +86,15 @@ export async function validateBundle(
         `${label} digest does not match bundle.json`,
       );
     }
+    if (UTF8_TEXT_INPUT_LABELS.has(label)) await assertUtf8File(absolute, label);
   }
 
+  const schemaReference = requireReference(inputs, "schema");
   await readVerifiedJson(
     root,
-    requireReference(inputs, "schema").path,
+    schemaReference.path,
     "inputs.schema",
-    digestsByPath,
+    schemaReference.sha256,
   );
   if (Object.hasOwn(inputs, "truth")) {
     const truthReference = requireReference(inputs, "truth");
@@ -96,7 +102,7 @@ export async function validateBundle(
       root,
       truthReference.path,
       "inputs.truth",
-      digestsByPath,
+      truthReference.sha256,
     );
     assertTruthProjection(manifest.comparison ?? null, truth);
   }
@@ -118,13 +124,12 @@ async function readVerifiedJson(
   root: string,
   manifestPath: string,
   label: string,
-  digestsByPath: Map<string, string>,
+  expectedDigest: string,
 ): Promise<{ value: JsonValue; bytes: Buffer }> {
   const absolute = await resolveReferencedFile(root, manifestPath, label);
-  const expectedDigest = digestsByPath.get(absolute);
   const result = await readJsonFile(absolute, label, MAX_JSON_BYTES);
   const actualDigest = createHash("sha256").update(result.bytes).digest("hex");
-  if (expectedDigest !== undefined && actualDigest !== expectedDigest) {
+  if (actualDigest !== expectedDigest) {
     throw new BundleValidationError(
       "digest_mismatch",
       `${label} changed after preflight digest verification`,
@@ -257,14 +262,33 @@ async function readJsonFile(
     throw new BundleValidationError("json_file_unreadable", `${label} could not be read`);
   }
 
-  const source = decodeUtf8Strict(bytes, label);
   try {
+    const source = decodeUtf8Strict(bytes, label);
     return { value: parseJson(source, label), bytes };
+  } catch {
+    throw new BundleValidationError("json_file_invalid", `${label} is invalid`);
+  }
+}
+
+async function assertUtf8File(file: string, label: string): Promise<void> {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  try {
+    const stream = createReadStream(file);
+    for await (const chunk of stream) {
+      try {
+        decoder.decode(chunk, { stream: true });
+      } catch {
+        throw new BundleValidationError("text_file_invalid", `${label} is not valid UTF-8`);
+      }
+    }
+    try {
+      decoder.decode();
+    } catch {
+      throw new BundleValidationError("text_file_invalid", `${label} is not valid UTF-8`);
+    }
   } catch (error) {
-    throw new BundleValidationError(
-      "json_file_invalid",
-      error instanceof Error ? error.message : `${label} is invalid`,
-    );
+    if (error instanceof BundleValidationError) throw error;
+    throw new BundleValidationError("text_file_unreadable", `${label} could not be read`);
   }
 }
 
@@ -289,9 +313,6 @@ async function sha256File(file: string): Promise<string> {
 // logs. Details are capped in count and per-message length; omitted entries
 // are summarized instead of printed.
 
-const MAX_DETAIL_MESSAGES = 20;
-const MAX_DETAIL_LENGTH = 240;
-
 export function boundDetails(details: string[]): string[] {
   const bounded = details.slice(0, MAX_DETAIL_MESSAGES).map((detail) => truncateDetail(detail));
   const omitted = details.length - bounded.length;
@@ -300,7 +321,11 @@ export function boundDetails(details: string[]): string[] {
 }
 
 function truncateDetail(detail: string): string {
-  return detail.length <= MAX_DETAIL_LENGTH ? detail : `${detail.slice(0, MAX_DETAIL_LENGTH)}…`;
+  return truncateText(detail, MAX_DETAIL_LENGTH);
+}
+
+function truncateText(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
 }
 
 // --- Comparison path contract ------------------------------------------------
