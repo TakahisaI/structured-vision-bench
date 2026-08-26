@@ -342,15 +342,16 @@ function truthContractError(message: string): BundleValidationError {
 }
 
 // Normalization used for key uniqueness and empty-key checks. Order is fixed
-// regardless of declaration order; each operation applies at most once. The
-// whitespace set matches docs/bundle-v1.md exactly.
+// regardless of declaration order; each enabled operation applies at most once.
+// The whitespace set matches docs/bundle-v1.md exactly.
 const UNICODE_WHITESPACE = /[\u0009\u000A\u000B\u000C\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/gu;
 
 export function normalizeKeyForComparison(value: string, operations: JsonValue): string {
-  let normalized = value.normalize("NFKC");
   const ops = Array.isArray(operations)
     ? operations.filter((item): item is string => typeof item === "string")
     : [];
+  let normalized = value;
+  if (ops.includes("nfkc")) normalized = normalized.normalize("NFKC");
   if (ops.includes("trim")) normalized = trimWhitespace(normalized);
   if (ops.includes("collapse-whitespace")) normalized = collapseWhitespace(normalized);
   return normalized;
@@ -486,6 +487,11 @@ export function assertTruthProjection(comparison: JsonValue, truth: JsonValue): 
             `inputs.truth element ${elementIndex} of declared array ${entryIndex} is missing compared field ${fieldIndex}`,
           );
         }
+        if (fieldValue !== null && typeof fieldValue === "object") {
+          throw truthContractError(
+            `inputs.truth compared field ${fieldIndex} of element ${elementIndex} in declared array ${entryIndex} must be a JSON scalar or null`,
+          );
+        }
       }
     }
   }
@@ -511,7 +517,7 @@ function resolvePointer(root: JsonValue, segments: string[]): JsonValue | typeof
       current = current[index]!;
       continue;
     }
-    if (isJsonObject(current) && segment in current) {
+    if (isJsonObject(current) && Object.hasOwn(current, segment)) {
       current = current[segment]!;
       continue;
     }
@@ -531,7 +537,11 @@ function collectPointerList(value: JsonValue): string[] {
 function splitWildcardField(pointer: string): [string, string] | undefined {
   const segments = pointer.split("/");
   const wildcardIndex = segments.indexOf("*");
-  if (wildcardIndex < 1 || wildcardIndex !== segments.length - 2 || segments.lastIndexOf("*") !== wildcardIndex) {
+  if (
+    wildcardIndex < 1 ||
+    wildcardIndex !== segments.length - 2 ||
+    segments.lastIndexOf("*") !== wildcardIndex
+  ) {
     return undefined;
   }
   const arrayPath = segments.slice(0, wildcardIndex).join("/");
