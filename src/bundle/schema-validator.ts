@@ -7,6 +7,13 @@ export type SchemaIssue = {
   message: string;
 };
 
+// RFC 6901 array indices are "0" or digits without a leading zero.
+const ARRAY_INDEX_PATTERN = /^(?:0|[1-9][0-9]*)$/u;
+
+// Cap on collected issues so a hostile document cannot exhaust memory through
+// quadratic uniqueItems comparisons before boundedDetails runs.
+const MAX_ISSUES = 200;
+
 export function validateJsonSchema(schema: JsonValue, value: JsonValue): SchemaIssue[] {
   const issues: SchemaIssue[] = [];
   validateNode(schema, value, "$", issues, schema);
@@ -22,12 +29,14 @@ function resolveLocalRef(rootSchema: JsonValue, ref: string): JsonValue | undefi
   for (const rawSegment of pointer.slice(1).split("/")) {
     const segment = rawSegment.replace(/~1/gu, "/").replace(/~0/gu, "~");
     if (Array.isArray(current)) {
+      if (!ARRAY_INDEX_PATTERN.test(segment)) return undefined;
       const index = Number(segment);
-      if (!Number.isInteger(index) || index < 0 || index >= current.length) return undefined;
+      if (index >= current.length) return undefined;
       current = current[index]!;
       continue;
     }
-    if (isJsonObject(current) && segment in current) {
+    // hasOwn keeps inherited members out of $ref resolution.
+    if (isJsonObject(current) && Object.hasOwn(current, segment)) {
       current = current[segment]!;
       continue;
     }
@@ -52,7 +61,7 @@ function validateNode(
   // Draft 2020-12 allows $ref alongside sibling keywords; both must hold. Only
   // local "#/..." references are supported, which is all the bundled contract
   // schema uses.
-  if ("$ref" in schema && typeof schema.$ref === "string" && rootSchema !== undefined) {
+  if (Object.hasOwn(schema, "$ref") && typeof schema.$ref === "string" && rootSchema !== undefined) {
     const resolved = resolveLocalRef(rootSchema, schema.$ref);
     if (resolved === undefined) {
       issues.push({ path, message: `unresolvable schema $ref ${schema.$ref}` });
@@ -61,7 +70,7 @@ function validateNode(
     validateNode(resolved, value, path, issues, rootSchema);
   }
 
-  if ("const" in schema && !isDeepStrictEqual(value, schema.const)) {
+  if (Object.hasOwn(schema, "const") && !isDeepStrictEqual(value, schema.const)) {
     issues.push({ path, message: `must equal ${JSON.stringify(schema.const)}` });
     return;
   }
@@ -76,6 +85,8 @@ function validateNode(
     issues.push({ path, message: `must be ${type}` });
     return;
   }
+
+  if (issueBudgetExceeded(issues)) return;
 
   const root = rootSchema ?? schema;
   if (type === "object" && isJsonObject(value)) validateObject(schema, value, path, issues, root);
@@ -97,14 +108,16 @@ function validateObject(
     ? schema.required.filter((item): item is string => typeof item === "string")
     : [];
   for (const key of required) {
-    if (!(key in value)) issues.push({ path: `${path}.${key}`, message: "is required" });
+    if (!Object.hasOwn(value, key)) issues.push({ path: `${path}.${key}`, message: "is required" });
   }
 
   const properties = isJsonObject(schema.properties) ? schema.properties : {};
   let disallowedCount = 0;
   let firstDisallowedPath: string | undefined;
   for (const [key, child] of Object.entries(value)) {
-    const childSchema = properties[key];
+    // properties lookup is own-property only, so "__proto__" cannot resolve to
+    // Object.prototype and bypass additionalProperties: false.
+    const childSchema = Object.hasOwn(properties, key) ? properties[key] : undefined;
     if (childSchema !== undefined) {
       validateNode(childSchema, child, `${path}.${key}`, issues, rootSchema);
       continue;
@@ -142,19 +155,31 @@ function validateArray(
     issues.push({ path, message: `must contain at most ${schema.maxItems} items` });
   }
   if (schema.uniqueItems === true) {
-    for (let index = 0; index < value.length; index += 1) {
-      for (let other = index + 1; other < value.length; other += 1) {
-        if (isDeepStrictEqual(value[index], value[other])) {
-          issues.push({ path: `${path}[${other}]`, message: "must be unique" });
-        }
+    // Linear scan with a Set of serialized items; JSON.stringify is injective
+    // enough for duplicate detection here because JSON.parse cannot produce
+    // undefined or non-numeric-keyed objects.
+    const seen = new Map<string, number>();
+    for (const [index, item] of value.entries()) {
+      const encoded = JSON.stringify(item);
+      const firstIndex = seen.get(encoded);
+      if (firstIndex !== undefined) {
+        issues.push({ path: `${path}[${index}]`, message: "must be unique" });
+        if (issues.length >= MAX_ISSUES) return;
+        continue;
       }
+      seen.set(encoded, index);
     }
   }
   if (schema.items !== undefined) {
-    value.forEach((item, index) =>
-      validateNode(schema.items!, item, `${path}[${index}]`, issues, rootSchema),
-    );
+    for (const [index, item] of value.entries()) {
+      validateNode(schema.items!, item, `${path}[${index}]`, issues, rootSchema);
+      if (issues.length >= MAX_ISSUES) return;
+    }
   }
+}
+
+function issueBudgetExceeded(issues: SchemaIssue[]): boolean {
+  return issues.length >= MAX_ISSUES;
 }
 
 // JSON Schema measures string lengths in Unicode code points, not UTF-16 code

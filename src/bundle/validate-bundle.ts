@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
@@ -78,7 +79,7 @@ export async function validateBundle(
     "inputs.schema",
     MAX_JSON_BYTES,
   );
-  if ("truth" in inputs) {
+  if (Object.hasOwn(inputs, "truth")) {
     const truth = await readJsonFile(
       await resolveReferencedFile(root, requireReference(inputs, "truth").path, "inputs.truth"),
       "inputs.truth",
@@ -128,7 +129,7 @@ function collectReferences(inputs: Record<string, JsonValue>): [string, FileRefe
   const keys = ["image", "schema", "system", "instruction", "truth"];
   const references: [string, FileReference][] = [];
   for (const key of keys) {
-    if (!(key in inputs)) continue;
+    if (!Object.hasOwn(inputs, key)) continue;
     references.push([`inputs.${key}`, requireReference(inputs, key)]);
   }
   return references;
@@ -227,8 +228,14 @@ function formatLimit(maxBytes: number): string {
 }
 
 async function sha256File(file: string): Promise<string> {
-  const content = await readFile(file);
-  return createHash("sha256").update(content).digest("hex");
+  // Stream the file so a huge image or PDF cannot exhaust memory during digest
+  // verification.
+  const hash = createHash("sha256");
+  const stream = createReadStream(file);
+  for await (const chunk of stream) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
 }
 
 // --- Bounded diagnostics ----------------------------------------------------
@@ -341,9 +348,10 @@ function truthContractError(message: string): BundleValidationError {
   return new BundleValidationError("truth_contract_invalid", message);
 }
 
-// Normalization used for key uniqueness and empty-key checks. Order is fixed
-// regardless of declaration order; each enabled operation applies at most once.
-// The whitespace set matches docs/bundle-v1.md exactly.
+// Normalization used for key uniqueness and empty-key checks. Canonical fixed
+// order is nfkc -> trim -> collapse-whitespace regardless of declaration
+// order; each enabled operation applies at most once. The whitespace set
+// matches docs/bundle-v1.md exactly.
 const UNICODE_WHITESPACE = /[\u0009\u000A\u000B\u000C\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/gu;
 
 export function normalizeKeyForComparison(value: string, operations: JsonValue): string {
@@ -487,6 +495,8 @@ export function assertTruthProjection(comparison: JsonValue, truth: JsonValue): 
             `inputs.truth element ${elementIndex} of declared array ${entryIndex} is missing compared field ${fieldIndex}`,
           );
         }
+        // Projected fields follow the same rule as projected scalars: JSON
+        // scalar or explicit null, never an object or array.
         if (fieldValue !== null && typeof fieldValue === "object") {
           throw truthContractError(
             `inputs.truth compared field ${fieldIndex} of element ${elementIndex} in declared array ${entryIndex} must be a JSON scalar or null`,
@@ -498,6 +508,10 @@ export function assertTruthProjection(comparison: JsonValue, truth: JsonValue): 
 }
 
 const NOT_FOUND = Symbol("pointer-not-found");
+
+// RFC 6901 array indices are "0" or digits without a leading zero. "01", "1e0",
+// and "+1" name object members, never array elements.
+const ARRAY_INDEX_PATTERN = /^(?:0|[1-9][0-9]*)$/u;
 
 /** Decodes RFC 6901 escape sequences; "~2" stays invalid per the schema patterns. */
 function decodePointerSegments(pointer: string): string[] {
@@ -512,11 +526,14 @@ function resolvePointer(root: JsonValue, segments: string[]): JsonValue | typeof
   let current: JsonValue = root;
   for (const segment of segments) {
     if (Array.isArray(current)) {
+      if (!ARRAY_INDEX_PATTERN.test(segment)) return NOT_FOUND;
       const index = Number(segment);
-      if (!Number.isInteger(index) || index < 0 || index >= current.length) return NOT_FOUND;
+      if (index >= current.length) return NOT_FOUND;
       current = current[index]!;
       continue;
     }
+    // hasOwn keeps inherited members (constructor, toString, __proto__) out of
+    // pointer resolution; only owned JSON values are reachable.
     if (isJsonObject(current) && Object.hasOwn(current, segment)) {
       current = current[segment]!;
       continue;

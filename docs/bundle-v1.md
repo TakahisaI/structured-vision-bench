@@ -120,6 +120,34 @@ fabricated value, not a match. Bundle v1 defines no other normalization — no c
 stripping. A consumer that needs formatted-number normalization must wait for a new `bundleVersion`
 that names the affected paths explicitly.
 
+### Absence and denominator semantics
+
+Comparison outcomes for a scalar or matched-item field are fixed by this table:
+
+| truth | actual | outcome | counts toward field `total` |
+| --- | --- | --- | --- |
+| `null` | `null` | no mismatch, but not `matched` | no |
+| `null` | present scalar | `fabricated` | yes |
+| present scalar | `null` | `missed` | yes |
+| present scalar | present scalar | `matched` or `wrong` | yes |
+| missing path on either side | any | truth preflight failure (`truth_contract_invalid`) or comparison error — never an ordinary field outcome | no |
+
+Empty string, `0`, and `false` are present values; a string that normalizes to empty remains
+present and never becomes `null`. This keeps blank-on-both-sides fields from inflating accuracy
+while making fabricated and missed values observable.
+
+For missing and extra array items:
+
+- every `missing_item` increments the array membership `missing` count;
+- for a missing item, only non-`null` truth values listed in that array's `fields[]` increment
+  field-level `missed` / `total`;
+- every `extra_item` increments the array membership `extra` count;
+- for an extra item, only non-`null` actual values listed in that array's `fields[]` increment
+  field-level `fabricated` / `total`;
+- `null` fields and the alignment key are never silently added to the ordinary field denominator;
+  the alignment key contributes to membership/alignment only, unless it is also explicitly listed
+  in `fields[]`.
+
 Bundle v1 does not define semantic similarity, edit-distance acceptance, fuzzy row matching, or an
 LLM judge. A missing or duplicate array key must not be silently paired with an arbitrary element.
 
@@ -183,10 +211,12 @@ following are critical failures:
 - duplicate keys — including duplicates that appear only after normalization.
 
 A wildcard critical entry naming any other declared field
-(`<array-path>/*/<field>`) marks only wrong values of that field on already-paired elements as
-critical. By itself it does not make element surplus or shortage critical. A consumer that treats
-line-item surplus or shortage as a hard gate must declare `<array-path>/*/<key>` in `critical` for
-that document kind.
+(`<array-path>/*/<field>`) marks every field mismatch on already-paired items as critical —
+including `missed` (truth value present, actual `null`) and `fabricated` (truth `null`, actual
+present), not only `wrong`. By itself it does not make element surplus or shortage critical. An
+unresolved critical path is a comparison failure and, for critical entries, a hard-gate failure; it
+is never silently converted to an ordinary value. A consumer that treats line-item surplus or
+shortage as a hard gate must declare `<array-path>/*/<key>` in `critical` for that document kind.
 
 The schema rejects syntax violations. Cross-field rules — duplicate array paths, scalars that
 duplicate an array path, and critical entries referencing undeclared arrays or un-compared fields —

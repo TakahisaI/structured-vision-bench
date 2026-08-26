@@ -22,7 +22,8 @@ A consuming application owns the production extraction request. Its bundle-facin
 Its run-facing settings are separate and never enter a bundle:
 
 - provider route, requested model, effort, and token limit;
-- repeat and retry policy.
+- repeat and retry policy;
+- sanitizer command.
 
 The final contract splits ownership as follows: the **bundle** carries image, schema, system,
 instruction, optional truth, comparison policy, and consumer metadata; **run or suite
@@ -48,6 +49,19 @@ metadata. It will not own application-specific validation.
 A provider accepts the prepared image, instructions, schema, and requested execution metadata. It
 returns a structured document plus metadata that the upstream protocol actually exposes. Missing
 metadata remains unknown.
+
+Two distinct invocation surfaces must not be conflated:
+
+- **Provider-adapter invocation context** (local, never model input): the four extraction inputs,
+  run settings, and a narrowly allowlisted set of bundle/consumer provenance needed for local
+  validation and attempt recording.
+- **Hosted-model payload**: only the prepared image, schema, system preamble, instruction, and the
+  requested model / effort / max tokens.
+
+Case ID, bundle version/digest, source commit, prompt/preprocess version, approval metadata,
+sanitizer metadata, truth, comparison policy or results, and prior attempts are never sent to the
+hosted model. Truth, comparison policy or results, and prior attempts are also never sent to the
+local adapter or sanitizer. The sanitizer command is run/suite configuration, not bundle content.
 
 Providers are transport adapters, not autonomous agents. The Codex app-server provider planned in
 Issue #3 must fail rather than execute tool requests, shell commands, workspace reads, or approval

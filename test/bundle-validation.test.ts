@@ -16,7 +16,8 @@ const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
 
 type FileReference = { path: string; sha256: string };
 
-type Truth = Record<string, any>;
+// deno-lint-ignore no-explicit-any
+type Truth = { [key: string]: any; lines: any[]; constructor?: unknown };
 
 type Manifest = {
   bundleVersion: number;
@@ -341,7 +342,7 @@ test("validates the truth projection during preflight", async () => {
 
   await withFixture(async (bundle) => {
     await rewriteTruth(bundle, (truth) => {
-      truth.lines = { notAnArray: true };
+      (truth as Record<string, unknown>).lines = { notAnArray: true };
     });
     await expectCode(bundle, "truth_contract_invalid");
   });
@@ -351,6 +352,75 @@ test("validates the truth projection during preflight", async () => {
     await rewriteTruth(bundle, (truth) => {
       truth.lines[0].description = null;
     });
+    const result = await validateBundle(bundle);
+    assert.equal(result.caseId, "synthetic-invoice-basic");
+  });
+
+  await withFixture(async (bundle) => {
+    // Projected fields must be JSON scalars or null, never objects or arrays.
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines[0].amount = { synthetic: 100 };
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines[0].amount = [100];
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    // A projected scalar may also be an object? No — same rule as fields.
+    await rewriteTruth(bundle, (truth) => {
+      truth.invoiceNumber = { value: "INV" };
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    // Inherited members are not reachable through pointers: "/constructor"
+    // must fail even though every object inherits it.
+    const manifest = await readManifest(bundle);
+    manifest.comparison.scalars = [...(manifest.comparison.scalars as string[]), "/constructor"];
+    await writeManifest(bundle, manifest);
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    // An explicitly owned "constructor" JSON field is a normal property and
+    // resolves fine.
+    const manifest = await readManifest(bundle);
+    manifest.comparison.scalars = [...(manifest.comparison.scalars as string[]), "/constructor"];
+    await writeManifest(bundle, manifest);
+    await rewriteTruth(bundle, (truth) => {
+      truth.constructor = "owned-json-value" as unknown as undefined;
+    });
+    const result = await validateBundle(bundle);
+    assert.equal(result.caseId, "synthetic-invoice-basic");
+  });
+
+  await withFixture(async (bundle) => {
+    // RFC 6901 array indices: "01" is NOT element 1 — non-canonical indices
+    // never resolve against arrays, so the declared scalar cannot be found.
+    const manifest = await readManifest(bundle);
+    manifest.comparison.scalars = [
+      ...(manifest.comparison.scalars as string[]),
+      "/lines/01/amount",
+    ];
+    await writeManifest(bundle, manifest);
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    // The canonical index "1" still resolves normally.
+    const manifest = await readManifest(bundle);
+    manifest.comparison.scalars = [
+      ...(manifest.comparison.scalars as string[]),
+      "/lines/1/amount",
+    ];
+    await writeManifest(bundle, manifest);
     const result = await validateBundle(bundle);
     assert.equal(result.caseId, "synthetic-invoice-basic");
   });
@@ -380,6 +450,58 @@ test("normalizes keys per the v1 whitespace and order rules", () => {
   assert.equal(normalizeKeyForComparison("  Widget   Alpha\u3000 ", operations), "Widget Alpha");
   assert.equal(normalizeKeyForComparison("１", operations), "1");
   assert.equal(normalizeKeyForComparison("\u00A0\u3000", operations), "");
+});
+
+test("applies only declared normalization operations in canonical order", () => {
+  // Without nfkc, compatibility-distinct strings stay distinct.
+  assert.notEqual(
+    normalizeKeyForComparison("Ａ", []),
+    normalizeKeyForComparison("A", []),
+  );
+  assert.notEqual(
+    normalizeKeyForComparison("Ａ", ["trim"]),
+    normalizeKeyForComparison("A", ["trim"]),
+  );
+  // With nfkc they collide.
+  assert.equal(
+    normalizeKeyForComparison("Ａ", ["nfkc"]),
+    normalizeKeyForComparison("A", ["nfkc"]),
+  );
+  // Canonical fixed order: trim before collapse is irrelevant to the result,
+  // but declaration order never changes it (nfkc first regardless).
+  const reversed = ["collapse-whitespace", "nfkc", "trim"];
+  assert.equal(
+    normalizeKeyForComparison("  \uFF21\u3000B ", reversed),
+    normalizeKeyForComparison("  Ａ B ", ["nfkc", "trim", "collapse-whitespace"]),
+  );
+});
+
+test("rejects truth keys that duplicate only after declared normalization", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.normalization = { strings: [], numbers: "exact" };
+    await writeManifest(bundle, manifest);
+    // Without nfkc, full-width and ASCII digits are distinct keys: valid.
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines[1].lineNo = "１";
+    });
+    const result = await validateBundle(bundle);
+    assert.equal(result.caseId, "synthetic-invoice-basic");
+  });
+
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.normalization = { strings: ["nfkc"], numbers: "exact" };
+    await writeManifest(bundle, manifest);
+    // With nfkc declared, both keys normalize to string "1" and collide.
+    // (Number keys never collide with string keys, so element 0's key must be
+    // a string for the duplicate to fire.)
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines[0].lineNo = "1";
+      truth.lines[1].lineNo = "１";
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
 });
 
 test("rejects a manifest exactly one byte over the size limit", async () => {
