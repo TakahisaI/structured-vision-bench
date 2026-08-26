@@ -79,11 +79,12 @@ export async function validateBundle(
     MAX_JSON_BYTES,
   );
   if ("truth" in inputs) {
-    await readJsonFile(
+    const truth = await readJsonFile(
       await resolveReferencedFile(root, requireReference(inputs, "truth").path, "inputs.truth"),
       "inputs.truth",
       MAX_JSON_BYTES,
     );
+    assertTruthProjection(manifest.comparison ?? null, truth);
   }
 
   return {
@@ -257,11 +258,13 @@ function truncateDetail(detail: string): string {
 //   - Wildcards are allowed only in critical entries, at most one per pointer,
 //     and never as the last segment. "*" inside a segment (for example "/a*b")
 //     is a literal name. scalars and arrays paths are plain pointers.
-//   - A critical entry must be either a declared scalar or
+//   - A critical entry must be either a declared scalar (any nesting depth) or
 //     "<declared-array-path>/*/<field declared by that array>".
 //
 // Syntax-level violations are rejected by the JSON Schema patterns. The checks
 // here enforce the cross-field rules that a static schema cannot express.
+// Diagnostics report positions only — never pointer values, which may carry
+// confidential text.
 
 function comparisonContractError(message: string): BundleValidationError {
   return new BundleValidationError("comparison_contract_invalid", message);
@@ -279,12 +282,14 @@ export function assertComparisonContract(comparison: JsonValue): void {
   const arrayPaths = new Set<string>();
   const fieldsByArrayPath = new Map<string, Set<string>>();
 
-  for (const entry of arrays) {
+  for (const [entryIndex, entry] of arrays.entries()) {
     if (!isJsonObject(entry)) continue;
     const entryPath = entry.path;
     if (typeof entryPath !== "string") continue;
     if (arrayPaths.has(entryPath)) {
-      throw comparisonContractError(`arrays entry declares the same array path twice: ${entryPath}`);
+      throw comparisonContractError(
+        `comparison.arrays[${entryIndex}].path duplicates an earlier array path`,
+      );
     }
     arrayPaths.add(entryPath);
 
@@ -295,39 +300,224 @@ export function assertComparisonContract(comparison: JsonValue): void {
     fieldsByArrayPath.set(entryPath, new Set([...keyFields, ...fields]));
   }
 
-  for (const scalar of scalars) {
+  for (const [scalarIndex, scalar] of scalars.entries()) {
     if (arrayPaths.has(scalar)) {
-      throw comparisonContractError(`scalars entry duplicates a declared array path: ${scalar}`);
+      throw comparisonContractError(
+        `comparison.scalars[${scalarIndex}] duplicates a declared array path`,
+      );
     }
   }
 
   const criticals = collectPointerList(comparison.critical ?? null);
-  for (const critical of criticals) {
+  for (const [criticalIndex, critical] of criticals.entries()) {
     if (fieldsByArrayPath.has(critical)) {
       throw comparisonContractError(
-        `critical entry must select a scalar or an array element field, not the whole array: ${critical}`,
+        `comparison.critical[${criticalIndex}] must select a scalar or an array element field, not the whole array`,
       );
     }
     if (scalarPaths.has(critical)) continue;
     const wildcardField = splitWildcardField(critical);
     if (wildcardField === undefined) {
       throw comparisonContractError(
-        `critical entry must be a declared scalar or "<array>/*/<field>": ${critical}`,
+        `comparison.critical[${criticalIndex}] must be a declared scalar or an "<array>/*/<field>" wildcard pointer`,
       );
     }
     const [arrayPath, field] = wildcardField;
     const fields = fieldsByArrayPath.get(arrayPath);
     if (fields === undefined) {
       throw comparisonContractError(
-        `critical entry uses an undeclared array path: ${critical} (declare "${arrayPath}" in comparison.arrays first)`,
+        `comparison.critical[${criticalIndex}] uses an undeclared array path (declare it in comparison.arrays first)`,
       );
     }
     if (!fields.has(field)) {
       throw comparisonContractError(
-        `critical entry uses a field not compared for its array: ${critical} (add "${field}" to key or fields of "${arrayPath}")`,
+        `comparison.critical[${criticalIndex}] uses a field not compared by its declared array (add it to key or fields there)`,
       );
     }
   }
+}
+
+function truthContractError(message: string): BundleValidationError {
+  return new BundleValidationError("truth_contract_invalid", message);
+}
+
+// Normalization used for key uniqueness and empty-key checks. Order is fixed
+// regardless of declaration order; each operation applies at most once. The
+// whitespace set matches docs/bundle-v1.md exactly.
+const UNICODE_WHITESPACE = /[\u0009\u000A\u000B\u000C\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/gu;
+
+export function normalizeKeyForComparison(value: string, operations: JsonValue): string {
+  let normalized = value.normalize("NFKC");
+  const ops = Array.isArray(operations)
+    ? operations.filter((item): item is string => typeof item === "string")
+    : [];
+  if (ops.includes("trim")) normalized = trimWhitespace(normalized);
+  if (ops.includes("collapse-whitespace")) normalized = collapseWhitespace(normalized);
+  return normalized;
+}
+
+function trimWhitespace(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isUnicodeWhitespace(value[start]!)) start += 1;
+  while (end > start && isUnicodeWhitespace(value[end - 1]!)) end -= 1;
+  return value.slice(start, end);
+}
+
+function collapseWhitespace(value: string): string {
+  let output = "";
+  let inRun = false;
+  for (const character of value) {
+    if (isUnicodeWhitespace(character)) {
+      inRun = true;
+      continue;
+    }
+    if (inRun) {
+      output += " ";
+      inRun = false;
+    }
+    output += character;
+  }
+  if (inRun) output += " ";
+  return output;
+}
+
+function isUnicodeWhitespace(character: string | undefined): boolean {
+  if (character === undefined) return false;
+  UNICODE_WHITESPACE.lastIndex = 0;
+  return UNICODE_WHITESPACE.test(character);
+}
+
+/**
+ * Validates the optional truth file against its projection contract during
+ * preflight: every declared path exists, keys are sound and unique, and
+ * projected fields are present. Violations fail with truth_contract_invalid.
+ */
+export function assertTruthProjection(comparison: JsonValue, truth: JsonValue): void {
+  if (!isJsonObject(comparison)) {
+    // The schema already rejected a malformed manifest; nothing to project.
+    return;
+  }
+  if (!isJsonObject(truth)) {
+    throw truthContractError("inputs.truth root must be an object");
+  }
+
+  for (const [scalarIndex, scalar] of collectPointerList(comparison.scalars ?? null).entries()) {
+    const segments = decodePointerSegments(scalar);
+    const value = resolvePointer(truth, segments);
+    if (value === NOT_FOUND) {
+      throw truthContractError(`inputs.truth is missing declared scalar ${scalarIndex} of comparison.scalars`);
+    }
+    if (value !== null && typeof value === "object") {
+      throw truthContractError(`inputs.truth value at declared scalar ${scalarIndex} must be a JSON scalar or null`);
+    }
+  }
+
+  const arrays = Array.isArray(comparison.arrays) ? comparison.arrays : [];
+  for (const [entryIndex, entry] of arrays.entries()) {
+    if (!isJsonObject(entry)) continue;
+    const arrayPath = entry.path;
+    const keyPointer = entry.key;
+    if (typeof arrayPath !== "string" || typeof keyPointer !== "string") continue;
+
+    const elements = resolvePointer(truth, decodePointerSegments(arrayPath));
+    if (elements === NOT_FOUND) {
+      throw truthContractError(`inputs.truth is missing declared array ${entryIndex} of comparison.arrays`);
+    }
+    if (!Array.isArray(elements)) {
+      throw truthContractError(`inputs.truth value at declared array ${entryIndex} must be an array`);
+    }
+
+    const fieldPointers = Array.isArray(entry.fields)
+      ? entry.fields.filter((field): field is string => typeof field === "string")
+      : [];
+    const normalizedKeys = new Set<string>();
+    const normalization = isJsonObject(comparison.normalization)
+      ? (comparison.normalization.strings ?? [])
+      : [];
+
+    for (const [elementIndex, element] of elements.entries()) {
+      if (!isJsonObject(element)) {
+        throw truthContractError(
+          `inputs.truth element ${elementIndex} of declared array ${entryIndex} must be an object`,
+        );
+      }
+      const keyValue = resolvePointer(element, decodePointerSegments(keyPointer));
+      if (keyValue === NOT_FOUND) {
+        throw truthContractError(
+          `inputs.truth element ${elementIndex} of declared array ${entryIndex} is missing its key`,
+        );
+      }
+      if (typeof keyValue !== "string" && typeof keyValue !== "number") {
+        throw truthContractError(
+          `inputs.truth key of element ${elementIndex} in declared array ${entryIndex} must be a string or number`,
+        );
+      }
+      if (typeof keyValue === "string") {
+        const normalizedKey = normalizeKeyForComparison(keyValue, normalization);
+        if (normalizedKey.length === 0) {
+          throw truthContractError(
+            `inputs.truth string key of element ${elementIndex} in declared array ${entryIndex} is empty after normalization`,
+          );
+        }
+        // Prefix distinguishes a normalized string key from a numeric key with
+        // the same digits: number 1 and string "1" never collide or match.
+        const encodedKey = `s:${normalizedKey}`;
+        if (normalizedKeys.has(encodedKey)) {
+          throw truthContractError(
+            `inputs.truth declared array ${entryIndex} has duplicate keys after normalization`,
+          );
+        }
+        normalizedKeys.add(encodedKey);
+      } else {
+        const encodedKey = `n:${keyValue}`;
+        if (normalizedKeys.has(encodedKey)) {
+          throw truthContractError(
+            `inputs.truth declared array ${entryIndex} has duplicate keys after normalization`,
+          );
+        }
+        normalizedKeys.add(encodedKey);
+      }
+
+      for (const [fieldIndex, fieldPointer] of fieldPointers.entries()) {
+        const fieldValue = resolvePointer(element, decodePointerSegments(fieldPointer));
+        if (fieldValue === NOT_FOUND) {
+          throw truthContractError(
+            `inputs.truth element ${elementIndex} of declared array ${entryIndex} is missing compared field ${fieldIndex}`,
+          );
+        }
+      }
+    }
+  }
+}
+
+const NOT_FOUND = Symbol("pointer-not-found");
+
+/** Decodes RFC 6901 escape sequences; "~2" stays invalid per the schema patterns. */
+function decodePointerSegments(pointer: string): string[] {
+  if (!pointer.startsWith("/")) return [];
+  return pointer
+    .slice(1)
+    .split("/")
+    .map((segment) => segment.replace(/~1/gu, "/").replace(/~0/gu, "~"));
+}
+
+function resolvePointer(root: JsonValue, segments: string[]): JsonValue | typeof NOT_FOUND {
+  let current: JsonValue = root;
+  for (const segment of segments) {
+    if (Array.isArray(current)) {
+      const index = Number(segment);
+      if (!Number.isInteger(index) || index < 0 || index >= current.length) return NOT_FOUND;
+      current = current[index]!;
+      continue;
+    }
+    if (isJsonObject(current) && segment in current) {
+      current = current[segment]!;
+      continue;
+    }
+    return NOT_FOUND;
+  }
+  return current;
 }
 
 function collectPointerList(value: JsonValue): string[] {

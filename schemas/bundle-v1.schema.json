@@ -235,8 +235,7 @@
                 "enum": [
                   "nfkc",
                   "trim",
-                  "collapse-whitespace",
-                  "remove-grouping-separators"
+                  "collapse-whitespace"
                 ]
               },
               "uniqueItems": true
@@ -287,31 +286,31 @@
   "$defs": {
     "plainPointer": {
       "type": "string",
-      "description": "RFC 6901 JSON Pointer with at least one segment and no wildcard segments.",
+      "description": "RFC 6901 JSON Pointer with at least one segment. A '*' is allowed inside a segment as a literal name; a segment that is exactly '*' is reserved for critical wildcards.",
       "minLength": 2,
       "maxLength": 512,
-      "pattern": "^/(?:[^/*~]|~[01])+(?:/(?:[^/*~]|~[01])+)*$"
+      "pattern": "^/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+(?:/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+)*$"
     },
     "comparisonPointer": {
       "type": "string",
-      "description": "Plain JSON Pointer with at most one wildcard segment that is not the last segment. Reserved for critical entries.",
-      "minLength": 2,
+      "description": "Plain JSON Pointer (literal inner '*'), or one wildcard segment that is not the first or last segment. Reserved for critical entries.",
+      "minLength": 4,
       "maxLength": 512,
-      "pattern": "^/(?:[^/*~]|~[01])+(?:/(?:[^/*~]|~[01])+)*$|^/(?:(?:[^/*~]|~[01])+/)+\\*/(?:[^/*~]|~[01])+(?:/(?:[^/*~]|~[01])+)*$"
+      "pattern": "^/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+(?:/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+)*$|^/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+(?:/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+)*/\\*/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+$"
     },
     "relativeFieldPointer": {
       "type": "string",
-      "description": "Single-segment RFC 6901 relative pointer naming a field of an array element; no wildcards.",
+      "description": "Single-segment RFC 6901 relative pointer naming a field of an array element; no wildcard segments.",
       "minLength": 2,
       "maxLength": 512,
-      "pattern": "^/(?:[^/*~]|~[01])+$"
+      "pattern": "^/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+$"
     },
     "criticalPointer": {
       "type": "string",
-      "description": "A declared scalar pointer or '<declared-array-path>/*/<field-of-that-array>'.",
+      "description": "A declared scalar pointer, or '<declared-array-path>/*/<field-of-that-array>' with exactly one whole-segment wildcard that is never last.",
       "minLength": 2,
       "maxLength": 512,
-      "pattern": "^/(?:[^/*~]|~[01])+$|^/(?:(?:[^/*~]|~[01])+/)+\\*/(?:[^/*~]|~[01])+$"
+      "pattern": "^/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+(?:/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+)*$|^/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+(?:/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+)*/\\*/(?=[^/]*[^/*~])(?:[^/*~]|~[01]|\\*)+$"
     },
     "sha256PatternNote": {
       "description": "Cross-field rules (critical must reference declared scalars/arrays/fields, key and fields must belong to their array) are enforced by the validator with code comparison_contract_invalid."

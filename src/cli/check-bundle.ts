@@ -15,17 +15,27 @@ type CliFailure = {
   exitCode: number;
 };
 
+let positionals: string[];
+
 try {
-  const { positionals } = parseArgs({
+  // Only argument parsing maps to invalid_arguments. Everything after this
+  // block has its own error boundary below.
+  ({ positionals } = parseArgs({
     options: { json: { type: "boolean", default: false } },
     allowPositionals: true,
     strict: true,
-  });
+  }));
+} catch {
+  reportFailure({ code: "invalid_arguments", message: USAGE, details: [], exitCode: 2 });
+  // reportFailure sets process.exitCode; keep going so the module ends cleanly.
+  process.exit(process.exitCode || 2);
+}
 
-  if (positionals.length !== 1) {
+try {
+  if (positionals!.length !== 1) {
     reportFailure({ code: "invalid_arguments", message: USAGE, details: [], exitCode: 2 });
   } else {
-    const result = await validateBundle(positionals[0]!);
+    const result = await validateBundle(positionals![0]!);
     if (asJson) console.log(JSON.stringify({ ok: true, ...result }));
     else console.log(`bundle valid: ${result.caseId} (${result.referencedFiles} files)`);
   }
@@ -38,9 +48,19 @@ try {
       exitCode: 1,
     });
   } else {
-    // Argument parsing failures and unexpected errors must never leak a stack
-    // trace or internal paths. Both collapse into stable codes below.
-    reportFailure({ code: "invalid_arguments", message: USAGE, details: [], exitCode: 2 });
+    // Unexpected failures (filesystem races, permission errors, internal bugs)
+    // must not masquerade as bad arguments and must never leak a stack trace
+    // or internal paths.
+    console.error("internal_error: bundle validation failed unexpectedly");
+    if (asJson) {
+      console.log(
+        JSON.stringify({
+          ok: false,
+          error: { code: "internal_error", message: "bundle validation failed unexpectedly", details: [] },
+        }),
+      );
+    }
+    process.exitCode = 2;
   }
 }
 

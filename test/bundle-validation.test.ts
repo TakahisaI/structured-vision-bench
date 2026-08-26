@@ -1,14 +1,22 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { BundleValidationError, MAX_JSON_BYTES, validateBundle } from "../src/bundle/validate-bundle.js";
+import {
+  BundleValidationError,
+  MAX_JSON_BYTES,
+  normalizeKeyForComparison,
+  validateBundle,
+} from "../src/bundle/validate-bundle.js";
 
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
 
 type FileReference = { path: string; sha256: string };
+
+type Truth = Record<string, any>;
 
 type Manifest = {
   bundleVersion: number;
@@ -243,6 +251,137 @@ test("accepts every declared array field as critical", async () => {
   });
 });
 
+test("accepts embedded-star literals and nested critical scalars", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.scalars = [
+      "/documentKind",
+      "/invoiceNumber",
+      "/issuedAt",
+      "/currency",
+      "/totalAmount",
+      "/header/total",
+      "/li*nes/count",
+    ];
+    manifest.comparison.critical = ["/header/total", "/li*nes/count"];
+    await writeManifest(bundle, manifest);
+    // The truth projection now demands the new scalars exist in truth.json.
+    await rewriteTruth(bundle, (truth) => {
+      truth.header = { total: truth.totalAmount };
+      truth["li*nes"] = { count: 2 };
+    });
+
+    const result = await validateBundle(bundle);
+    assert.equal(result.caseId, "synthetic-invoice-basic");
+  });
+});
+
+test("reports comparison diagnostics by position without echoing pointer values", async () => {
+  await withFixture(async (bundle) => {
+    const marker = "/tmp/synthetic-local/PRIVATE_CORPUS_PATH";
+    const manifest = await readManifest(bundle);
+    manifest.comparison.arrays = [
+      { path: "/lines", key: "/lineNo", fields: ["/amount"] },
+      { path: marker, key: "/lineNo", fields: ["/amount"] },
+      { path: marker, key: "/lineNo", fields: ["/amount"] },
+    ];
+    await writeManifest(bundle, manifest);
+
+    const error = await captureError(bundle);
+    assert.equal(error.code, "comparison_contract_invalid");
+    const rendered = JSON.stringify({ message: error.message, details: error.details });
+    assert.ok(!rendered.includes(marker), "pointer values must not reach diagnostics");
+    assert.ok(rendered.includes("comparison.arrays[2]"), "position must be reported instead");
+  });
+});
+
+test("validates the truth projection during preflight", async () => {
+  // The shipped fixture satisfies its own projection.
+  await withFixture(async (bundle) => {
+    const result = await validateBundle(bundle);
+    assert.equal(result.caseId, "synthetic-invoice-basic");
+  });
+
+  await withFixture(async (bundle) => {
+    await rewriteTruth(bundle, (truth) => {
+      delete truth.totalAmount;
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines[0].amount = undefined;
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines[1].lineNo = null;
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines[1].lineNo = truth.lines[0].lineNo;
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    // An array whose elements all violate the key contract fails preflight.
+    // (An empty truth array has no elements to check; it is not a violation.)
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines = [{ description: "no key here" }];
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines = { notAnArray: true };
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    // A projected field may be explicitly null; this stays valid.
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines[0].description = null;
+    });
+    const result = await validateBundle(bundle);
+    assert.equal(result.caseId, "synthetic-invoice-basic");
+  });
+
+  await withFixture(async (bundle) => {
+    // Unrelated model-only fields on elements stay allowed.
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines[0].selfReportedConfidence = 0.9;
+    });
+    const result = await validateBundle(bundle);
+    assert.equal(result.caseId, "synthetic-invoice-basic");
+  });
+
+  await withFixture(async (bundle) => {
+    // Duplicate keys that appear only after normalization are rejected:
+    // fullwidth "１" normalizes to "1", colliding with element 1's numeric key.
+    await rewriteTruth(bundle, (truth) => {
+      truth.lines[1].lineNo = "１";
+      truth.lines[0].lineNo = "1";
+    });
+    await expectCode(bundle, "truth_contract_invalid");
+  });
+});
+
+test("normalizes keys per the v1 whitespace and order rules", () => {
+  const operations = ["nfkc", "trim", "collapse-whitespace"];
+  assert.equal(normalizeKeyForComparison("  Widget   Alpha\u3000 ", operations), "Widget Alpha");
+  assert.equal(normalizeKeyForComparison("１", operations), "1");
+  assert.equal(normalizeKeyForComparison("\u00A0\u3000", operations), "");
+});
+
 test("rejects a manifest exactly one byte over the size limit", async () => {
   await withFixture(async (bundle) => {
     // {"synthetic":"<padding>"} sized to exactly MAX_JSON_BYTES + 1 bytes.
@@ -286,4 +425,20 @@ async function readManifest(bundle: string): Promise<Manifest> {
 
 async function writeManifest(bundle: string, manifest: Manifest): Promise<void> {
   await writeFile(path.join(bundle, "bundle.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
+
+async function rewriteTruth(bundle: string, mutate: (truth: Truth) => void): Promise<void> {
+  const truthPath = path.join(bundle, "truth.json");
+  const truth = JSON.parse(await readFile(truthPath, "utf8")) as Truth;
+  mutate(truth);
+  const updated = `${JSON.stringify(truth, null, 2)}\n`;
+  await writeFile(truthPath, updated, "utf8");
+
+  // Keep the manifest digest in sync with the mutated truth file.
+  const manifestPath = path.join(bundle, "bundle.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Manifest;
+  if (manifest.inputs.truth) {
+    manifest.inputs.truth.sha256 = createHash("sha256").update(updated, "utf8").digest("hex");
+    await writeManifest(bundle, manifest);
+  }
 }

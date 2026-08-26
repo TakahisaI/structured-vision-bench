@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -65,6 +65,75 @@ test("never leaks the working directory in CLI diagnostics", async () => {
         error: { code: string; message: string; details: string[] };
       };
       assert.ok(!JSON.stringify(summary).includes(temporary));
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+});
+
+test("comparison contract failures keep pointer values out of the whole summary", async () => {
+  await runCli(async (cli) => {
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-"));
+    try {
+      // Copy the synthetic fixture and inject a duplicated confidential-shaped
+      // array path so the cross-field check fires.
+      await cp(FIXTURE, temporary, { recursive: true });
+      const manifestPath = path.join(temporary, "bundle.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+        comparison: { arrays: unknown[] };
+      };
+      const marker = "/tmp/synthetic-local/PRIVATE_CORPUS";
+      manifest.comparison.arrays = [
+        ...manifest.comparison.arrays,
+        { path: marker, key: "/lineNo", fields: ["/amount"] },
+        { path: marker, key: "/lineNo", fields: ["/amount"] },
+      ];
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+      for (const flags of [["--json"], []]) {
+        const result = spawnSync(process.execPath, [cli, temporary, ...flags], {
+          encoding: "utf8",
+        });
+        assert.equal(result.status, 1);
+        const rendered = `${result.stdout}${result.stderr}`;
+        assert.ok(
+          !rendered.includes(marker),
+          `pointer value must not reach ${flags.length > 0 ? "JSON summary" : "stderr"}`,
+        );
+        assert.ok(rendered.includes("comparison.arrays["), "position must be reported instead");
+      }
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+});
+
+test("unexpected runtime errors become internal_error with exit code 2", async () => {
+  await runCli(async (cli) => {
+    // A valid argument that triggers an unexpected failure inside the
+    // validator: a referenced file deleted between preflight checks and digest
+    // reading. We simulate the class of failure by pointing at a bundle whose
+    // truth file becomes unreadable after validation started — approximated
+    // here with a directory in place of a JSON input, which passes lstat checks
+    // as neither regular nor symlink only if races occur; the deterministic
+    // trigger is a permission-denied read on the schema file.
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-"));
+    try {
+      await cp(FIXTURE, temporary, { recursive: true });
+      if (process.platform !== "win32") {
+        const schemaPath = path.join(temporary, "schema.json");
+        await writeFile(schemaPath, await readFile(schemaPath));
+        await chmod(schemaPath, 0o000);
+        const result = spawnSync(process.execPath, [cli, temporary], { encoding: "utf8" });
+        assert.equal(result.status, 2);
+        assert.ok(!result.stderr.includes("at "), "no stack trace on stderr");
+        assert.ok(!result.stderr.includes(temporary), "no internal paths on stderr");
+        if (process.getuid && process.getuid() === 0) return; // root ignores chmod
+        assert.ok(
+          !result.stderr.includes("invalid_arguments"),
+          "argument errors and runtime errors must not be conflated",
+        );
+      }
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }

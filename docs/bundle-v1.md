@@ -66,9 +66,25 @@ Optional `truth` is a **comparison projection**, not a full output-schema instan
    model-only fields such as self-reported confidence, which must never be invented as human truth
    or added to a score denominator.
 
+Because the truth file is part of the bundle and exists at preflight time, the projection contract
+is validated during bundle preflight. When `inputs.truth` is present, a conforming reader checks all
+of the following before any provider call:
+
+- the truth root is an object;
+- every declared scalar pointer resolves to a JSON scalar (string, number, boolean) or `null`;
+- every declared array path resolves to an array;
+- every element of each such array is an object carrying that array's `key` and every field listed
+  in its `fields[]`; unrelated extra fields on an element are allowed;
+- each key value is a string or number that is not `null`, and a string key is not empty after
+  normalization; projected field values may be `null`;
+- normalized key values are unique within the array.
+
+Any violation fails preflight with the stable code `truth_contract_invalid`. An invalid truth must
+never reach a paid provider run.
+
 An intentionally absent value is represented as explicit `null` at the projected path, never by an
-empty string or a missing key inside a projected object. The provider never receives the truth
-file; it stays on the comparison side of the boundary.
+empty string or a missing key inside a projected object. The provider never receives the truth,
+comparison policy, or any past attempt output; they stay on the comparison side of the boundary.
 
 ### Comparison
 
@@ -79,19 +95,24 @@ file; it stays on the comparison side of the boundary.
 - `critical`: pointers whose failure is evaluated separately from an average score;
 - `normalization`: explicit string operations and exact number comparison.
 
-`normalization.strings` may contain each of these operations at most once, applied in the listed
-declaration order before comparison:
+`normalization.strings` may contain each of these operations at most once, applied to the truth
+string and the actual string independently, in this fixed order regardless of declaration order:
 
 - `nfkc`: Unicode NFKC normalization;
 - `trim`: remove leading and trailing whitespace;
-- `collapse-whitespace`: replace each whitespace run with a single space;
-- `remove-grouping-separators`: remove digit grouping marks (`,`, `.`, space, narrow no-break
-  space) between digits in numeric-looking strings. This covers currency formatting; it does not
-  strip a leading currency symbol.
+- `collapse-whitespace`: replace each whitespace run with a single U+0020 SPACE.
 
-Numbers are compared exactly (`normalization.numbers: "exact"`). Bundle v1 defines no other
-normalization. A consumer that needs an operation absent from this list must not apply it
-implicitly; it requires a new `bundleVersion`.
+`trim` and `collapse-whitespace` use one fixed set of Unicode whitespace characters: U+0009, U+000A,
+U+000B, U+000C, U+000D, U+0020, U+0085, U+00A0, U+1680, U+2000 through U+200A, U+2028, U+2029,
+U+202F, U+205F, and U+3000.
+
+Normalization applies only to strings. Numbers are compared exactly
+(`normalization.numbers: "exact"`). Number `1` and string `"1"` do not match; normalization never
+converts between numbers and strings. Only JSON `null` means "no value": a normalized empty string
+is still a string and is never treated as `null`, so truth `null` against actual `" "` is a
+fabricated value, not a match. Bundle v1 defines no other normalization — no currency or digit-group
+stripping. A consumer that needs formatted-number normalization must wait for a new `bundleVersion`
+that names the affected paths explicitly.
 
 Bundle v1 does not define semantic similarity, edit-distance acceptance, fuzzy row matching, or an
 LLM judge. A missing or duplicate array key must not be silently paired with an arbitrary element.
@@ -112,6 +133,26 @@ Comparison paths are RFC 6901 JSON Pointer strings with one extension:
    `<declared-array-path>/*/<field>`, where `<field>` equals that array's `key` or one of its
    declared `fields`. A critical entry must not address a whole array.
 
+#### Critical membership
+
+A wildcard critical entry whose field is the array's **key**
+(`<array-path>/*/<key>`) makes that array *membership-critical*. For such an array, all of the
+following are critical failures:
+
+- a truth element missing from the result (`missing_item`);
+- a result element missing from truth (`extra_item`);
+- an unresolved array path;
+- a missing key on either side;
+- a `null` key;
+- a string key that is empty after normalization;
+- duplicate keys — including duplicates that appear only after normalization.
+
+A wildcard critical entry naming any other declared field
+(`<array-path>/*/<field>`) marks only wrong values of that field on already-paired elements as
+critical. By itself it does not make element surplus or shortage critical. A consumer that treats
+line-item surplus or shortage as a hard gate must declare `<array-path>/*/<key>` in `critical` for
+that document kind.
+
 The schema rejects syntax violations. Cross-field rules — duplicate array paths, scalars that
 duplicate an array path, and critical entries referencing undeclared arrays or un-compared fields —
 fail validation with the stable code `comparison_contract_invalid`.
@@ -120,10 +161,11 @@ Evaluation context is always the bundle root. `scalars` and whole-array `arrays[
 root-relative. `arrays[].key` and `arrays[].fields[]` are evaluated against one array element.
 Wildcard evaluation resolves the array at its prefix, then applies `<field>` to each element.
 
-An unresolved comparison path is a comparison error, not a bundle error. Bundle validation checks
-only the syntax and cross-field rules above; whether `/totalAmount` exists in a particular output is
-decided when the comparison runs. A missing or extra array element is likewise reported by the
-comparison, never silently paired (see below).
+An unresolved comparison path is a comparison error, not a bundle error, **for provider output**:
+whether `/totalAmount` will exist in a particular model result is decided when the comparison runs.
+Bundle validation checks only the syntax and cross-field rules above. The exception is the optional
+truth file, which already exists inside the bundle and is therefore validated against its projection
+contract during preflight (see Truth shape).
 
 ### Metadata
 

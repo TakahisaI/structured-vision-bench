@@ -10,19 +10,26 @@ consumer's business schema or provider credentials.
 
 ### Consumer adapter
 
-A consuming application owns the production extraction request:
+A consuming application owns the production extraction request. Its bundle-facing content is:
 
 - prepared image;
 - stable system preamble;
 - document-specific instruction;
 - JSON Schema;
-- requested model, effort, and token limit;
 - prompt, preprocessing, and source version metadata;
 - optional human-created truth and comparison policy.
 
-The consumer exports these values as a bundle without moving its production source of truth into
-this repository. A later private command adapter may invoke the consumer's production API provider
-for calibration.
+Its run-facing settings are separate and never enter a bundle:
+
+- provider route, requested model, effort, and token limit;
+- repeat and retry policy.
+
+The final contract splits ownership as follows: the **bundle** carries image, schema, system,
+instruction, optional truth, comparison policy, and consumer metadata; **run or suite
+configuration** carries provider, model, effort, max tokens, and repeats; an **attempt** records the
+requested and effective execution settings together with the result. The consumer exports only the
+bundle-facing values into this repository without moving its production source of truth here. A
+later private command adapter may invoke the consumer's production API provider for calibration.
 
 ### Bundle validator
 
