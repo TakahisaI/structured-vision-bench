@@ -72,12 +72,14 @@ export async function validateBundle(
   const digestsByPath = new Map<string, string>();
   for (const [label, reference] of references) {
     const absolute = await resolveReferencedFile(root, reference.path, label);
-    // Cache by canonical path so the schema/truth re-read below verifies the
-    // SAME bytes that were digested instead of reopening a possibly swapped
-    // file.
-    let digest = digestsByPath.get(absolute);
+    const requiresUtf8Validation = UTF8_TEXT_INPUT_LABELS.has(label);
+    // Text inputs must hash and decode the same stream. They cannot use a
+    // digest-only cache because a second read would validate different bytes.
+    let digest = requiresUtf8Validation ? undefined : digestsByPath.get(absolute);
     if (digest === undefined) {
-      digest = await sha256File(absolute);
+      digest = requiresUtf8Validation
+        ? await hashAndValidateUtf8Stream(createReadStream(absolute), label)
+        : await sha256File(absolute);
       digestsByPath.set(absolute, digest);
     }
     if (digest !== reference.sha256) {
@@ -86,7 +88,6 @@ export async function validateBundle(
         `${label} digest does not match bundle.json`,
       );
     }
-    if (UTF8_TEXT_INPUT_LABELS.has(label)) await assertUtf8File(absolute, label);
   }
 
   const schemaReference = requireReference(inputs, "schema");
@@ -270,22 +271,46 @@ async function readJsonFile(
   }
 }
 
-async function assertUtf8File(file: string, label: string): Promise<void> {
-  const decoder = new TextDecoder("utf-8", { fatal: true });
+async function hashAndValidateUtf8Stream(
+  stream: AsyncIterable<Uint8Array>,
+  label: string,
+): Promise<string> {
+  const hash = createHash("sha256");
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  const prefix = new Uint8Array(3);
+  let prefixLength = 0;
+
   try {
-    const stream = createReadStream(file);
     for await (const chunk of stream) {
+      hash.update(chunk);
+      if (prefixLength < prefix.length) {
+        const copied = Math.min(prefix.length - prefixLength, chunk.length);
+        prefix.set(chunk.subarray(0, copied), prefixLength);
+        prefixLength += copied;
+        if (
+          prefixLength === prefix.length &&
+          prefix[0] === 0xef &&
+          prefix[1] === 0xbb &&
+          prefix[2] === 0xbf
+        ) {
+          throw new BundleValidationError("text_file_invalid", `${label} must not start with a UTF-8 BOM`);
+        }
+      }
+
       try {
         decoder.decode(chunk, { stream: true });
       } catch {
         throw new BundleValidationError("text_file_invalid", `${label} is not valid UTF-8`);
       }
     }
+
     try {
       decoder.decode();
     } catch {
       throw new BundleValidationError("text_file_invalid", `${label} is not valid UTF-8`);
     }
+
+    return hash.digest("hex");
   } catch (error) {
     if (error instanceof BundleValidationError) throw error;
     throw new BundleValidationError("text_file_unreadable", `${label} could not be read`);

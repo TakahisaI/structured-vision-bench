@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import fs from "node:fs";
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import test from "node:test";
 
 import {
@@ -14,6 +17,7 @@ import {
 } from "../src/bundle/validate-bundle.js";
 
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 
 type FileReference = { path: string; sha256: string };
 
@@ -128,6 +132,61 @@ test("rejects invalid UTF-8 in system and instruction inputs", async () => {
       assert.ok(error.message.length <= MAX_ERROR_MESSAGE_LENGTH);
     });
   }
+});
+
+test("rejects a leading UTF-8 BOM in every bundle UTF-8 file", async () => {
+  await withFixture(async (bundle) => {
+    const manifestPath = path.join(bundle, "bundle.json");
+    await writeFile(manifestPath, Buffer.concat([UTF8_BOM, await readFile(manifestPath)]));
+    await expectCode(bundle, "json_file_invalid");
+  });
+
+  for (const key of ["schema", "truth", "system", "instruction"] as const) {
+    await withFixture(async (bundle) => {
+      const fileName = key === "schema" || key === "truth" ? `${key}.json` : `${key}.txt`;
+      const bytes = Buffer.concat([UTF8_BOM, await readFile(path.join(bundle, fileName))]);
+      await replaceInputBytes(bundle, key, bytes);
+      await expectCode(
+        bundle,
+        key === "system" || key === "instruction" ? "text_file_invalid" : "json_file_invalid",
+      );
+    });
+  }
+});
+
+test("hashes and validates a text input from one stream", async (t) => {
+  await withFixture(async (bundle) => {
+    const systemPath = path.join(bundle, "system.txt");
+    const canonicalSystemPath = await realpath(systemPath);
+    const originalBytes = await readFile(systemPath);
+    const originalCreateReadStream = fs.createReadStream;
+    let systemReads = 0;
+
+    t.mock.method(
+      fs,
+      "createReadStream",
+      (...args: Parameters<typeof fs.createReadStream>) => {
+        const [file] = args;
+        if (typeof file === "string" && file === canonicalSystemPath) {
+          systemReads += 1;
+          const bytes =
+            systemReads === 1 ? originalBytes : Buffer.from("synthetic replacement prompt\n", "utf8");
+          return Readable.from([bytes]) as unknown as ReturnType<typeof fs.createReadStream>;
+        }
+        return originalCreateReadStream(...args);
+      },
+    );
+    syncBuiltinESMExports();
+
+    try {
+      const result = await validateBundle(bundle);
+      assert.equal(result.caseId, "synthetic-invoice-basic");
+      assert.equal(systemReads, 1);
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+  });
 });
 
 test("bounds BundleValidationError messages", () => {

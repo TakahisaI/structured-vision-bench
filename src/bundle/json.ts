@@ -9,12 +9,15 @@ export function isJsonObject(value: unknown): value is Record<string, JsonValue>
 
 /**
  * Decodes UTF-8 bytes strictly. Invalid byte sequences throw instead of being
- * silently replaced with U+FFFD, so every reader of the same bundle sees the
- * same characters.
+ * silently replaced with U+FFFD, and a leading UTF-8 BOM is rejected so every
+ * reader of the same bundle sees the same characters.
  */
 export function decodeUtf8Strict(bytes: Uint8Array, label: string): string {
+  if (startsWithUtf8Bom(bytes)) {
+    throw new JsonContractError(`${label} must not start with a UTF-8 BOM`);
+  }
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
   } catch {
     throw new JsonContractError(`${label} is not valid UTF-8`);
   }
@@ -23,6 +26,7 @@ export function decodeUtf8Strict(bytes: Uint8Array, label: string): string {
 /**
  * Parses JSON under the v1 exactness contract:
  * - invalid UTF-8 is rejected (no U+FFFD replacement);
+ * - strings contain only Unicode scalar values;
  * - duplicate object members are rejected instead of silently last-wins;
  * - every number must fit the IEEE-754 binary64 domain without overflow.
  *
@@ -90,6 +94,14 @@ function scanJsonContract(source: string, label: string): void {
       }
       const code = character.charCodeAt(0);
       if (code < 0x20) fail("unescaped control character in string");
+      if (isHighSurrogate(code)) {
+        const low = source.charCodeAt(position + 1);
+        if (!isLowSurrogate(low)) fail("contains an invalid Unicode surrogate pair");
+        value += source.slice(position, position + 2);
+        position += 2;
+        continue;
+      }
+      if (isLowSurrogate(code)) fail("contains an invalid Unicode surrogate pair");
       if (character !== "\\") {
         value += character;
         position += 1;
@@ -111,6 +123,21 @@ function scanJsonContract(source: string, label: string): void {
   }
 
   function scanUnicodeEscape(): string {
+    const codeUnit = scanUnicodeCodeUnit();
+    if (isHighSurrogate(codeUnit)) {
+      if (source[position] !== "\\" || source[position + 1] !== "u") {
+        fail("contains an invalid Unicode surrogate pair");
+      }
+      position += 1; // the backslash before the low surrogate escape
+      const low = scanUnicodeCodeUnit();
+      if (!isLowSurrogate(low)) fail("contains an invalid Unicode surrogate pair");
+      return String.fromCharCode(codeUnit, low);
+    }
+    if (isLowSurrogate(codeUnit)) fail("contains an invalid Unicode surrogate pair");
+    return String.fromCharCode(codeUnit);
+  }
+
+  function scanUnicodeCodeUnit(): number {
     position += 1; // the "u" in the escape
     let codePoint = 0;
     for (let digit = 0; digit < 4; digit += 1) {
@@ -121,7 +148,7 @@ function scanJsonContract(source: string, label: string): void {
       codePoint = codePoint * 16 + Number.parseInt(character, 16);
       position += 1;
     }
-    return String.fromCharCode(codePoint);
+    return codePoint;
   }
 
   function decodeSimpleEscape(escape: string): string {
@@ -261,4 +288,16 @@ function scanJsonContract(source: string, label: string): void {
     }
     throw error;
   }
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
+}
+
+function startsWithUtf8Bom(bytes: Uint8Array): boolean {
+  return bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
 }

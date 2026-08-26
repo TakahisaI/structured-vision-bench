@@ -54,8 +54,8 @@ The validator performs these checks before a future provider can run:
 4. Each referenced file matches its declared SHA-256 digest, read from the same bytes that are
    parsed or handed onward.
 5. Referenced schema and optional truth files contain valid JSON under the byte-exactness contract
-   (strict UTF-8, no duplicate object members, binary64 numbers only), and system/instruction text
-   files are strict UTF-8.
+   (strict UTF-8 without a leading BOM, Unicode scalar strings, no duplicate object members,
+   binary64 numbers only), and system/instruction text files use the same UTF-8-without-BOM rule.
 6. The comparison pointer contract holds: RFC 6901 pointers with at most one whole-segment `*`
    wildcard, allowed only in `critical` entries and only pointing at declared arrays and compared
    fields (`comparison_contract_invalid` otherwise).

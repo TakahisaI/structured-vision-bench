@@ -234,9 +234,13 @@ Raising or lowering a limit changes machine behavior and requires a new `bundleV
 Bundle v1 is portable input: every conforming reader of the same bytes must see the same values.
 
 - **Encoding.** `bundle.json`, the referenced schema, truth, `system.txt`, and `instruction.txt`
-  are UTF-8. Invalid UTF-8 byte sequences are a validation failure — readers must not silently
-  replace them with U+FFFD, because the same digest would then yield different prompts per
-  platform.
+  are UTF-8 without a leading UTF-8 BOM. Invalid UTF-8 byte sequences and a leading BOM are
+  validation failures — readers must not silently replace invalid bytes with U+FFFD or strip a
+  BOM, because the same digest would then yield different values or prompts per platform.
+- **Unicode scalar values.** JSON strings, including object member names, contain only Unicode
+  scalar values. An escaped high surrogate is valid only when immediately followed by an escaped
+  low surrogate; a lone low surrogate and every other unpaired surrogate escape are invalid.
+  Valid surrogate pairs represent their corresponding scalar value.
 - **Duplicate object members.** A JSON object with two occurrences of the same member name is
   invalid. Last-wins silently changes values while the digest stays identical.
 - **Number domain.** JSON numbers are IEEE-754 binary64 values. Numbers whose parse overflows to
@@ -249,7 +253,8 @@ Bundle v1 is portable input: every conforming reader of the same bytes must see 
   again, so projection and syntax checks cannot apply to different bytes than the manifest
   committed to. The runner (Issue #2) owns the corresponding rule for provider inputs: after
   preflight succeeds, provider inputs come from the verified bytes or staged copies — never from a
-  fresh open of the original bundle directory.
+  fresh open of the original bundle directory. For unbounded text inputs, digesting and strict
+  UTF-8 validation use the same streaming read.
 
 ## Path rules
 
@@ -273,9 +278,9 @@ A conforming implementation validates in this order:
 2. `bundle.json` is bounded in size and parses as JSON.
 3. The manifest conforms to bundle v1 and uses a known version.
 4. Every reference passes path and regular-file checks.
-5. Every referenced digest matches.
-6. Referenced schema and optional truth files parse as JSON; `system.txt` and `instruction.txt`
-   decode as strict UTF-8.
+5. Every referenced digest matches; `system.txt` and `instruction.txt` are decoded as strict UTF-8
+   without a leading BOM during that same streaming read.
+6. Referenced schema and optional truth files parse as JSON.
 7. Runner-specific or provider-specific checks occur only after bundle preflight succeeds.
 
 A failed preflight must not call a provider.

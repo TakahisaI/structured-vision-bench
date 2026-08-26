@@ -15,6 +15,16 @@ test("decodeUtf8Strict rejects invalid UTF-8 instead of replacing with U+FFFD", 
   assert.equal(decodeUtf8Strict(encoder.encode('{"a":"円"}'), "probe"), '{"a":"円"}');
 });
 
+test("decodeUtf8Strict rejects a leading UTF-8 BOM", () => {
+  const withBom = new Uint8Array([0xef, 0xbb, 0xbf, 0x7b, 0x7d]);
+  assert.throws(
+    () => decodeUtf8Strict(withBom, "probe"),
+    (error: unknown) =>
+      error instanceof JsonContractError &&
+      error.message === "probe must not start with a UTF-8 BOM",
+  );
+});
+
 test("parseJson rejects duplicate object members", () => {
   assert.throws(() => parseJson('{"amount":100,"amount":200}', "probe"));
   // Nested duplicates are also caught.
@@ -55,6 +65,28 @@ test("rejects duplicate object members after decoding escaped names", () => {
       source,
     );
   }
+});
+
+test("rejects unpaired Unicode surrogate escapes and accepts pairs", () => {
+  const invalidStrings = ['"\\uD800"', '"\\uDC00"', '"\\uD800x"', '"\\uD800\\uD800"'];
+  for (const source of invalidStrings) {
+    assert.throws(
+      () => parseJson(source, "probe"),
+      (error: unknown) =>
+        error instanceof JsonContractError &&
+        error.message === "probe is not valid JSON: contains an invalid Unicode surrogate pair",
+      source,
+    );
+  }
+
+  assert.equal(parseJson('"\\uD83D\\uDE00"', "probe"), "😀");
+  assert.throws(
+    () => parseJson('{"\\uD800":1}', "probe"),
+    (error: unknown) =>
+      error instanceof JsonContractError &&
+      error.message === "probe is not valid JSON: contains an invalid Unicode surrogate pair",
+  );
+  assert.throws(() => parseJson('{"😀":1,"\\uD83D\\uDE00":2}', "probe"));
 });
 
 test("parseJson rejects numbers outside the binary64 domain", () => {
