@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { decodeUtf8Strict, isJsonObject, parseJson, type JsonValue } from "./json.js";
@@ -16,12 +16,40 @@ const UTF8_TEXT_INPUT_LABELS = new Set(["inputs.system", "inputs.instruction"]);
 type FileReference = {
   path: string;
   sha256: string;
+  mediaType: string;
 };
 
 export type BundleValidationResult = {
   caseId: string;
   referencedFiles: number;
   bundleVersion: 1;
+};
+
+export type LoadedBundleInput = {
+  sha256: string;
+  mediaType: string;
+};
+
+export type LoadedBundleForRunner = {
+  caseId: string;
+  documentKind: string;
+  metadata: {
+    promptVersion: string;
+    preprocessVersion: string;
+    sourceCommit: string | null;
+  };
+  bundleVersion: 1;
+  manifestDigest: string;
+  inputs: {
+    image: LoadedBundleInput & {
+      readBytes: () => Promise<Buffer>;
+    };
+    schema: LoadedBundleInput & { value: JsonValue };
+    system: LoadedBundleInput & { readText: () => Promise<string> };
+    instruction: LoadedBundleInput & { readText: () => Promise<string> };
+    truth?: LoadedBundleInput & { value: JsonValue };
+  };
+  cleanup: () => Promise<void>;
 };
 
 export class BundleValidationError extends Error {
@@ -36,16 +64,129 @@ export class BundleValidationError extends Error {
   }
 }
 
+type ResolvedReference = FileReference & { absolute: string };
+
+type JsonFileResult = {
+  value: JsonValue;
+  bytes: Buffer;
+};
+
+type ValidatedBundleInternals = {
+  root: string;
+  manifest: Record<string, JsonValue>;
+  manifestBytes: Buffer;
+  manifestDigest: string;
+  summary: BundleValidationResult;
+  references: Map<string, ResolvedReference>;
+  jsonFiles: Map<string, JsonFileResult>;
+};
+
 export async function validateBundle(
   bundleDirectory: string,
   contractSchemaPath = path.resolve("schemas/bundle-v1.schema.json"),
 ): Promise<BundleValidationResult> {
+  return (await validateBundleInternal(bundleDirectory, contractSchemaPath)).summary;
+}
+
+/**
+ * Validates a bundle and fixes the four provider inputs in a private staging
+ * directory. Provider-facing callbacks expose bytes/text but never the bundle
+ * root or an original path. The caller owns cleanup after the run finishes.
+ */
+export async function loadBundleForRunner(
+  bundleDirectory: string,
+  stagingDirectory: string,
+  contractSchemaPath = path.resolve("schemas/bundle-v1.schema.json"),
+): Promise<LoadedBundleForRunner> {
+  const validated = await validateBundleInternal(bundleDirectory, contractSchemaPath);
+  const imageReference = validated.references.get("inputs.image");
+  const systemReference = validated.references.get("inputs.system");
+  const instructionReference = validated.references.get("inputs.instruction");
+  const schemaReference = validated.references.get("inputs.schema");
+  const schemaFile = validated.jsonFiles.get("inputs.schema");
+  if (
+    imageReference === undefined ||
+    systemReference === undefined ||
+    instructionReference === undefined ||
+    schemaReference === undefined ||
+    schemaFile === undefined
+  ) {
+    throw new BundleValidationError("runner_bundle_incomplete", "bundle inputs are incomplete");
+  }
+
+  const metadata = validated.manifest.metadata;
+  if (!isJsonObject(metadata) || typeof metadata.documentKind !== "string") {
+    throw new BundleValidationError("manifest_schema_invalid", "bundle metadata is invalid");
+  }
+
+  let ownsStagingDirectory = false;
+  try {
+    await mkdir(stagingDirectory);
+    ownsStagingDirectory = true;
+    const image = await stageProviderFile(imageReference, stagingDirectory, "image", false);
+    const system = await stageProviderFile(systemReference, stagingDirectory, "system", true);
+    const instruction = await stageProviderFile(
+      instructionReference,
+      stagingDirectory,
+      "instruction",
+      true,
+    );
+    const truthFile = validated.jsonFiles.get("inputs.truth");
+    const truthReference = validated.references.get("inputs.truth");
+
+    let cleaned = false;
+    return {
+      caseId: String(validated.manifest.caseId),
+      documentKind: metadata.documentKind,
+      metadata: {
+        promptVersion: String(metadata.promptVersion),
+        preprocessVersion: String(metadata.preprocessVersion),
+        sourceCommit: typeof metadata.sourceCommit === "string" ? metadata.sourceCommit : null,
+      },
+      bundleVersion: 1,
+      manifestDigest: validated.manifestDigest,
+      inputs: {
+        image,
+        schema: {
+          sha256: schemaReference.sha256,
+          mediaType: schemaReference.mediaType,
+          value: schemaFile.value,
+        },
+        system,
+        instruction,
+        ...(truthFile !== undefined && truthReference !== undefined
+          ? {
+              truth: {
+                sha256: truthReference.sha256,
+                mediaType: truthReference.mediaType,
+                value: truthFile.value,
+              },
+            }
+          : {}),
+      },
+      cleanup: async () => {
+        if (cleaned) return;
+        cleaned = true;
+        await rm(stagingDirectory, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    if (ownsStagingDirectory) await rm(stagingDirectory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function validateBundleInternal(
+  bundleDirectory: string,
+  contractSchemaPath: string,
+): Promise<ValidatedBundleInternals> {
   await assertBundleRoot(bundleDirectory);
   const root = await realpath(bundleDirectory);
   const manifestPath = path.join(root, MANIFEST_NAME);
   await assertManifestFile(manifestPath);
 
-  const manifest = (await readJsonFile(manifestPath, MANIFEST_NAME, MAX_JSON_BYTES)).value;
+  const manifestResult = await readJsonFile(manifestPath, MANIFEST_NAME, MAX_JSON_BYTES);
+  const manifest = manifestResult.value;
   const contractSchema = (
     await readJsonFile(contractSchemaPath, "bundle v1 schema", MAX_JSON_BYTES)
   ).value;
@@ -70,8 +211,10 @@ export async function validateBundle(
 
   const references = collectReferences(inputs);
   const digestsByPath = new Map<string, string>();
+  const resolvedReferences = new Map<string, ResolvedReference>();
   for (const [label, reference] of references) {
     const absolute = await resolveReferencedFile(root, reference.path, label);
+    resolvedReferences.set(label, { ...reference, absolute });
     const requiresUtf8Validation = UTF8_TEXT_INPUT_LABELS.has(label);
     // Text inputs must hash and decode the same stream. They cannot use a
     // digest-only cache because a second read would validate different bytes.
@@ -91,27 +234,39 @@ export async function validateBundle(
   }
 
   const schemaReference = requireReference(inputs, "schema");
-  await readVerifiedJson(
+  const schemaFile = await readVerifiedJson(
     root,
     schemaReference.path,
     "inputs.schema",
     schemaReference.sha256,
   );
+  const jsonFiles = new Map<string, JsonFileResult>([["inputs.schema", schemaFile]]);
   if (Object.hasOwn(inputs, "truth")) {
     const truthReference = requireReference(inputs, "truth");
-    const { value: truth } = await readVerifiedJson(
+    const truthFile = await readVerifiedJson(
       root,
       truthReference.path,
       "inputs.truth",
       truthReference.sha256,
     );
+    jsonFiles.set("inputs.truth", truthFile);
+    const { value: truth } = truthFile;
     assertTruthProjection(manifest.comparison ?? null, truth);
   }
 
-  return {
+  const summary = {
     caseId: String(manifest.caseId),
     referencedFiles: references.length,
-    bundleVersion: 1,
+    bundleVersion: 1 as const,
+  };
+  return {
+    root,
+    manifest,
+    manifestBytes: manifestResult.bytes,
+    manifestDigest: createHash("sha256").update(manifestResult.bytes).digest("hex"),
+    summary,
+    references: resolvedReferences,
+    jsonFiles,
   };
 }
 
@@ -181,13 +336,18 @@ function collectReferences(inputs: Record<string, JsonValue>): [string, FileRefe
 
 function requireReference(inputs: Record<string, JsonValue>, key: string): FileReference {
   const value = inputs[key];
-  if (!isJsonObject(value) || typeof value.path !== "string" || typeof value.sha256 !== "string") {
+  if (
+    !isJsonObject(value) ||
+    typeof value.path !== "string" ||
+    typeof value.sha256 !== "string" ||
+    typeof value.mediaType !== "string"
+  ) {
     throw new BundleValidationError(
       "manifest_schema_invalid",
       `inputs.${key} must be a file reference`,
     );
   }
-  return { path: value.path, sha256: value.sha256 };
+  return { path: value.path, sha256: value.sha256, mediaType: value.mediaType };
 }
 
 async function resolveReferencedFile(root: string, manifestPath: string, label: string): Promise<string> {
@@ -268,6 +428,82 @@ async function readJsonFile(
     return { value: parseJson(source, label), bytes };
   } catch {
     throw new BundleValidationError("json_file_invalid", `${label} is invalid`);
+  }
+}
+
+async function stageProviderFile(
+  reference: ResolvedReference,
+  stagingDirectory: string,
+  basename: "image" | "system" | "instruction",
+  text: false,
+): Promise<LoadedBundleForRunner["inputs"]["image"]>;
+async function stageProviderFile(
+  reference: ResolvedReference,
+  stagingDirectory: string,
+  basename: "image" | "system" | "instruction",
+  text: true,
+): Promise<LoadedBundleForRunner["inputs"]["system"]>;
+async function stageProviderFile(
+  reference: ResolvedReference,
+  stagingDirectory: string,
+  basename: "image" | "system" | "instruction",
+  text: boolean,
+): Promise<LoadedBundleForRunner["inputs"]["image"] | LoadedBundleForRunner["inputs"]["system"]> {
+  const partialPath = path.join(stagingDirectory, `${basename}.part`);
+  const stagedPath = path.join(stagingDirectory, `${basename}.input`);
+  let committed = false;
+  try {
+    await copyFile(reference.absolute, partialPath);
+    const digest = text
+      ? await hashAndValidateUtf8Stream(createReadStream(partialPath), `inputs.${basename}`)
+      : await sha256File(partialPath);
+    if (digest !== reference.sha256) {
+      throw new BundleValidationError(
+        "digest_mismatch",
+        `inputs.${basename} changed while being staged`,
+      );
+    }
+    await rename(partialPath, stagedPath);
+    committed = true;
+    if (text) {
+      return {
+        sha256: reference.sha256,
+        mediaType: reference.mediaType,
+        readText: async () => {
+          try {
+            return decodeUtf8Strict(await readFile(stagedPath), `inputs.${basename}`);
+          } catch {
+            throw new BundleValidationError(
+              "runner_input_unreadable",
+              `inputs.${basename} could not be read from staging`,
+            );
+          }
+        },
+      };
+    }
+    return {
+      sha256: reference.sha256,
+      mediaType: reference.mediaType,
+      readBytes: async () => {
+        try {
+          return await readFile(stagedPath);
+        } catch {
+          throw new BundleValidationError(
+            "runner_input_unreadable",
+            `inputs.${basename} could not be read from staging`,
+          );
+        }
+      },
+    };
+  } catch (error) {
+    if (error instanceof BundleValidationError) throw error;
+    throw new BundleValidationError(
+      "runner_input_unreadable",
+      `inputs.${basename} could not be staged`,
+    );
+  } finally {
+    await rm(partialPath, { force: true });
+    if (!committed) await rm(stagedPath, { force: true });
   }
 }
 

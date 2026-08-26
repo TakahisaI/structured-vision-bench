@@ -42,8 +42,10 @@ Bundle paths use normalized forward-slash relative paths. The validator rejects:
 - files that resolve outside the bundle root;
 - digest mismatches and missing files.
 
-Future attempts are written to staging first and become successful output only after all validation
-passes. A provider must not receive a bundle that failed preflight validation.
+Runner attempts are written to a private staging directory outside the bundle first and become
+successful output only after provider parsing, sanitizer target/binding checks, and schema validation
+pass. A provider must not receive a bundle that failed preflight validation, and a provider-facing
+read must not reopen the mutable source bundle after staging.
 
 ## Logging boundary
 
@@ -57,7 +59,11 @@ location and a count — an unknown key name itself is never echoed, because it 
 or secret-shaped text.
 
 Missing usage, model, effort, or stop-reason metadata is represented as unavailable, never zero or a
-guess.
+guess. A successful attempt contains only `attempt.json` and the formal `document.json` (sanitizer
+output when configured); it never stores raw provider output, raw documents, image/prompt contents,
+sanitizer policy contents/paths, endpoint/account identifiers, or failure tracebacks. Attempt readers
+reject symlinks, unknown fields,
+digest changes, identity changes, and policy-binding changes.
 
 ## Network and CI boundary
 

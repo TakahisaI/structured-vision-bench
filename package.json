@@ -4,6 +4,9 @@
   "private": true,
   "description": "Reproducible benchmarks for schema-guided structured extraction from document images.",
   "type": "module",
+  "bin": {
+    "svbench": "scripts/svbench.mjs"
+  },
   "engines": {
     "node": ">=22.16.0 <25",
     "npm": ">=10 <13"

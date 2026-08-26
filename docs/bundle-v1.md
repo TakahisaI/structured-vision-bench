@@ -288,8 +288,10 @@ A failed preflight must not call a provider.
 ## Input and output lifecycle
 
 Bundle files are input and remain unchanged for the lifetime of a measurement. An attempt is a
-separate directory with its own manifest and digests. Future runner work will stage an attempt,
-validate it, and then rename it to a final location.
+separate directory with its own manifest and digests. The Issue #2 runner stages provider inputs and
+successful attempt files outside the bundle, validates the formal document (sanitizer output when
+configured), and then renames the complete attempt directory into its final location. Failed runs do
+not become formal attempts.
 
 Retries are not hidden. A repeat or retry is a new attempt with a distinct identity and recorded
 reason. Failed output is not rewritten as success.

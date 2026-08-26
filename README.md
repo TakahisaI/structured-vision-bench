@@ -7,10 +7,11 @@ unsafe paths, and provides a public home for model-runner and comparison tooling
 teams that must keep real documents, truth data, prompts, provider credentials, and production
 adapters outside a public repository.
 
-> **Status:** contract bootstrap. Bundle v1 validation is available. Model runners, Codex
-> app-server support, comparison reports, repeat runs, and private command adapters are tracked in
-> Issues [#2](https://github.com/TakahisaI/structured-vision-bench/issues/2) through
-> [#6](https://github.com/TakahisaI/structured-vision-bench/issues/6).
+> **Status:** bundle v1 validation and the deterministic single-case mock runner are available.
+> Codex app-server support, comparison reports, repeat runs, and private command adapters remain
+> tracked in Issues [#3](https://github.com/TakahisaI/structured-vision-bench/issues/3) through
+> [#6](https://github.com/TakahisaI/structured-vision-bench/issues/6). Approval and sanitizer
+> process protocols are tracked separately in Issues #8 and #9.
 
 ## What belongs here
 
@@ -18,6 +19,8 @@ adapters outside a public repository.
 - Safe local validation of bundle manifests and referenced files.
 - Synthetic fixtures that contain no real person, transaction, document, or model response.
 - Provider interfaces and test doubles.
+- Single-case `svbench run --provider mock` execution with atomic formal attempts and optional
+  sanitizer output.
 - Comparison, reporting, repeat, and resume logic implemented by later issues.
 
 ## What does not belong here
@@ -46,7 +49,26 @@ npm run bundle:check -- fixtures/synthetic/invoice-basic
 npm run bundle:check -- fixtures/synthetic/invoice-basic --json
 ```
 
-The validator performs these checks before a future provider can run:
+Run the public synthetic fixture with the deterministic mock provider:
+
+```bash
+./scripts/svbench.mjs run \
+  --bundle fixtures/synthetic/invoice-basic \
+  --provider mock \
+  --model mock-v1 \
+  --effort medium \
+  --max-tokens 512 \
+  --attempt-root /tmp/svbench-attempts \
+  --json
+```
+
+The successful attempt contains only `attempt.json` and the formal `document.json` under the chosen
+attempt root; when a sanitizer is configured, that document is the sanitizer output. See
+[`docs/attempt-v1.md`](docs/attempt-v1.md) and
+[`schemas/attempt-v1.schema.json`](schemas/attempt-v1.schema.json) for the lifecycle and manifest
+contract. CI and public fixtures use the mock provider only; no real model or login flow is run.
+
+The validator performs these checks before the selected provider can run:
 
 1. `bundle.json` conforms to [`schemas/bundle-v1.schema.json`](schemas/bundle-v1.schema.json).
 2. Every reference is a normalized relative path inside the bundle root.
@@ -84,7 +106,7 @@ rewrite it. The full contract, path rules, validation order, and versioning poli
 ```text
 .github/workflows/     Public CI; never invokes a real provider
 schemas/               Machine-readable public contracts
-docs/                  Architecture, security, and bundle specifications
+docs/                  Architecture, security, bundle, and attempt specifications
 fixtures/synthetic/    Fictional, redistributable test cases
 src/bundle/             Contract validation library
 src/cli/                Local command-line entry points
@@ -109,7 +131,8 @@ test/                   Node.js test-runner suites
 
 Read [`AGENTS.md`](AGENTS.md) before changing the repository. Work is tracked as one Issue, one
 branch, and one pull request. The first contract and repository bootstrap are defined by
-[Issue #1](https://github.com/TakahisaI/structured-vision-bench/issues/1).
+[Issue #1](https://github.com/TakahisaI/structured-vision-bench/issues/1); the single-case runner
+is defined by [Issue #2](https://github.com/TakahisaI/structured-vision-bench/issues/2).
 
 ## License and affiliation
 
