@@ -4,7 +4,9 @@
 
 A bundle is immutable input for one schema-guided extraction case. It captures what a model should
 receive and how a later comparison should align the result with optional truth. It does not contain
-provider credentials, an executable command, or attempt output.
+provider credentials, an executable command, or attempt output, and it does not select execution
+settings. Requested model, effort, token limit, and repeat settings belong to runner or suite
+configuration and are recorded in the attempt, not in the bundle.
 
 The machine-readable manifest contract is
 [`schemas/bundle-v1.schema.json`](../schemas/bundle-v1.schema.json).
@@ -52,6 +54,22 @@ Each reference contains:
 The original source document does not need to be copied into a bundle. A consumer may export only
 the exact prepared representation used for model input, while retaining provenance privately.
 
+#### Truth shape
+
+Optional `truth` is a **comparison projection**, not a full output-schema instance:
+
+1. It must contain a value at every declared `scalars` pointer.
+2. For each declared array, it must contain an array at the array path whose elements carry that
+   array's `key`, and each field listed in `fields[]`. Elements are not required to appear in any
+   particular order.
+3. Fields outside `scalars` and the declared arrays' `key`/`fields` may be omitted — including
+   model-only fields such as self-reported confidence, which must never be invented as human truth
+   or added to a score denominator.
+
+An intentionally absent value is represented as explicit `null` at the projected path, never by an
+empty string or a missing key inside a projected object. The provider never receives the truth
+file; it stays on the comparison side of the boundary.
+
 ### Comparison
 
 `comparison` declares data alignment without implementing the comparison algorithm:
@@ -60,6 +78,20 @@ the exact prepared representation used for model input, while retaining provenan
 - `arrays`: array paths, element key paths, and compared fields;
 - `critical`: pointers whose failure is evaluated separately from an average score;
 - `normalization`: explicit string operations and exact number comparison.
+
+`normalization.strings` may contain each of these operations at most once, applied in the listed
+declaration order before comparison:
+
+- `nfkc`: Unicode NFKC normalization;
+- `trim`: remove leading and trailing whitespace;
+- `collapse-whitespace`: replace each whitespace run with a single space;
+- `remove-grouping-separators`: remove digit grouping marks (`,`, `.`, space, narrow no-break
+  space) between digits in numeric-looking strings. This covers currency formatting; it does not
+  strip a leading currency symbol.
+
+Numbers are compared exactly (`normalization.numbers: "exact"`). Bundle v1 defines no other
+normalization. A consumer that needs an operation absent from this list must not apply it
+implicitly; it requires a new `bundleVersion`.
 
 Bundle v1 does not define semantic similarity, edit-distance acceptance, fuzzy row matching, or an
 LLM judge. A missing or duplicate array key must not be silently paired with an arbitrary element.
@@ -83,6 +115,15 @@ Comparison paths are RFC 6901 JSON Pointer strings with one extension:
 The schema rejects syntax violations. Cross-field rules — duplicate array paths, scalars that
 duplicate an array path, and critical entries referencing undeclared arrays or un-compared fields —
 fail validation with the stable code `comparison_contract_invalid`.
+
+Evaluation context is always the bundle root. `scalars` and whole-array `arrays[].path` entries are
+root-relative. `arrays[].key` and `arrays[].fields[]` are evaluated against one array element.
+Wildcard evaluation resolves the array at its prefix, then applies `<field>` to each element.
+
+An unresolved comparison path is a comparison error, not a bundle error. Bundle validation checks
+only the syntax and cross-field rules above; whether `/totalAmount` exists in a particular output is
+decided when the comparison runs. A missing or extra array element is likewise reported by the
+comparison, never silently paired (see below).
 
 ### Metadata
 

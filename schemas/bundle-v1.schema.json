@@ -235,7 +235,8 @@
                 "enum": [
                   "nfkc",
                   "trim",
-                  "collapse-whitespace"
+                  "collapse-whitespace",
+                  "remove-grouping-separators"
                 ]
               },
               "uniqueItems": true
