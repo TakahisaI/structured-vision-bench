@@ -51,6 +51,11 @@ Errors use stable codes and bounded diagnostics. Logs must not include image byt
 responses, prompt contents, secrets, or local absolute paths. A fake value in an automated test must
 be visibly synthetic.
 
+Diagnostics are capped in count and message length, with omitted entries summarized instead of
+printed. A manifest key that violates `additionalProperties: false` is reported only by its parent
+location and a count — an unknown key name itself is never echoed, because it can carry a local path
+or secret-shaped text.
+
 Missing usage, model, effort, or stop-reason metadata is represented as unavailable, never zero or a
 guess.
 

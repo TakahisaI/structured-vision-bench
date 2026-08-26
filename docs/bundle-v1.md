@@ -56,13 +56,33 @@ the exact prepared representation used for model input, while retaining provenan
 
 `comparison` declares data alignment without implementing the comparison algorithm:
 
-- `scalars`: JSON-pointer-like paths compared as scalar values;
+- `scalars`: pointers compared as scalar values;
 - `arrays`: array paths, element key paths, and compared fields;
-- `critical`: paths whose failure is evaluated separately from an average score;
+- `critical`: pointers whose failure is evaluated separately from an average score;
 - `normalization`: explicit string operations and exact number comparison.
 
 Bundle v1 does not define semantic similarity, edit-distance acceptance, fuzzy row matching, or an
 LLM judge. A missing or duplicate array key must not be silently paired with an arbitrary element.
+
+#### Comparison pointer language
+
+Comparison paths are RFC 6901 JSON Pointer strings with one extension:
+
+1. Every pointer starts with `/`, has at least one segment, and is at most 512 characters.
+2. A segment that is exactly `*` matches every element of the array addressed by the preceding
+   segments (a wildcard). A `*` inside a segment, such as `/li*nes`, is always a literal property
+   name.
+3. `~0` and `~1` escapes follow RFC 6901. Any other `~` sequence is invalid.
+4. Wildcards appear only in `critical` entries — at most one per pointer, never as the last
+   segment. `scalars`, `arrays[].path`, `arrays[].key`, and `arrays[].fields[]` are plain pointers
+   without wildcards; `key` and `fields[]` name fields of one array element with a single segment.
+5. A `critical` entry must be either a declared scalar (`comparison.scalars`) or
+   `<declared-array-path>/*/<field>`, where `<field>` equals that array's `key` or one of its
+   declared `fields`. A critical entry must not address a whole array.
+
+The schema rejects syntax violations. Cross-field rules — duplicate array paths, scalars that
+duplicate an array path, and critical entries referencing undeclared arrays or un-compared fields —
+fail validation with the stable code `comparison_contract_invalid`.
 
 ### Metadata
 
@@ -74,6 +94,19 @@ Required metadata identifies the consumer-owned extraction contract:
 
 `sourceCommit` is optional. It may be a source revision or another immutable consumer version. Real
 bundle metadata remains confidential when it can identify a private corpus or repository state.
+
+## JSON size limits
+
+A conforming reader refuses to parse any of the three JSON files above 4 MiB (`4194304` bytes):
+
+| File | Limit | Failure code |
+| --- | --- | --- |
+| `bundle.json` (manifest) | 4 MiB | `json_file_too_large` |
+| referenced output schema (`inputs.schema`) | 4 MiB | `json_file_too_large` |
+| referenced truth (`inputs.truth`) | 4 MiB | `json_file_too_large` |
+
+Image and text inputs have no size limit at this layer; their bytes are verified by digest only.
+Raising or lowering a limit changes machine behavior and requires a new `bundleVersion`.
 
 ## Path rules
 

@@ -4,9 +4,21 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { BundleValidationError, validateBundle } from "../src/bundle/validate-bundle.js";
+import { BundleValidationError, MAX_JSON_BYTES, validateBundle } from "../src/bundle/validate-bundle.js";
 
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
+
+type FileReference = { path: string; sha256: string };
+
+type Manifest = {
+  bundleVersion: number;
+  comparison: Record<string, unknown>;
+  inputs: { system: FileReference & Record<string, unknown> } & Record<
+    string,
+    (FileReference & Record<string, unknown>) | undefined
+  >;
+  [key: string]: unknown;
+};
 
 test("accepts the complete synthetic bundle", async () => {
   const result = await validateBundle(FIXTURE);
@@ -97,6 +109,151 @@ test("rejects a symlinked input", { skip: process.platform === "win32" }, async 
   });
 });
 
+test("never echoes an unknown manifest key into diagnostics", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    // Synthetic marker stands in for a real local absolute path or secret.
+    const marker = "/tmp/synthetic-local/SECRET_TOKEN=SYNTHETIC-VALUE";
+    manifest[marker] = true;
+    await writeManifest(bundle, manifest);
+
+    const error = await captureError(bundle);
+    assert.equal(error.code, "manifest_schema_invalid");
+    const rendered = JSON.stringify({ message: error.message, details: error.details });
+    assert.ok(!rendered.includes(marker), "unknown key name must not reach diagnostics");
+    assert.ok(
+      error.details.some((detail) => detail.includes("unexpected propert")),
+      `expected an unexpected-property detail, got: ${JSON.stringify(error.details)}`,
+    );
+  });
+});
+
+test("bounds the number of diagnostic details", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    for (const reference of Object.values(manifest.inputs)) {
+      if (reference === undefined) continue;
+      for (let index = 0; index < 10; index += 1) {
+        reference[`syntheticUnknown${index}`] = true;
+      }
+    }
+    await writeManifest(bundle, manifest);
+
+    const error = await captureError(bundle);
+    assert.equal(error.code, "manifest_schema_invalid");
+    assert.ok(
+      error.details.length <= 20,
+      `details should be bounded, got ${error.details.length}`,
+    );
+    assert.ok(
+      error.details.every((detail) => !detail.includes("syntheticUnknown")),
+      "unknown key names must not reach diagnostics",
+    );
+  });
+});
+
+test("rejects a wildcard in scalar paths", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.scalars = ["/lines/*/amount"];
+    await writeManifest(bundle, manifest);
+    await expectCode(bundle, "manifest_schema_invalid");
+  });
+});
+
+test("rejects two wildcards in one pointer", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.critical = [
+      "/invoiceNumber",
+      "/issuedAt",
+      "/totalAmount",
+      "/lines/*/a/*/amount",
+    ];
+    await writeManifest(bundle, manifest);
+    await expectCode(bundle, "manifest_schema_invalid");
+  });
+});
+
+test("rejects a critical field not compared by its array", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.critical = [
+      "/invoiceNumber",
+      "/issuedAt",
+      "/totalAmount",
+      "/lines/*/discount",
+    ];
+    await writeManifest(bundle, manifest);
+    const error = await captureError(bundle);
+    assert.equal(error.code, "comparison_contract_invalid");
+    assert.ok(!JSON.stringify(error.details).includes("/Users"), "no absolute path in diagnostics");
+  });
+});
+
+test("rejects a critical entry referencing an undeclared array", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.critical = [
+      "/invoiceNumber",
+      "/issuedAt",
+      "/totalAmount",
+      "/payments/*/amount",
+    ];
+    await writeManifest(bundle, manifest);
+    await expectCode(bundle, "comparison_contract_invalid");
+  });
+});
+
+test("rejects duplicate array declarations and scalars duplicating arrays", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.arrays = [
+      ...(manifest.comparison.arrays as unknown[]),
+      { path: "/lines", key: "/lineNo", fields: ["/amount"] },
+    ];
+    await writeManifest(bundle, manifest);
+    await expectCode(bundle, "comparison_contract_invalid");
+  });
+
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.scalars = [...(manifest.comparison.scalars as string[]), "/lines"];
+    await writeManifest(bundle, manifest);
+    await expectCode(bundle, "comparison_contract_invalid");
+  });
+});
+
+test("rejects a whole-array critical entry", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.critical = ["/invoiceNumber", "/issuedAt", "/totalAmount", "/lines"];
+    await writeManifest(bundle, manifest);
+    await expectCode(bundle, "comparison_contract_invalid");
+  });
+});
+
+test("accepts every declared array field as critical", async () => {
+  await withFixture(async (bundle) => {
+    const manifest = await readManifest(bundle);
+    manifest.comparison.critical = ["/lines/*/description", "/lines/*/lineNo"];
+    await writeManifest(bundle, manifest);
+    const result = await validateBundle(bundle);
+    assert.equal(result.caseId, "synthetic-invoice-basic");
+  });
+});
+
+test("rejects a manifest exactly one byte over the size limit", async () => {
+  await withFixture(async (bundle) => {
+    // {"synthetic":"<padding>"} sized to exactly MAX_JSON_BYTES + 1 bytes.
+    const head = Buffer.from('{"synthetic":"', "utf8");
+    const tail = Buffer.from('"}', "utf8");
+    const padding = Buffer.alloc(MAX_JSON_BYTES + 1 - head.length - tail.length, 0x78);
+    await writeFile(path.join(bundle, "bundle.json"), Buffer.concat([head, padding, tail]));
+    await expectCode(bundle, "json_file_too_large");
+  });
+});
+
 async function withFixture(run: (bundle: string) => Promise<void>): Promise<void> {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-bundle-"));
   const bundle = path.join(temporary, "case");
@@ -122,13 +279,6 @@ async function captureError(bundle: string): Promise<BundleValidationError> {
   }
   assert.fail("expected bundle validation to fail");
 }
-
-type Manifest = {
-  bundleVersion: number;
-  inputs: {
-    system: { path: string; sha256: string };
-  };
-};
 
 async function readManifest(bundle: string): Promise<Manifest> {
   return JSON.parse(await readFile(path.join(bundle, "bundle.json"), "utf8")) as Manifest;

@@ -9,8 +9,31 @@ export type SchemaIssue = {
 
 export function validateJsonSchema(schema: JsonValue, value: JsonValue): SchemaIssue[] {
   const issues: SchemaIssue[] = [];
-  validateNode(schema, value, "$", issues);
+  validateNode(schema, value, "$", issues, schema);
   return issues;
+}
+
+function resolveLocalRef(rootSchema: JsonValue, ref: string): JsonValue | undefined {
+  if (!ref.startsWith("#")) return undefined;
+  const pointer = decodeURIComponent(ref.slice(1));
+  if (pointer === "" ) return rootSchema;
+  if (!pointer.startsWith("/")) return undefined;
+  let current: JsonValue = rootSchema;
+  for (const rawSegment of pointer.slice(1).split("/")) {
+    const segment = rawSegment.replace(/~1/gu, "/").replace(/~0/gu, "~");
+    if (Array.isArray(current)) {
+      const index = Number(segment);
+      if (!Number.isInteger(index) || index < 0 || index >= current.length) return undefined;
+      current = current[index]!;
+      continue;
+    }
+    if (isJsonObject(current) && segment in current) {
+      current = current[segment]!;
+      continue;
+    }
+    return undefined;
+  }
+  return current;
 }
 
 function validateNode(
@@ -18,12 +41,25 @@ function validateNode(
   value: JsonValue,
   path: string,
   issues: SchemaIssue[],
+  rootSchema?: JsonValue,
 ): void {
   if (!isJsonObject(schemaValue)) {
     issues.push({ path, message: "schema node must be an object" });
     return;
   }
   const schema = schemaValue;
+
+  // Draft 2020-12 allows $ref alongside sibling keywords; both must hold. Only
+  // local "#/..." references are supported, which is all the bundled contract
+  // schema uses.
+  if ("$ref" in schema && typeof schema.$ref === "string" && rootSchema !== undefined) {
+    const resolved = resolveLocalRef(rootSchema, schema.$ref);
+    if (resolved === undefined) {
+      issues.push({ path, message: `unresolvable schema $ref ${schema.$ref}` });
+      return;
+    }
+    validateNode(resolved, value, path, issues, rootSchema);
+  }
 
   if ("const" in schema && !isDeepStrictEqual(value, schema.const)) {
     issues.push({ path, message: `must equal ${JSON.stringify(schema.const)}` });
@@ -41,8 +77,9 @@ function validateNode(
     return;
   }
 
-  if (type === "object" && isJsonObject(value)) validateObject(schema, value, path, issues);
-  if (type === "array" && Array.isArray(value)) validateArray(schema, value, path, issues);
+  const root = rootSchema ?? schema;
+  if (type === "object" && isJsonObject(value)) validateObject(schema, value, path, issues, root);
+  if (type === "array" && Array.isArray(value)) validateArray(schema, value, path, issues, root);
   if (type === "string" && typeof value === "string") validateString(schema, value, path, issues);
   if ((type === "number" || type === "integer") && typeof value === "number") {
     validateNumber(schema, value, path, issues);
@@ -54,6 +91,7 @@ function validateObject(
   value: Record<string, JsonValue>,
   path: string,
   issues: SchemaIssue[],
+  rootSchema: JsonValue,
 ): void {
   const required = Array.isArray(schema.required)
     ? schema.required.filter((item): item is string => typeof item === "string")
@@ -63,15 +101,30 @@ function validateObject(
   }
 
   const properties = isJsonObject(schema.properties) ? schema.properties : {};
+  let disallowedCount = 0;
+  let firstDisallowedPath: string | undefined;
   for (const [key, child] of Object.entries(value)) {
     const childSchema = properties[key];
     if (childSchema !== undefined) {
-      validateNode(childSchema, child, `${path}.${key}`, issues);
+      validateNode(childSchema, child, `${path}.${key}`, issues, rootSchema);
       continue;
     }
     if (schema.additionalProperties === false) {
-      issues.push({ path: `${path}.${key}`, message: "is not allowed" });
+      // Never echo the unknown key itself: a manifest key can carry a local
+      // path or secret-shaped text that must not reach logs. Report the parent
+      // location and count instead.
+      disallowedCount += 1;
+      firstDisallowedPath ??= path;
     }
+  }
+  if (disallowedCount > 0) {
+    issues.push({
+      path: firstDisallowedPath!,
+      message:
+        disallowedCount === 1
+          ? "has an unexpected property"
+          : `has ${disallowedCount} unexpected properties`,
+    });
   }
 }
 
@@ -80,6 +133,7 @@ function validateArray(
   value: JsonValue[],
   path: string,
   issues: SchemaIssue[],
+  rootSchema: JsonValue,
 ): void {
   if (typeof schema.minItems === "number" && value.length < schema.minItems) {
     issues.push({ path, message: `must contain at least ${schema.minItems} items` });
@@ -97,8 +151,16 @@ function validateArray(
     }
   }
   if (schema.items !== undefined) {
-    value.forEach((item, index) => validateNode(schema.items!, item, `${path}[${index}]`, issues));
+    value.forEach((item, index) =>
+      validateNode(schema.items!, item, `${path}[${index}]`, issues, rootSchema),
+    );
   }
+}
+
+// JSON Schema measures string lengths in Unicode code points, not UTF-16 code
+// units, so surrogate pairs count as one character.
+function stringLength(value: string): number {
+  return [...value].length;
 }
 
 function validateString(
@@ -107,10 +169,10 @@ function validateString(
   path: string,
   issues: SchemaIssue[],
 ): void {
-  if (typeof schema.minLength === "number" && value.length < schema.minLength) {
+  if (typeof schema.minLength === "number" && stringLength(value) < schema.minLength) {
     issues.push({ path, message: `must have at least ${schema.minLength} characters` });
   }
-  if (typeof schema.maxLength === "number" && value.length > schema.maxLength) {
+  if (typeof schema.maxLength === "number" && stringLength(value) > schema.maxLength) {
     issues.push({ path, message: `must have at most ${schema.maxLength} characters` });
   }
   if (typeof schema.pattern === "string" && !new RegExp(schema.pattern, "u").test(value)) {

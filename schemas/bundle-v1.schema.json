@@ -172,12 +172,13 @@
         "critical",
         "normalization"
       ],
+      "$comment": "Comparison paths use RFC 6901 JSON Pointer. Wildcards are allowed only in critical entries as '<array-path>/*/<field>'; '*' inside a segment is always literal. Cross-field rules are enforced by the validator with code comparison_contract_invalid.",
       "properties": {
         "scalars": {
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^/"
+            "$ref": "#/$defs/plainPointer"
           },
           "uniqueItems": true
         },
@@ -193,18 +194,18 @@
             "properties": {
               "path": {
                 "type": "string",
-                "pattern": "^/"
+                "$ref": "#/$defs/plainPointer"
               },
               "key": {
                 "type": "string",
-                "pattern": "^/"
+                "$ref": "#/$defs/relativeFieldPointer"
               },
               "fields": {
                 "type": "array",
                 "minItems": 1,
                 "items": {
                   "type": "string",
-                  "pattern": "^/"
+                  "$ref": "#/$defs/relativeFieldPointer"
                 },
                 "uniqueItems": true
               }
@@ -216,7 +217,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^/"
+            "$ref": "#/$defs/criticalPointer"
           },
           "uniqueItems": true
         },
@@ -281,5 +282,38 @@
       "additionalProperties": false
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "plainPointer": {
+      "type": "string",
+      "description": "RFC 6901 JSON Pointer with at least one segment and no wildcard segments.",
+      "minLength": 2,
+      "maxLength": 512,
+      "pattern": "^/(?:[^/*~]|~[01])+(?:/(?:[^/*~]|~[01])+)*$"
+    },
+    "comparisonPointer": {
+      "type": "string",
+      "description": "Plain JSON Pointer with at most one wildcard segment that is not the last segment. Reserved for critical entries.",
+      "minLength": 2,
+      "maxLength": 512,
+      "pattern": "^/(?:[^/*~]|~[01])+(?:/(?:[^/*~]|~[01])+)*$|^/(?:(?:[^/*~]|~[01])+/)+\\*/(?:[^/*~]|~[01])+(?:/(?:[^/*~]|~[01])+)*$"
+    },
+    "relativeFieldPointer": {
+      "type": "string",
+      "description": "Single-segment RFC 6901 relative pointer naming a field of an array element; no wildcards.",
+      "minLength": 2,
+      "maxLength": 512,
+      "pattern": "^/(?:[^/*~]|~[01])+$"
+    },
+    "criticalPointer": {
+      "type": "string",
+      "description": "A declared scalar pointer or '<declared-array-path>/*/<field-of-that-array>'.",
+      "minLength": 2,
+      "maxLength": 512,
+      "pattern": "^/(?:[^/*~]|~[01])+$|^/(?:(?:[^/*~]|~[01])+/)+\\*/(?:[^/*~]|~[01])+$"
+    },
+    "sha256PatternNote": {
+      "description": "Cross-field rules (critical must reference declared scalars/arrays/fields, key and fields must belong to their array) are enforced by the validator with code comparison_contract_invalid."
+    }
+  }
 }

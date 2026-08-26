@@ -14,7 +14,7 @@ const TEXT_EXTENSIONS = new Set([
   ".yaml",
   ".yml",
 ]);
-const TEXT_BASENAMES = new Set([".gitignore", ".node-version", ".npmrc", "LICENSE"]);
+const TEXT_BASENAMES = new Set([".env.example", ".gitignore", ".node-version", ".npmrc", "LICENSE"]);
 
 export async function listTextFiles(root = process.cwd()) {
   const output = [];
