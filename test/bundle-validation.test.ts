@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -33,6 +33,17 @@ test("rejects a missing referenced file", async () => {
   });
 });
 
+test("rejects a symlinked bundle manifest", { skip: process.platform === "win32" }, async () => {
+  await withFixture(async (bundle) => {
+    const manifestPath = path.join(bundle, "bundle.json");
+    const targetPath = path.join(bundle, "bundle-target.json");
+    await writeFile(targetPath, await readFile(manifestPath));
+    await unlink(manifestPath);
+    await symlink("bundle-target.json", manifestPath);
+    await expectCode(bundle, "bundle_manifest_symlink");
+  });
+});
+
 test("rejects a path traversal reference", async () => {
   await withFixture(async (bundle) => {
     const manifest = await readManifest(bundle);
@@ -51,10 +62,27 @@ test("rejects an absolute reference", async () => {
   });
 });
 
-test("rejects a digest mismatch", async () => {
+test("accepts a safe path segment that starts with two dots", async () => {
+  await withFixture(async (bundle) => {
+    const safeDirectory = path.join(bundle, "..safe");
+    await mkdir(safeDirectory);
+    await cp(path.join(bundle, "system.txt"), path.join(safeDirectory, "system.txt"));
+
+    const manifest = await readManifest(bundle);
+    manifest.inputs.system.path = "..safe/system.txt";
+    await writeManifest(bundle, manifest);
+
+    const result = await validateBundle(bundle);
+    assert.equal(result.caseId, "synthetic-invoice-basic");
+  });
+});
+
+test("rejects a digest mismatch without echoing digest values", async () => {
   await withFixture(async (bundle) => {
     await writeFile(path.join(bundle, "system.txt"), "changed after manifest creation\n", "utf8");
-    await expectCode(bundle, "digest_mismatch");
+    const error = await captureError(bundle);
+    assert.equal(error.code, "digest_mismatch");
+    assert.deepEqual(error.details, []);
   });
 });
 
@@ -81,16 +109,24 @@ async function withFixture(run: (bundle: string) => Promise<void>): Promise<void
 }
 
 async function expectCode(bundle: string, code: string): Promise<void> {
-  await assert.rejects(
-    validateBundle(bundle),
-    (error: unknown) => error instanceof BundleValidationError && error.code === code,
-  );
+  const error = await captureError(bundle);
+  assert.equal(error.code, code);
+}
+
+async function captureError(bundle: string): Promise<BundleValidationError> {
+  try {
+    await validateBundle(bundle);
+  } catch (error) {
+    assert.ok(error instanceof BundleValidationError);
+    return error;
+  }
+  assert.fail("expected bundle validation to fail");
 }
 
 type Manifest = {
   bundleVersion: number;
   inputs: {
-    system: { path: string };
+    system: { path: string; sha256: string };
   };
 };
 
