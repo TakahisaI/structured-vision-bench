@@ -24,9 +24,13 @@ function expectSet(defName: string, samples: [string, boolean][]): void {
 
 test("plainPointer treats embedded stars as literals and reserves whole-star segments", () => {
   expectSet("plainPointer", [
-    // accepted: literal stars, including '**'
+    // accepted: literal stars, including '**' and leading single stars
     ["/customer/name", true],
     ["/li*nes", true],
+    ["/*field", true], // leading single star, not a whole-star segment
+    ["/rows/*id", true],
+    ["/*~0", true],
+    ["/items/*code", true],
     ["/x*y/z", true],
     ["/li**nes", true],
     ["/**", true],
@@ -73,6 +77,8 @@ test("criticalPointer accepts nested scalars and single wildcard shapes", () => 
     ["/lines/*/amount", true],
     ["/li*nes/*/amount", true],
     ["/**/*/b", true], // array path "/**" is a literal name
+    ["/*array/*/value", true], // array path "/*array" is a literal name
+    ["/lines/*/*field", true], // field named "*field" via wildcard
     // rejected shapes
     ["/", false],
     ["/*", false],

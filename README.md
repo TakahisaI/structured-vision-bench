@@ -51,8 +51,16 @@ The validator performs these checks before a future provider can run:
 1. `bundle.json` conforms to [`schemas/bundle-v1.schema.json`](schemas/bundle-v1.schema.json).
 2. Every reference is a normalized relative path inside the bundle root.
 3. Referenced inputs are regular files, not symbolic links.
-4. Each referenced file matches its declared SHA-256 digest.
-5. Referenced schema and optional truth files contain valid JSON.
+4. Each referenced file matches its declared SHA-256 digest, read from the same bytes that are
+   parsed or handed onward.
+5. Referenced schema and optional truth files contain valid JSON under the byte-exactness contract
+   (strict UTF-8, no duplicate object members, binary64 numbers only).
+6. The comparison pointer contract holds: RFC 6901 pointers with at most one whole-segment `*`
+   wildcard, allowed only in `critical` entries and only pointing at declared arrays and compared
+   fields (`comparison_contract_invalid` otherwise).
+7. When truth exists, its projection is validated during preflight — every declared scalar, array,
+   key, and compared field must resolve with sound keys and types
+   (`truth_contract_invalid` otherwise).
 
 ## Bundle overview
 

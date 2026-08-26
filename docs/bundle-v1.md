@@ -120,38 +120,7 @@ fabricated value, not a match. Bundle v1 defines no other normalization — no c
 stripping. A consumer that needs formatted-number normalization must wait for a new `bundleVersion`
 that names the affected paths explicitly.
 
-### Absence and denominator semantics
-
-Comparison outcomes for a scalar or matched-item field are fixed by this table:
-
-| truth | actual | outcome | counts toward field `total` |
-| --- | --- | --- | --- |
-| `null` | `null` | no mismatch, but not `matched` | no |
-| `null` | present scalar | `fabricated` | yes |
-| present scalar | `null` | `missed` | yes |
-| present scalar | present scalar | `matched` or `wrong` | yes |
-| missing path on either side | any | truth preflight failure (`truth_contract_invalid`) or comparison error — never an ordinary field outcome | no |
-
-Empty string, `0`, and `false` are present values; a string that normalizes to empty remains
-present and never becomes `null`. This keeps blank-on-both-sides fields from inflating accuracy
-while making fabricated and missed values observable.
-
-For missing and extra array items:
-
-- every `missing_item` increments the array membership `missing` count;
-- for a missing item, only non-`null` truth values listed in that array's `fields[]` increment
-  field-level `missed` / `total`;
-- every `extra_item` increments the array membership `extra` count;
-- for an extra item, only non-`null` actual values listed in that array's `fields[]` increment
-  field-level `fabricated` / `total`;
-- `null` fields and the alignment key are never silently added to the ordinary field denominator;
-  the alignment key contributes to membership/alignment only, unless it is also explicitly listed
-  in `fields[]`.
-
-Bundle v1 does not define semantic similarity, edit-distance acceptance, fuzzy row matching, or an
-LLM judge. A missing or duplicate array key must not be silently paired with an arbitrary element.
-
-#### Absence and field denominators
+### Absence and field denominators
 
 Field-level `total`, `matched`, `missed`, `fabricated`, and `wrong` use the following rules after
 applying declared normalization:
@@ -179,6 +148,9 @@ Array membership and field denominators are separate:
 - `null` fields inside missing or extra elements do not enter a field denominator;
 - the alignment `key` belongs to membership accounting and key-critical gates. It enters ordinary
   field accounting only when the same pointer is also explicitly listed in `fields[]`.
+
+Bundle v1 does not define semantic similarity, edit-distance acceptance, fuzzy row matching, or an
+LLM judge. A missing or duplicate array key must not be silently paired with an arbitrary element.
 
 #### Comparison pointer language
 
@@ -255,6 +227,28 @@ A conforming reader refuses to parse any of the three JSON files above 4 MiB (`4
 
 Image and text inputs have no size limit at this layer; their bytes are verified by digest only.
 Raising or lowering a limit changes machine behavior and requires a new `bundleVersion`.
+
+## Byte-exactness contract
+
+Bundle v1 is portable input: every conforming reader of the same bytes must see the same values.
+
+- **Encoding.** `bundle.json`, the referenced schema, truth, `system.txt`, and `instruction.txt`
+  are UTF-8. Invalid UTF-8 byte sequences are a validation failure — readers must not silently
+  replace them with U+FFFD, because the same digest would then yield different prompts per
+  platform.
+- **Duplicate object members.** A JSON object with two occurrences of the same member name is
+  invalid. Last-wins silently changes values while the digest stays identical.
+- **Number domain.** JSON numbers are IEEE-754 binary64 values. Numbers whose parse overflows to
+  an infinity (for example `1e400`) are invalid. Values that binary64 rounds (for example
+  `9007199254740993` reading as `9007199254740992`) are valid, and that rounding is part of the
+  contract: number comparison happens after it, never before. Number keys and string keys never
+  equal each other even when their digits match.
+- **Read-once rule for validators.** A validator computes digests and parses each bounded JSON file
+  from one read of the same bytes, and re-verifies the digest when it opens a referenced JSON file
+  again, so projection and syntax checks cannot apply to different bytes than the manifest
+  committed to. The runner (Issue #2) owns the corresponding rule for provider inputs: after
+  preflight succeeds, provider inputs come from the verified bytes or staged copies — never from a
+  fresh open of the original bundle directory.
 
 ## Path rules
 

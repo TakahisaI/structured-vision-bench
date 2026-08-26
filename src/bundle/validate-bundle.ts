@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
-import { isJsonObject, parseJson, type JsonValue } from "./json.js";
+import { decodeUtf8Strict, isJsonObject, parseJson, type JsonValue } from "./json.js";
 import { validateJsonSchema } from "./schema-validator.js";
 
 const MANIFEST_NAME = "bundle.json";
@@ -41,8 +41,10 @@ export async function validateBundle(
   const manifestPath = path.join(root, MANIFEST_NAME);
   await assertManifestFile(manifestPath);
 
-  const manifest = await readJsonFile(manifestPath, MANIFEST_NAME, MAX_JSON_BYTES);
-  const contractSchema = await readJsonFile(contractSchemaPath, "bundle v1 schema", MAX_JSON_BYTES);
+  const manifest = (await readJsonFile(manifestPath, MANIFEST_NAME, MAX_JSON_BYTES)).value;
+  const contractSchema = (
+    await readJsonFile(contractSchemaPath, "bundle v1 schema", MAX_JSON_BYTES)
+  ).value;
   const schemaIssues = validateJsonSchema(contractSchema, manifest);
   if (schemaIssues.length > 0) {
     throw new BundleValidationError(
@@ -63,9 +65,17 @@ export async function validateBundle(
   }
 
   const references = collectReferences(inputs);
+  const digestsByPath = new Map<string, string>();
   for (const [label, reference] of references) {
     const absolute = await resolveReferencedFile(root, reference.path, label);
-    const digest = await sha256File(absolute);
+    // Cache by canonical path so the schema/truth re-read below verifies the
+    // SAME bytes that were digested instead of reopening a possibly swapped
+    // file.
+    let digest = digestsByPath.get(absolute);
+    if (digest === undefined) {
+      digest = await sha256File(absolute);
+      digestsByPath.set(absolute, digest);
+    }
     if (digest !== reference.sha256) {
       throw new BundleValidationError(
         "digest_mismatch",
@@ -74,16 +84,19 @@ export async function validateBundle(
     }
   }
 
-  await readJsonFile(
-    await resolveReferencedFile(root, requireReference(inputs, "schema").path, "inputs.schema"),
+  await readVerifiedJson(
+    root,
+    requireReference(inputs, "schema").path,
     "inputs.schema",
-    MAX_JSON_BYTES,
+    digestsByPath,
   );
   if (Object.hasOwn(inputs, "truth")) {
-    const truth = await readJsonFile(
-      await resolveReferencedFile(root, requireReference(inputs, "truth").path, "inputs.truth"),
+    const truthReference = requireReference(inputs, "truth");
+    const { value: truth } = await readVerifiedJson(
+      root,
+      truthReference.path,
       "inputs.truth",
-      MAX_JSON_BYTES,
+      digestsByPath,
     );
     assertTruthProjection(manifest.comparison ?? null, truth);
   }
@@ -93,6 +106,31 @@ export async function validateBundle(
     referencedFiles: references.length,
     bundleVersion: 1,
   };
+}
+
+/**
+ * Re-reads a referenced JSON file and confirms its bytes still hash to the
+ * digest recorded during preflight, so projection/syntax checks apply to the
+ * exact bytes the manifest committed to. A swap between reads fails here
+ * instead of validating different bytes than the digest covered.
+ */
+async function readVerifiedJson(
+  root: string,
+  manifestPath: string,
+  label: string,
+  digestsByPath: Map<string, string>,
+): Promise<{ value: JsonValue; bytes: Buffer }> {
+  const absolute = await resolveReferencedFile(root, manifestPath, label);
+  const expectedDigest = digestsByPath.get(absolute);
+  const result = await readJsonFile(absolute, label, MAX_JSON_BYTES);
+  const actualDigest = createHash("sha256").update(result.bytes).digest("hex");
+  if (expectedDigest !== undefined && actualDigest !== expectedDigest) {
+    throw new BundleValidationError(
+      "digest_mismatch",
+      `${label} changed after preflight digest verification`,
+    );
+  }
+  return result;
 }
 
 async function assertBundleRoot(bundleDirectory: string): Promise<void> {
@@ -192,7 +230,11 @@ function assertSafeRelativePath(value: string, label: string): void {
   }
 }
 
-async function readJsonFile(file: string, label: string, maxBytes: number | null): Promise<JsonValue> {
+async function readJsonFile(
+  file: string,
+  label: string,
+  maxBytes: number | null,
+): Promise<{ value: JsonValue; bytes: Buffer }> {
   let info;
   try {
     info = await stat(file);
@@ -206,14 +248,18 @@ async function readJsonFile(file: string, label: string, maxBytes: number | null
     );
   }
 
-  let source;
+  // Read the exact bytes once: the digest and the parsed value must come from
+  // the same buffer so a file swapped between reads cannot split them.
+  let bytes;
   try {
-    source = await readFile(file, "utf8");
+    bytes = await readFile(file);
   } catch {
     throw new BundleValidationError("json_file_unreadable", `${label} could not be read`);
   }
+
+  const source = decodeUtf8Strict(bytes, label);
   try {
-    return parseJson(source, label);
+    return { value: parseJson(source, label), bytes };
   } catch (error) {
     throw new BundleValidationError(
       "json_file_invalid",

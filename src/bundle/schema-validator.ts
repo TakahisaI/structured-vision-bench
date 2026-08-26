@@ -155,12 +155,11 @@ function validateArray(
     issues.push({ path, message: `must contain at most ${schema.maxItems} items` });
   }
   if (schema.uniqueItems === true) {
-    // Linear scan with a Set of serialized items; JSON.stringify is injective
-    // enough for duplicate detection here because JSON.parse cannot produce
-    // undefined or non-numeric-keyed objects.
+    // Linear scan over canonical encodings: object keys are sorted so that
+    // member order cannot hide a duplicate ({a:1,b:2} === {b:2,a:1}).
     const seen = new Map<string, number>();
     for (const [index, item] of value.entries()) {
-      const encoded = JSON.stringify(item);
+      const encoded = canonicalEncode(item);
       const firstIndex = seen.get(encoded);
       if (firstIndex !== undefined) {
         issues.push({ path: `${path}[${index}]`, message: "must be unique" });
@@ -180,6 +179,29 @@ function validateArray(
 
 function issueBudgetExceeded(issues: SchemaIssue[]): boolean {
   return issues.length >= MAX_ISSUES;
+}
+
+/** Canonical encoding for duplicate detection: object keys sorted recursively. */
+function canonicalEncode(value: JsonValue): string {
+  if (value === null) return "null";
+  switch (typeof value) {
+    case "string":
+      return JSON.stringify(value);
+    case "number":
+    case "boolean":
+      return String(value);
+    case "object":
+      if (Array.isArray(value)) {
+        return `[${value.map((item) => canonicalEncode(item)).join(",")}]`;
+      }
+      return `{${Object.keys(value)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${canonicalEncode(value[key]!)}`)
+        .join(",")}}`;
+    default:
+      // JSON values are always one of the above; unreachable in practice.
+      return String(value);
+  }
 }
 
 // JSON Schema measures string lengths in Unicode code points, not UTF-16 code
