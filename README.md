@@ -32,7 +32,7 @@ See [the security boundary](docs/security.md) before adding fixtures or provider
 
 ## Quick start
 
-Requirements: Node.js 22.16 or later, below Node.js 25, and npm 10 or 11.
+Requirements: Node.js 22.16 or later, below Node.js 25, and npm 10, 11, or 12.
 
 ```bash
 npm install

@@ -6,7 +6,7 @@
   "type": "module",
   "engines": {
     "node": ">=22.16.0 <25",
-    "npm": ">=10 <12"
+    "npm": ">=10 <13"
   },
   "scripts": {
     "bundle:check": "node scripts/run-bundle-check.mjs",
