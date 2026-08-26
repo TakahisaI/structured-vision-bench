@@ -1,0 +1,319 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TakahisaI/structured-vision-bench/schemas/bundle-v1.schema.json",
+  "title": "Structured Vision Bench bundle v1",
+  "description": "Immutable input contract for one schema-guided document extraction benchmark case.",
+  "type": "object",
+  "required": [
+    "bundleVersion",
+    "caseId",
+    "inputs",
+    "comparison",
+    "metadata"
+  ],
+  "properties": {
+    "bundleVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "caseId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "inputs": {
+      "type": "object",
+      "required": [
+        "image",
+        "schema",
+        "system",
+        "instruction"
+      ],
+      "properties": {
+        "image": {
+          "type": "object",
+          "required": [
+            "path",
+            "sha256",
+            "mediaType"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "mediaType": {
+              "type": "string",
+              "enum": [
+                "image/jpeg",
+                "image/png",
+                "image/webp",
+                "application/pdf"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "schema": {
+          "type": "object",
+          "required": [
+            "path",
+            "sha256",
+            "mediaType"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "mediaType": {
+              "type": "string",
+              "const": "application/schema+json"
+            }
+          },
+          "additionalProperties": false
+        },
+        "system": {
+          "type": "object",
+          "required": [
+            "path",
+            "sha256",
+            "mediaType"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "mediaType": {
+              "type": "string",
+              "const": "text/plain"
+            }
+          },
+          "additionalProperties": false
+        },
+        "instruction": {
+          "type": "object",
+          "required": [
+            "path",
+            "sha256",
+            "mediaType"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "mediaType": {
+              "type": "string",
+              "const": "text/plain"
+            }
+          },
+          "additionalProperties": false
+        },
+        "truth": {
+          "type": "object",
+          "required": [
+            "path",
+            "sha256",
+            "mediaType"
+          ],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[A-Za-z0-9._/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "mediaType": {
+              "type": "string",
+              "const": "application/json"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "comparison": {
+      "type": "object",
+      "required": [
+        "scalars",
+        "arrays",
+        "critical",
+        "normalization"
+      ],
+      "$comment": "Comparison paths use RFC 6901 JSON Pointer. Wildcards are allowed only in critical entries as '<array-path>/*/<field>'; '*' inside a segment is always literal. Cross-field rules are enforced by the validator with code comparison_contract_invalid.",
+      "properties": {
+        "scalars": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "$ref": "#/$defs/plainPointer"
+          },
+          "uniqueItems": true
+        },
+        "arrays": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "key",
+              "fields"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "$ref": "#/$defs/plainPointer"
+              },
+              "key": {
+                "type": "string",
+                "$ref": "#/$defs/relativeFieldPointer"
+              },
+              "fields": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "$ref": "#/$defs/relativeFieldPointer"
+                },
+                "uniqueItems": true
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "critical": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "$ref": "#/$defs/criticalPointer"
+          },
+          "uniqueItems": true
+        },
+        "normalization": {
+          "type": "object",
+          "required": [
+            "strings",
+            "numbers"
+          ],
+          "properties": {
+            "strings": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "nfkc",
+                  "trim",
+                  "collapse-whitespace"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "numbers": {
+              "type": "string",
+              "const": "exact"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "documentKind",
+        "promptVersion",
+        "preprocessVersion"
+      ],
+      "properties": {
+        "documentKind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "promptVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "preprocessVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sourceCommit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "plainPointer": {
+      "type": "string",
+      "description": "RFC 6901 JSON Pointer with at least one segment. '*' is a literal name anywhere inside a segment except when the whole segment is exactly '*' — that form is reserved for critical wildcards.",
+      "minLength": 2,
+      "maxLength": 512,
+      "pattern": "^/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+(?:/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+)*$"
+    },
+    "comparisonPointer": {
+      "type": "string",
+      "description": "Plain JSON Pointer (literal '*', including '**'), or one whole-segment '*' wildcard that is never the first or last segment. Reserved for critical entries.",
+      "minLength": 4,
+      "maxLength": 512,
+      "pattern": "^(?:/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+(?:/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+)*)$|^(?:/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+(?:/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+)*/\\*/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+)$"
+    },
+    "relativeFieldPointer": {
+      "type": "string",
+      "description": "Single-segment RFC 6901 relative pointer naming a field of an array element; a segment exactly equal to '*' is reserved.",
+      "minLength": 2,
+      "maxLength": 512,
+      "pattern": "^/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+$"
+    },
+    "criticalPointer": {
+      "type": "string",
+      "description": "A declared scalar pointer, or '<declared-array-path>/*/<field-of-that-array>' with exactly one whole-segment wildcard that is never last.",
+      "minLength": 2,
+      "maxLength": 512,
+      "pattern": "^(?:/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+(?:/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+)*)$|^(?:/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+(?:/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+)*/\\*/(?!\\*(?:/|$))(?:[^/~]|~[01]|\\*)+)$"
+    },
+    "sha256PatternNote": {
+      "description": "Cross-field rules (critical must reference declared scalars/arrays/fields, key and fields must belong to their array) are enforced by the validator with code comparison_contract_invalid."
+    }
+  }
+}

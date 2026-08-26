@@ -1,0 +1,665 @@
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { lstat, readFile, realpath, stat } from "node:fs/promises";
+import path from "node:path";
+
+import { decodeUtf8Strict, isJsonObject, parseJson, type JsonValue } from "./json.js";
+import { validateJsonSchema } from "./schema-validator.js";
+
+const MANIFEST_NAME = "bundle.json";
+export const MAX_JSON_BYTES = 4 * 1024 * 1024;
+export const MAX_ERROR_MESSAGE_LENGTH = 240;
+const MAX_DETAIL_MESSAGES = 20;
+const MAX_DETAIL_LENGTH = 240;
+const UTF8_TEXT_INPUT_LABELS = new Set(["inputs.system", "inputs.instruction"]);
+
+type FileReference = {
+  path: string;
+  sha256: string;
+};
+
+export type BundleValidationResult = {
+  caseId: string;
+  referencedFiles: number;
+  bundleVersion: 1;
+};
+
+export class BundleValidationError extends Error {
+  readonly code: string;
+  readonly details: string[];
+
+  constructor(code: string, message: string, details: string[] = []) {
+    super(truncateText(message, MAX_ERROR_MESSAGE_LENGTH));
+    this.name = "BundleValidationError";
+    this.code = code;
+    this.details = boundDetails(details);
+  }
+}
+
+export async function validateBundle(
+  bundleDirectory: string,
+  contractSchemaPath = path.resolve("schemas/bundle-v1.schema.json"),
+): Promise<BundleValidationResult> {
+  await assertBundleRoot(bundleDirectory);
+  const root = await realpath(bundleDirectory);
+  const manifestPath = path.join(root, MANIFEST_NAME);
+  await assertManifestFile(manifestPath);
+
+  const manifest = (await readJsonFile(manifestPath, MANIFEST_NAME, MAX_JSON_BYTES)).value;
+  const contractSchema = (
+    await readJsonFile(contractSchemaPath, "bundle v1 schema", MAX_JSON_BYTES)
+  ).value;
+  const schemaIssues = validateJsonSchema(contractSchema, manifest);
+  if (schemaIssues.length > 0) {
+    throw new BundleValidationError(
+      "manifest_schema_invalid",
+      "bundle.json does not conform to bundle v1",
+      boundDetails(schemaIssues.map((issue) => `${issue.path}: ${issue.message}`)),
+    );
+  }
+  if (!isJsonObject(manifest)) {
+    throw new BundleValidationError("manifest_schema_invalid", "bundle.json must be an object");
+  }
+
+  assertComparisonContract(manifest.comparison ?? null);
+
+  const inputs = manifest.inputs;
+  if (!isJsonObject(inputs)) {
+    throw new BundleValidationError("manifest_schema_invalid", "bundle.json inputs must be an object");
+  }
+
+  const references = collectReferences(inputs);
+  const digestsByPath = new Map<string, string>();
+  for (const [label, reference] of references) {
+    const absolute = await resolveReferencedFile(root, reference.path, label);
+    const requiresUtf8Validation = UTF8_TEXT_INPUT_LABELS.has(label);
+    // Text inputs must hash and decode the same stream. They cannot use a
+    // digest-only cache because a second read would validate different bytes.
+    let digest = requiresUtf8Validation ? undefined : digestsByPath.get(absolute);
+    if (digest === undefined) {
+      digest = requiresUtf8Validation
+        ? await hashAndValidateUtf8Stream(createReadStream(absolute), label)
+        : await sha256File(absolute);
+      digestsByPath.set(absolute, digest);
+    }
+    if (digest !== reference.sha256) {
+      throw new BundleValidationError(
+        "digest_mismatch",
+        `${label} digest does not match bundle.json`,
+      );
+    }
+  }
+
+  const schemaReference = requireReference(inputs, "schema");
+  await readVerifiedJson(
+    root,
+    schemaReference.path,
+    "inputs.schema",
+    schemaReference.sha256,
+  );
+  if (Object.hasOwn(inputs, "truth")) {
+    const truthReference = requireReference(inputs, "truth");
+    const { value: truth } = await readVerifiedJson(
+      root,
+      truthReference.path,
+      "inputs.truth",
+      truthReference.sha256,
+    );
+    assertTruthProjection(manifest.comparison ?? null, truth);
+  }
+
+  return {
+    caseId: String(manifest.caseId),
+    referencedFiles: references.length,
+    bundleVersion: 1,
+  };
+}
+
+/**
+ * Re-reads a referenced JSON file and confirms its bytes still hash to the
+ * digest recorded during preflight, so projection/syntax checks apply to the
+ * exact bytes the manifest committed to. A swap between reads fails here
+ * instead of validating different bytes than the digest covered.
+ */
+async function readVerifiedJson(
+  root: string,
+  manifestPath: string,
+  label: string,
+  expectedDigest: string,
+): Promise<{ value: JsonValue; bytes: Buffer }> {
+  const absolute = await resolveReferencedFile(root, manifestPath, label);
+  const result = await readJsonFile(absolute, label, MAX_JSON_BYTES);
+  const actualDigest = createHash("sha256").update(result.bytes).digest("hex");
+  if (actualDigest !== expectedDigest) {
+    throw new BundleValidationError(
+      "digest_mismatch",
+      `${label} changed after preflight digest verification`,
+    );
+  }
+  return result;
+}
+
+async function assertBundleRoot(bundleDirectory: string): Promise<void> {
+  let info;
+  try {
+    info = await lstat(bundleDirectory);
+  } catch {
+    throw new BundleValidationError("bundle_not_found", "bundle directory does not exist");
+  }
+  if (info.isSymbolicLink()) {
+    throw new BundleValidationError("bundle_root_symlink", "bundle directory must not be a symlink");
+  }
+  if (!info.isDirectory()) {
+    throw new BundleValidationError("bundle_not_directory", "bundle path must be a directory");
+  }
+}
+
+async function assertManifestFile(manifestPath: string): Promise<void> {
+  let info;
+  try {
+    info = await lstat(manifestPath);
+  } catch {
+    throw new BundleValidationError("bundle_manifest_missing", "bundle.json is missing");
+  }
+  if (info.isSymbolicLink()) {
+    throw new BundleValidationError("bundle_manifest_symlink", "bundle.json must not be a symlink");
+  }
+  if (!info.isFile()) {
+    throw new BundleValidationError("bundle_manifest_not_regular", "bundle.json must be a regular file");
+  }
+}
+
+function collectReferences(inputs: Record<string, JsonValue>): [string, FileReference][] {
+  const keys = ["image", "schema", "system", "instruction", "truth"];
+  const references: [string, FileReference][] = [];
+  for (const key of keys) {
+    if (!Object.hasOwn(inputs, key)) continue;
+    references.push([`inputs.${key}`, requireReference(inputs, key)]);
+  }
+  return references;
+}
+
+function requireReference(inputs: Record<string, JsonValue>, key: string): FileReference {
+  const value = inputs[key];
+  if (!isJsonObject(value) || typeof value.path !== "string" || typeof value.sha256 !== "string") {
+    throw new BundleValidationError(
+      "manifest_schema_invalid",
+      `inputs.${key} must be a file reference`,
+    );
+  }
+  return { path: value.path, sha256: value.sha256 };
+}
+
+async function resolveReferencedFile(root: string, manifestPath: string, label: string): Promise<string> {
+  assertSafeRelativePath(manifestPath, label);
+  const absolute = path.join(root, ...manifestPath.split("/"));
+
+  let info;
+  try {
+    info = await lstat(absolute);
+  } catch {
+    throw new BundleValidationError("referenced_file_missing", `${label} is missing`);
+  }
+  if (info.isSymbolicLink()) {
+    throw new BundleValidationError("referenced_file_symlink", `${label} must not be a symlink`);
+  }
+  if (!info.isFile()) {
+    throw new BundleValidationError("referenced_file_not_regular", `${label} must be a regular file`);
+  }
+
+  const canonical = await realpath(absolute);
+  const relative = path.relative(root, canonical);
+  const outsideRoot =
+    relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+  if (outsideRoot) {
+    throw new BundleValidationError(
+      "referenced_file_outside_bundle",
+      `${label} resolves outside bundle`,
+    );
+  }
+  return canonical;
+}
+
+function assertSafeRelativePath(value: string, label: string): void {
+  if (value.length === 0 || value.includes("\\") || value.includes("\0")) {
+    throw new BundleValidationError("unsafe_reference_path", `${label} has an unsafe path`);
+  }
+  if (path.posix.isAbsolute(value)) {
+    throw new BundleValidationError("unsafe_reference_path", `${label} must use a relative path`);
+  }
+  const segments = value.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new BundleValidationError("unsafe_reference_path", `${label} has an unsafe path segment`);
+  }
+  if (path.posix.normalize(value) !== value) {
+    throw new BundleValidationError("unsafe_reference_path", `${label} path must be normalized`);
+  }
+}
+
+async function readJsonFile(
+  file: string,
+  label: string,
+  maxBytes: number | null,
+): Promise<{ value: JsonValue; bytes: Buffer }> {
+  let info;
+  try {
+    info = await stat(file);
+  } catch {
+    throw new BundleValidationError("json_file_missing", `${label} is missing`);
+  }
+  if (maxBytes !== null && info.size > maxBytes) {
+    throw new BundleValidationError(
+      "json_file_too_large",
+      `${label} exceeds the ${formatLimit(maxBytes)} limit`,
+    );
+  }
+
+  // Read the exact bytes once: the digest and the parsed value must come from
+  // the same buffer so a file swapped between reads cannot split them.
+  let bytes;
+  try {
+    bytes = await readFile(file);
+  } catch {
+    throw new BundleValidationError("json_file_unreadable", `${label} could not be read`);
+  }
+
+  try {
+    const source = decodeUtf8Strict(bytes, label);
+    return { value: parseJson(source, label), bytes };
+  } catch {
+    throw new BundleValidationError("json_file_invalid", `${label} is invalid`);
+  }
+}
+
+async function hashAndValidateUtf8Stream(
+  stream: AsyncIterable<Uint8Array>,
+  label: string,
+): Promise<string> {
+  const hash = createHash("sha256");
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  const prefix = new Uint8Array(3);
+  let prefixLength = 0;
+
+  try {
+    for await (const chunk of stream) {
+      hash.update(chunk);
+      if (prefixLength < prefix.length) {
+        const copied = Math.min(prefix.length - prefixLength, chunk.length);
+        prefix.set(chunk.subarray(0, copied), prefixLength);
+        prefixLength += copied;
+        if (
+          prefixLength === prefix.length &&
+          prefix[0] === 0xef &&
+          prefix[1] === 0xbb &&
+          prefix[2] === 0xbf
+        ) {
+          throw new BundleValidationError("text_file_invalid", `${label} must not start with a UTF-8 BOM`);
+        }
+      }
+
+      try {
+        decoder.decode(chunk, { stream: true });
+      } catch {
+        throw new BundleValidationError("text_file_invalid", `${label} is not valid UTF-8`);
+      }
+    }
+
+    try {
+      decoder.decode();
+    } catch {
+      throw new BundleValidationError("text_file_invalid", `${label} is not valid UTF-8`);
+    }
+
+    return hash.digest("hex");
+  } catch (error) {
+    if (error instanceof BundleValidationError) throw error;
+    throw new BundleValidationError("text_file_unreadable", `${label} could not be read`);
+  }
+}
+
+function formatLimit(maxBytes: number): string {
+  const mebibytes = maxBytes / (1024 * 1024);
+  return Number.isInteger(mebibytes) ? `${mebibytes} MiB` : `${maxBytes} byte`;
+}
+
+async function sha256File(file: string): Promise<string> {
+  // Stream the file so a huge image or PDF cannot exhaust memory during digest
+  // verification.
+  const hash = createHash("sha256");
+  const stream = createReadStream(file);
+  for await (const chunk of stream) {
+    hash.update(chunk);
+  }
+  return hash.digest("hex");
+}
+
+// --- Bounded diagnostics ----------------------------------------------------
+// Unknown keys, secret-shaped strings, and absolute paths must never reach
+// logs. Details are capped in count and per-message length; omitted entries
+// are summarized instead of printed.
+
+export function boundDetails(details: string[]): string[] {
+  const bounded = details.slice(0, MAX_DETAIL_MESSAGES).map((detail) => truncateDetail(detail));
+  const omitted = details.length - bounded.length;
+  if (omitted > 0) bounded.push(`${omitted} additional issues omitted`);
+  return bounded;
+}
+
+function truncateDetail(detail: string): string {
+  return truncateText(detail, MAX_DETAIL_LENGTH);
+}
+
+function truncateText(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
+}
+
+// --- Comparison path contract ------------------------------------------------
+// v1 comparison paths are RFC 6901 JSON Pointer with one extension:
+//
+//   - A segment that is exactly "*" matches every element of the array at the
+//     remaining prefix ("wildcard").
+//   - Wildcards are allowed only in critical entries, at most one per pointer,
+//     and never as the last segment. "*" inside a segment (for example "/a*b")
+//     is a literal name. scalars and arrays paths are plain pointers.
+//   - A critical entry must be either a declared scalar (any nesting depth) or
+//     "<declared-array-path>/*/<field declared by that array>".
+//
+// Syntax-level violations are rejected by the JSON Schema patterns. The checks
+// here enforce the cross-field rules that a static schema cannot express.
+// Diagnostics report positions only — never pointer values, which may carry
+// confidential text.
+
+function comparisonContractError(message: string): BundleValidationError {
+  return new BundleValidationError("comparison_contract_invalid", message);
+}
+
+export function assertComparisonContract(comparison: JsonValue): void {
+  if (!isJsonObject(comparison)) {
+    // The schema already rejected a missing or non-object comparison.
+    throw comparisonContractError("comparison must be an object");
+  }
+
+  const scalars = collectPointerList(comparison.scalars ?? null);
+  const arrays = Array.isArray(comparison.arrays) ? comparison.arrays : [];
+  const scalarPaths = new Set(scalars);
+  const arrayPaths = new Set<string>();
+  const fieldsByArrayPath = new Map<string, Set<string>>();
+
+  for (const [entryIndex, entry] of arrays.entries()) {
+    if (!isJsonObject(entry)) continue;
+    const entryPath = entry.path;
+    if (typeof entryPath !== "string") continue;
+    if (arrayPaths.has(entryPath)) {
+      throw comparisonContractError(
+        `comparison.arrays[${entryIndex}].path duplicates an earlier array path`,
+      );
+    }
+    arrayPaths.add(entryPath);
+
+    const fields = Array.isArray(entry.fields)
+      ? entry.fields.filter((field): field is string => typeof field === "string")
+      : [];
+    const keyFields = typeof entry.key === "string" ? [entry.key] : [];
+    fieldsByArrayPath.set(entryPath, new Set([...keyFields, ...fields]));
+  }
+
+  for (const [scalarIndex, scalar] of scalars.entries()) {
+    if (arrayPaths.has(scalar)) {
+      throw comparisonContractError(
+        `comparison.scalars[${scalarIndex}] duplicates a declared array path`,
+      );
+    }
+  }
+
+  const criticals = collectPointerList(comparison.critical ?? null);
+  for (const [criticalIndex, critical] of criticals.entries()) {
+    if (fieldsByArrayPath.has(critical)) {
+      throw comparisonContractError(
+        `comparison.critical[${criticalIndex}] must select a scalar or an array element field, not the whole array`,
+      );
+    }
+    if (scalarPaths.has(critical)) continue;
+    const wildcardField = splitWildcardField(critical);
+    if (wildcardField === undefined) {
+      throw comparisonContractError(
+        `comparison.critical[${criticalIndex}] must be a declared scalar or an "<array>/*/<field>" wildcard pointer`,
+      );
+    }
+    const [arrayPath, field] = wildcardField;
+    const fields = fieldsByArrayPath.get(arrayPath);
+    if (fields === undefined) {
+      throw comparisonContractError(
+        `comparison.critical[${criticalIndex}] uses an undeclared array path (declare it in comparison.arrays first)`,
+      );
+    }
+    if (!fields.has(field)) {
+      throw comparisonContractError(
+        `comparison.critical[${criticalIndex}] uses a field not compared by its declared array (add it to key or fields there)`,
+      );
+    }
+  }
+}
+
+function truthContractError(message: string): BundleValidationError {
+  return new BundleValidationError("truth_contract_invalid", message);
+}
+
+// Normalization used for key uniqueness and empty-key checks. Canonical fixed
+// order is nfkc -> trim -> collapse-whitespace regardless of declaration
+// order; each enabled operation applies at most once. The whitespace set
+// matches docs/bundle-v1.md exactly.
+const UNICODE_WHITESPACE = /[\u0009\u000A\u000B\u000C\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]/gu;
+
+export function normalizeKeyForComparison(value: string, operations: JsonValue): string {
+  const ops = Array.isArray(operations)
+    ? operations.filter((item): item is string => typeof item === "string")
+    : [];
+  let normalized = value;
+  if (ops.includes("nfkc")) normalized = normalized.normalize("NFKC");
+  if (ops.includes("trim")) normalized = trimWhitespace(normalized);
+  if (ops.includes("collapse-whitespace")) normalized = collapseWhitespace(normalized);
+  return normalized;
+}
+
+function trimWhitespace(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isUnicodeWhitespace(value[start]!)) start += 1;
+  while (end > start && isUnicodeWhitespace(value[end - 1]!)) end -= 1;
+  return value.slice(start, end);
+}
+
+function collapseWhitespace(value: string): string {
+  let output = "";
+  let inRun = false;
+  for (const character of value) {
+    if (isUnicodeWhitespace(character)) {
+      inRun = true;
+      continue;
+    }
+    if (inRun) {
+      output += " ";
+      inRun = false;
+    }
+    output += character;
+  }
+  if (inRun) output += " ";
+  return output;
+}
+
+function isUnicodeWhitespace(character: string | undefined): boolean {
+  if (character === undefined) return false;
+  UNICODE_WHITESPACE.lastIndex = 0;
+  return UNICODE_WHITESPACE.test(character);
+}
+
+/**
+ * Validates the optional truth file against its projection contract during
+ * preflight: every declared path exists, keys are sound and unique, and
+ * projected fields are present. Violations fail with truth_contract_invalid.
+ */
+export function assertTruthProjection(comparison: JsonValue, truth: JsonValue): void {
+  if (!isJsonObject(comparison)) {
+    // The schema already rejected a malformed manifest; nothing to project.
+    return;
+  }
+  if (!isJsonObject(truth)) {
+    throw truthContractError("inputs.truth root must be an object");
+  }
+
+  for (const [scalarIndex, scalar] of collectPointerList(comparison.scalars ?? null).entries()) {
+    const segments = decodePointerSegments(scalar);
+    const value = resolvePointer(truth, segments);
+    if (value === NOT_FOUND) {
+      throw truthContractError(`inputs.truth is missing declared scalar ${scalarIndex} of comparison.scalars`);
+    }
+    if (value !== null && typeof value === "object") {
+      throw truthContractError(`inputs.truth value at declared scalar ${scalarIndex} must be a JSON scalar or null`);
+    }
+  }
+
+  const arrays = Array.isArray(comparison.arrays) ? comparison.arrays : [];
+  for (const [entryIndex, entry] of arrays.entries()) {
+    if (!isJsonObject(entry)) continue;
+    const arrayPath = entry.path;
+    const keyPointer = entry.key;
+    if (typeof arrayPath !== "string" || typeof keyPointer !== "string") continue;
+
+    const elements = resolvePointer(truth, decodePointerSegments(arrayPath));
+    if (elements === NOT_FOUND) {
+      throw truthContractError(`inputs.truth is missing declared array ${entryIndex} of comparison.arrays`);
+    }
+    if (!Array.isArray(elements)) {
+      throw truthContractError(`inputs.truth value at declared array ${entryIndex} must be an array`);
+    }
+
+    const fieldPointers = Array.isArray(entry.fields)
+      ? entry.fields.filter((field): field is string => typeof field === "string")
+      : [];
+    const normalizedKeys = new Set<string>();
+    const normalization = isJsonObject(comparison.normalization)
+      ? (comparison.normalization.strings ?? [])
+      : [];
+
+    for (const [elementIndex, element] of elements.entries()) {
+      if (!isJsonObject(element)) {
+        throw truthContractError(
+          `inputs.truth element ${elementIndex} of declared array ${entryIndex} must be an object`,
+        );
+      }
+      const keyValue = resolvePointer(element, decodePointerSegments(keyPointer));
+      if (keyValue === NOT_FOUND) {
+        throw truthContractError(
+          `inputs.truth element ${elementIndex} of declared array ${entryIndex} is missing its key`,
+        );
+      }
+      if (typeof keyValue !== "string" && typeof keyValue !== "number") {
+        throw truthContractError(
+          `inputs.truth key of element ${elementIndex} in declared array ${entryIndex} must be a string or number`,
+        );
+      }
+      if (typeof keyValue === "string") {
+        const normalizedKey = normalizeKeyForComparison(keyValue, normalization);
+        if (normalizedKey.length === 0) {
+          throw truthContractError(
+            `inputs.truth string key of element ${elementIndex} in declared array ${entryIndex} is empty after normalization`,
+          );
+        }
+        // Prefix distinguishes a normalized string key from a numeric key with
+        // the same digits: number 1 and string "1" never collide or match.
+        const encodedKey = `s:${normalizedKey}`;
+        if (normalizedKeys.has(encodedKey)) {
+          throw truthContractError(
+            `inputs.truth declared array ${entryIndex} has duplicate keys after normalization`,
+          );
+        }
+        normalizedKeys.add(encodedKey);
+      } else {
+        const encodedKey = `n:${keyValue}`;
+        if (normalizedKeys.has(encodedKey)) {
+          throw truthContractError(
+            `inputs.truth declared array ${entryIndex} has duplicate keys after normalization`,
+          );
+        }
+        normalizedKeys.add(encodedKey);
+      }
+
+      for (const [fieldIndex, fieldPointer] of fieldPointers.entries()) {
+        const fieldValue = resolvePointer(element, decodePointerSegments(fieldPointer));
+        if (fieldValue === NOT_FOUND) {
+          throw truthContractError(
+            `inputs.truth element ${elementIndex} of declared array ${entryIndex} is missing compared field ${fieldIndex}`,
+          );
+        }
+        // Projected fields follow the same rule as projected scalars: JSON
+        // scalar or explicit null, never an object or array.
+        if (fieldValue !== null && typeof fieldValue === "object") {
+          throw truthContractError(
+            `inputs.truth compared field ${fieldIndex} of element ${elementIndex} in declared array ${entryIndex} must be a JSON scalar or null`,
+          );
+        }
+      }
+    }
+  }
+}
+
+const NOT_FOUND = Symbol("pointer-not-found");
+
+// RFC 6901 array indices are "0" or digits without a leading zero. "01", "1e0",
+// and "+1" name object members, never array elements.
+const ARRAY_INDEX_PATTERN = /^(?:0|[1-9][0-9]*)$/u;
+
+/** Decodes RFC 6901 escape sequences; "~2" stays invalid per the schema patterns. */
+function decodePointerSegments(pointer: string): string[] {
+  if (!pointer.startsWith("/")) return [];
+  return pointer
+    .slice(1)
+    .split("/")
+    .map((segment) => segment.replace(/~1/gu, "/").replace(/~0/gu, "~"));
+}
+
+function resolvePointer(root: JsonValue, segments: string[]): JsonValue | typeof NOT_FOUND {
+  let current: JsonValue = root;
+  for (const segment of segments) {
+    if (Array.isArray(current)) {
+      if (!ARRAY_INDEX_PATTERN.test(segment)) return NOT_FOUND;
+      const index = Number(segment);
+      if (index >= current.length) return NOT_FOUND;
+      current = current[index]!;
+      continue;
+    }
+    // hasOwn keeps inherited members (constructor, toString, __proto__) out of
+    // pointer resolution; only owned JSON values are reachable.
+    if (isJsonObject(current) && Object.hasOwn(current, segment)) {
+      current = current[segment]!;
+      continue;
+    }
+    return NOT_FOUND;
+  }
+  return current;
+}
+
+function collectPointerList(value: JsonValue): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+/**
+ * Matches a pointer shaped like an array path, one wildcard segment, and a
+ * single field. Returns undefined when the pointer does not have that shape.
+ */
+function splitWildcardField(pointer: string): [string, string] | undefined {
+  const segments = pointer.split("/");
+  const wildcardIndex = segments.indexOf("*");
+  if (
+    wildcardIndex < 1 ||
+    wildcardIndex !== segments.length - 2 ||
+    segments.lastIndexOf("*") !== wildcardIndex
+  ) {
+    return undefined;
+  }
+  const arrayPath = segments.slice(0, wildcardIndex).join("/");
+  const rawField = segments[wildcardIndex + 1]!;
+  if (rawField.length === 0) return undefined;
+  const field = `/${rawField}`;
+  return [arrayPath, field];
+}
