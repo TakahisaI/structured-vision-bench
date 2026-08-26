@@ -1,4 +1,7 @@
-import type { CaseInputIdentity } from "./identity.js";
+import type {
+  CaseInputIdentity,
+  SanitizerRequirementSettings,
+} from "./identity.js";
 import type { JsonValue } from "../bundle/json.js";
 
 export type JsonRecord = { [key: string]: JsonValue };
@@ -206,6 +209,7 @@ export type RunBundleOptions = {
   maxTokens?: number | null;
   harnessVersion?: string;
   harnessCommit?: string | null;
+  sanitizerRequirement: SanitizerRequirementSettings;
   approval?: ApprovalSettings;
   sanitizer?: SanitizerSettings;
   contractSchemaPath?: string;

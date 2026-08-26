@@ -122,6 +122,19 @@ test("rejects an unknown provider as invalid CLI arguments", async () => {
   }
 });
 
+test("rejects an unknown top-level command as invalid CLI arguments", () => {
+  const result = spawnSync(
+    process.execPath,
+    [CLI, "bogus", "--bundle", FIXTURE, "--provider", "mock", "--json"],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 2);
+  assert.equal(result.stderr, "");
+  const summary = JSON.parse(result.stdout) as { ok: boolean; error: { code: string } };
+  assert.equal(summary.ok, false);
+  assert.equal(summary.error.code, "invalid_arguments");
+});
+
 test("reports bundle failures without echoing the bundle path", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
   const bundle = path.join(temporary, "bundle");

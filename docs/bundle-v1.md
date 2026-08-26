@@ -206,7 +206,9 @@ contract during preflight (see Truth shape).
 
 ### Metadata
 
-Required metadata identifies the consumer-owned extraction contract:
+Required metadata identifies the consumer-owned extraction contract. Each metadata identifier is
+bounded to 64 ASCII characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-`, so copied attempt
+metadata cannot carry a local path or unbounded diagnostic:
 
 - `documentKind`;
 - `promptVersion`;
@@ -288,9 +290,10 @@ A failed preflight must not call a provider.
 ## Input and output lifecycle
 
 Bundle files are input and remain unchanged for the lifetime of a measurement. An attempt is a
-separate directory with its own manifest and digests. The Issue #2 runner stages provider inputs and
-successful attempt files outside the bundle, validates the formal document (sanitizer output when
-configured), and then renames the complete attempt directory into its final location. Failed runs do
+separate directory with its own manifest and digests. The Issue #2 runner stages provider inputs
+outside the bundle, exclusively claims the run-identity directory, validates the formal document
+(sanitizer output when configured), and writes `attempt.json.pending` before renaming that manifest to
+`attempt.json` as the publication point. Failed runs and directories without the final manifest do
 not become formal attempts.
 
 Retries are not hidden. A repeat or retry is a new attempt with a distinct identity and recorded

@@ -1,13 +1,24 @@
-import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, mkdir, open, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { decodeUtf8Strict, isJsonObject, parseJson, type JsonValue } from "../bundle/json.js";
+import {
+  decodeUtf8Strict,
+  isJsonObject,
+  normalizeJsonValue,
+  parseJson,
+  type JsonValue,
+} from "../bundle/json.js";
 import {
   computeCaseInputIdentity,
   computePolicyBindingDigest,
   computeRunIdentity,
+  computeSanitizerRequirementDigest,
   type CaseInputIdentity,
+  type SanitizerRequirementCoreV1,
+  type SanitizerRequirementDecisionV1,
+  type SanitizerRequirementVerifier,
 } from "./identity.js";
 import { RunnerError } from "./errors.js";
 import type {
@@ -21,6 +32,28 @@ export const ATTEMPT_VERSION = 1 as const;
 export const MAX_DOCUMENT_BYTES = 4 * 1024 * 1024;
 const MAX_ATTEMPT_MANIFEST_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+const DIRECTORY = constants.O_DIRECTORY ?? 0;
+const READ_ONLY_NOFOLLOW = constants.O_RDONLY | NOFOLLOW;
+const DIRECTORY_NOFOLLOW = READ_ONLY_NOFOLLOW | DIRECTORY;
+const OWNER_MARKER_NAME = ".attempt-owner.pending";
+const PENDING_MANIFEST_NAME = "attempt.json.pending";
+const CLAIM_MARKER_MAX_BYTES = 128;
+
+export type AttemptClaim = {
+  readonly attemptDirectory: string;
+};
+
+type AttemptClaimState = {
+  readonly ownerNonce: string;
+  readonly ownerMarkerPath: string;
+  readonly directoryHandle: Awaited<ReturnType<typeof open>>;
+  markerPresent: boolean;
+  published: boolean;
+  closed: boolean;
+};
+
+const ATTEMPT_CLAIMS = new WeakMap<AttemptClaim, AttemptClaimState>();
 
 export type AttemptInputManifest = {
   image: { sha256: string; mediaType: string };
@@ -71,7 +104,8 @@ export type AttemptManifest = {
     runtimeBindingDigest: string | null;
     runtimeBindingIdentity: string | null;
   };
-  sanitizer: {
+  sanitizerRequirement: SanitizerRequirementDecisionV1;
+  sanitizer?: {
     required: boolean;
     applied: boolean;
     id: string | null;
@@ -84,13 +118,13 @@ export type AttemptManifest = {
     findings: SanitizerFinding[];
   };
   stages: {
-    policyTargetPreflight: AttemptStage;
     approval: AttemptStage;
     provider: AttemptStage;
     parse: AttemptStage;
-    sanitizer: AttemptStage;
-    targetBinding: AttemptStage;
     schemaValidation: AttemptStage;
+    policyTargetPreflight?: AttemptStage;
+    sanitizer?: AttemptStage;
+    targetBinding?: AttemptStage;
   };
   document: {
     path: "document.json";
@@ -110,13 +144,86 @@ export type AttemptReadResult = {
   document: JsonValue;
 };
 
+export type ReadAttemptOptions = {
+  requirementVerifier?: SanitizerRequirementVerifier;
+};
+
+export async function claimAttemptDirectory(attemptDirectory: string): Promise<AttemptClaim> {
+  const absoluteDirectory = path.resolve(attemptDirectory);
+  let created = false;
+  let directoryHandle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    await mkdir(absoluteDirectory, { recursive: false, mode: 0o700 });
+    created = true;
+    directoryHandle = await open(absoluteDirectory, DIRECTORY_NOFOLLOW);
+    const handleInfo = await directoryHandle.stat();
+    const pathInfo = await lstat(absoluteDirectory);
+    if (
+      !handleInfo.isDirectory() ||
+      pathInfo.isSymbolicLink() ||
+      !sameFile(handleInfo, pathInfo) ||
+      (process.platform !== "win32" && (handleInfo.mode & 0o077) !== 0)
+    ) {
+      throw new Error();
+    }
+    await directoryHandle.chmod(0o700);
+    const ownerNonce = randomUUID();
+    const ownerMarkerPath = path.join(absoluteDirectory, OWNER_MARKER_NAME);
+    await writeFile(ownerMarkerPath, `${ownerNonce}\n`, { flag: "wx", mode: 0o600 });
+    const claim = Object.freeze({ attemptDirectory: absoluteDirectory });
+    ATTEMPT_CLAIMS.set(claim, {
+      ownerNonce,
+      ownerMarkerPath,
+      directoryHandle,
+      markerPresent: true,
+      published: false,
+      closed: false,
+    });
+    directoryHandle = undefined;
+    return claim;
+  } catch (error) {
+    await directoryHandle?.close().catch(() => undefined);
+    if (!created && isErrorCode(error, "EEXIST")) {
+      throw new RunnerError("attempt_exists", "an attempt already exists for this run identity");
+    }
+    if (error instanceof RunnerError) throw error;
+    throw new RunnerError("attempt_write_failed", "attempt directory could not be claimed");
+  }
+}
+
+export async function cleanupAttemptClaim(
+  claim: AttemptClaim,
+  canCleanup: (() => Promise<boolean>) | undefined = undefined,
+): Promise<void> {
+  const state = ATTEMPT_CLAIMS.get(claim);
+  if (state === undefined) return;
+  try {
+    if (!state.published && !state.closed) {
+      const allowed = canCleanup === undefined || await canCleanup().catch(() => false);
+      if (
+        allowed &&
+        await ownsAttemptClaim(claim, state) &&
+        !(await pathExists(path.join(claim.attemptDirectory, "attempt.json")))
+      ) {
+        await rm(claim.attemptDirectory, { recursive: true, force: true });
+      }
+    }
+  } catch {
+    // Cleanup must never replace the primary runner error.
+  } finally {
+    await state.directoryHandle.close().catch(() => undefined);
+    state.closed = true;
+    ATTEMPT_CLAIMS.delete(claim);
+  }
+}
+
 export function encodeAttemptDocument(document: JsonValue): {
   bytes: Buffer;
   sha256: string;
 } {
   let serialized: string | undefined;
   try {
-    serialized = JSON.stringify(document, null, 2);
+    serialized = JSON.stringify(normalizeJsonValue(document, "provider document", MAX_DOCUMENT_BYTES), null, 2);
   } catch {
     throw new RunnerError("provider_response_invalid", "provider document could not be serialized");
   }
@@ -134,59 +241,130 @@ export function encodeAttemptDocument(document: JsonValue): {
 }
 
 export async function writeAttemptFiles(
-  attemptDirectory: string,
+  claim: AttemptClaim,
   manifest: AttemptManifestBase,
   document: JsonValue,
+  canCleanup: (() => Promise<boolean>) | undefined = undefined,
+  beforePublish: (() => Promise<void>) | undefined = undefined,
 ): Promise<{ documentSha256: string }> {
-  const encoded = encodeAttemptDocument(document);
-  const completeManifest: AttemptManifest = {
-    ...manifest,
-    document: { path: "document.json", sha256: encoded.sha256 },
-  };
+  const state = ATTEMPT_CLAIMS.get(claim);
+  if (state === undefined || state.closed) {
+    throw new RunnerError("attempt_write_failed", "attempt claim is unavailable");
+  }
+  const attemptDirectory = claim.attemptDirectory;
+  const documentPath = path.join(attemptDirectory, "document.json");
   const documentPart = path.join(attemptDirectory, "document.json.part");
-  const manifestPart = path.join(attemptDirectory, "attempt.json.part");
-  let createdDirectory = false;
+  const manifestPath = path.join(attemptDirectory, "attempt.json");
+  const manifestPending = path.join(attemptDirectory, PENDING_MANIFEST_NAME);
   try {
-    await mkdir(attemptDirectory, { recursive: false });
-    createdDirectory = true;
-    await writeFile(documentPart, encoded.bytes, { flag: "wx" });
-    await rename(documentPart, path.join(attemptDirectory, "document.json"));
-    const manifestBytes = Buffer.from(`${JSON.stringify(completeManifest, null, 2)}\n`, "utf8");
+    const encoded = encodeAttemptDocument(document);
+    const completeManifest: AttemptManifest = {
+      ...manifest,
+      document: { path: "document.json", sha256: encoded.sha256 },
+    };
+    await assertClaimOwnership(claim, state);
+    await writeFile(documentPart, encoded.bytes, { flag: "wx", mode: 0o600 });
+    await assertPathAbsent(documentPath, "attempt_write_failed");
+    await rename(documentPart, documentPath);
+    const manifestValue = normalizeJsonValue(
+      completeManifest as unknown as JsonValue,
+      "attempt manifest",
+      MAX_ATTEMPT_MANIFEST_BYTES,
+    );
+    const manifestBytes = Buffer.from(`${JSON.stringify(manifestValue, null, 2)}\n`, "utf8");
     if (manifestBytes.length > MAX_ATTEMPT_MANIFEST_BYTES) {
       throw new RunnerError("attempt_write_failed", "attempt manifest exceeds the size limit");
     }
-    await writeFile(manifestPart, manifestBytes, { flag: "wx" });
-    await rename(manifestPart, path.join(attemptDirectory, "attempt.json"));
+    await writeFile(manifestPending, manifestBytes, { flag: "wx", mode: 0o600 });
+    await readAttemptFiles(attemptDirectory, PENDING_MANIFEST_NAME, undefined);
+    await assertClaimOwnership(claim, state);
+    await unlink(state.ownerMarkerPath);
+    state.markerPresent = false;
+    await beforePublish?.();
+    await assertClaimDirectoryStable(claim, state);
+    await assertPathAbsent(manifestPath, "attempt_exists");
+    // This same-directory rename is the publication point; keep no validation after it.
+    await rename(manifestPending, manifestPath);
+    state.published = true;
     return { documentSha256: encoded.sha256 };
   } catch (error) {
-    await rm(documentPart, { force: true });
-    await rm(manifestPart, { force: true });
-    if (createdDirectory) await rm(attemptDirectory, { recursive: true, force: true });
+    await cleanupAttemptClaim(claim, canCleanup);
     if (error instanceof RunnerError) throw error;
     throw new RunnerError("attempt_write_failed", "attempt files could not be written");
   }
 }
 
-export async function readAttempt(attemptDirectory: string): Promise<AttemptReadResult> {
-  await assertAttemptDirectory(attemptDirectory);
-  const manifestFile = await readAttemptJson(path.join(attemptDirectory, "attempt.json"));
-  const manifest = parseAttemptManifest(manifestFile.value);
-  const documentFile = await readAttemptJson(path.join(attemptDirectory, manifest.document.path), true);
+export async function readAttempt(
+  attemptDirectory: string,
+  options: ReadAttemptOptions = {},
+): Promise<AttemptReadResult> {
+  const result = await readAttemptFiles(
+    path.resolve(attemptDirectory),
+    "attempt.json",
+    options.requirementVerifier,
+  );
+  return { manifest: result.manifest, document: result.documentFile.value };
+}
+
+async function readAttemptFiles(
+  attemptDirectory: string,
+  manifestName: "attempt.json" | typeof PENDING_MANIFEST_NAME,
+  requirementVerifier: SanitizerRequirementVerifier | undefined,
+): Promise<{
+  manifest: AttemptManifest;
+  documentFile: { value: JsonValue; bytes: Buffer };
+}> {
+  const absoluteDirectory = path.resolve(attemptDirectory);
+  await assertAttemptDirectory(absoluteDirectory, manifestName);
+  const manifestFile = await readAttemptJson(path.join(absoluteDirectory, manifestName));
+  const manifest = parseAttemptManifest(manifestFile.value, requirementVerifier);
+  const documentFile = await readAttemptJson(path.join(absoluteDirectory, manifest.document.path), true);
   if (createHash("sha256").update(documentFile.bytes).digest("hex") !== manifest.document.sha256) {
     throw new RunnerError(
       "attempt_document_digest_mismatch",
       "attempt document digest does not match its manifest",
     );
   }
-  return { manifest, document: documentFile.value };
+  await assertAttemptDirectory(absoluteDirectory, manifestName);
+  return { manifest, documentFile };
 }
 
-async function assertAttemptDirectory(directory: string): Promise<void> {
+async function assertAttemptDirectory(
+  directory: string,
+  manifestName: "attempt.json" | typeof PENDING_MANIFEST_NAME,
+): Promise<void> {
+  let handle;
   try {
-    const info = await lstat(directory);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error();
+    const absolute = path.resolve(directory);
+    const pathInfo = await lstat(absolute);
+    if (pathInfo.isSymbolicLink() || !pathInfo.isDirectory()) throw new Error();
+    handle = await open(absolute, DIRECTORY_NOFOLLOW);
+    const info = await handle.stat();
+    if (
+      !info.isDirectory() ||
+      !sameFile(info, pathInfo) ||
+      (process.platform !== "win32" && (info.mode & 0o077) !== 0)
+    ) {
+      throw new Error();
+    }
+    const entries = await readdir(absolute, { withFileTypes: true });
+    const finalPathInfo = await lstat(absolute);
+    if (finalPathInfo.isSymbolicLink() || !sameFile(info, finalPathInfo)) throw new Error();
+    const names = entries.map((entry) => entry.name).sort();
+    const expectedNames =
+      manifestName === "attempt.json"
+        ? ["attempt.json", "document.json"]
+        : [OWNER_MARKER_NAME, PENDING_MANIFEST_NAME, "document.json"];
+    if (names.length !== expectedNames.length || names.some((name, index) => name !== expectedNames[index])) {
+      throw new Error();
+    }
+    if (manifestName === PENDING_MANIFEST_NAME) {
+      await assertOwnerMarker(path.join(absolute, OWNER_MARKER_NAME));
+    }
   } catch {
     throw new RunnerError("attempt_invalid", "attempt directory is invalid");
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 
@@ -195,29 +373,161 @@ async function readAttemptJson(
   document = false,
 ): Promise<{ value: JsonValue; bytes: Buffer }> {
   const maxBytes = document ? MAX_DOCUMENT_BYTES : MAX_ATTEMPT_MANIFEST_BYTES;
-  let info;
+  let handle;
   try {
-    info = await lstat(file);
+    const absolute = path.resolve(file);
+    handle = await open(absolute, READ_ONLY_NOFOLLOW);
+    const info = await handle.stat();
+    if (!info.isFile() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)) throw new Error();
+    const pathInfo = await lstat(absolute);
+    if (pathInfo.isSymbolicLink() || !pathInfo.isFile() || !sameFile(info, pathInfo)) throw new Error();
+    const bytes = await readBounded(handle, maxBytes);
+    const finalPathInfo = await lstat(absolute);
+    if (finalPathInfo.isSymbolicLink() || !sameFile(info, finalPathInfo)) throw new Error();
+    try {
+      return { value: parseJson(decodeUtf8Strict(bytes, "attempt file"), "attempt file"), bytes };
+    } catch {
+      throw new RunnerError("attempt_invalid", "attempt file is invalid");
+    }
   } catch {
-    throw new RunnerError("attempt_invalid", "attempt file is missing");
-  }
-  if (info.isSymbolicLink() || !info.isFile() || info.size > maxBytes) {
     throw new RunnerError("attempt_invalid", "attempt file is invalid");
-  }
-  let bytes: Buffer;
-  try {
-    bytes = await readFile(file);
-  } catch {
-    throw new RunnerError("attempt_invalid", "attempt file could not be read");
-  }
-  try {
-    return { value: parseJson(decodeUtf8Strict(bytes, "attempt file"), "attempt file"), bytes };
-  } catch {
-    throw new RunnerError("attempt_invalid", "attempt file is invalid");
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 
-function parseAttemptManifest(value: JsonValue): AttemptManifest {
+async function readBounded(handle: Awaited<ReturnType<typeof open>>, maxBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const remaining = maxBytes + 1 - total;
+    if (remaining <= 0) throw new Error();
+    const chunk = Buffer.alloc(Math.min(64 * 1024, remaining));
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+    if (bytesRead === 0) break;
+    chunks.push(chunk.subarray(0, bytesRead));
+    total += bytesRead;
+    if (total > maxBytes) throw new Error();
+  }
+  return Buffer.concat(chunks, total);
+}
+
+async function assertClaimOwnership(claim: AttemptClaim, state: AttemptClaimState): Promise<void> {
+  await assertClaimDirectoryStable(claim, state);
+  if (state.markerPresent && !(await ownerMarkerMatches(state.ownerMarkerPath, state.ownerNonce))) {
+    throw new RunnerError("attempt_write_failed", "attempt claim is not owned");
+  }
+}
+
+async function assertClaimDirectoryStable(
+  claim: AttemptClaim,
+  state: AttemptClaimState,
+): Promise<void> {
+  try {
+    const handleInfo = await state.directoryHandle.stat();
+    const pathInfo = await lstat(claim.attemptDirectory);
+    if (
+      !handleInfo.isDirectory() ||
+      !pathInfo.isDirectory() ||
+      pathInfo.isSymbolicLink() ||
+      !sameFile(handleInfo, pathInfo) ||
+      (process.platform !== "win32" && (handleInfo.mode & 0o077) !== 0)
+    ) {
+      throw new Error();
+    }
+  } catch {
+    throw new RunnerError("attempt_write_failed", "attempt claim changed");
+  }
+}
+
+async function ownsAttemptClaim(claim: AttemptClaim, state: AttemptClaimState): Promise<boolean> {
+  try {
+    await assertClaimDirectoryStable(claim, state);
+    return state.markerPresent
+      ? await ownerMarkerMatches(state.ownerMarkerPath, state.ownerNonce)
+      : true;
+  } catch {
+    return false;
+  }
+}
+
+async function ownerMarkerMatches(file: string, ownerNonce: string): Promise<boolean> {
+  let handle;
+  try {
+    const absolute = path.resolve(file);
+    handle = await open(absolute, READ_ONLY_NOFOLLOW);
+    const info = await handle.stat();
+    const pathInfo = await lstat(absolute);
+    if (
+      !info.isFile() ||
+      pathInfo.isSymbolicLink() ||
+      !pathInfo.isFile() ||
+      !sameFile(info, pathInfo) ||
+      (process.platform !== "win32" && (info.mode & 0o077) !== 0)
+    ) {
+      return false;
+    }
+    const value = decodeUtf8Strict(await readBounded(handle, CLAIM_MARKER_MAX_BYTES), "attempt claim marker");
+    return value === `${ownerNonce}\n`;
+  } catch {
+    return false;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function assertOwnerMarker(file: string): Promise<void> {
+  let handle;
+  try {
+    const absolute = path.resolve(file);
+    handle = await open(absolute, READ_ONLY_NOFOLLOW);
+    const info = await handle.stat();
+    const pathInfo = await lstat(absolute);
+    if (
+      !info.isFile() ||
+      pathInfo.isSymbolicLink() ||
+      !pathInfo.isFile() ||
+      !sameFile(info, pathInfo) ||
+      (process.platform !== "win32" && (info.mode & 0o077) !== 0)
+    ) {
+      throw new Error();
+    }
+    const value = decodeUtf8Strict(await readBounded(handle, CLAIM_MARKER_MAX_BYTES), "attempt claim marker");
+    if (!/^[0-9a-f-]{36}\n$/u.test(value)) throw new Error();
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function assertPathAbsent(
+  file: string,
+  code: "attempt_exists" | "attempt_write_failed",
+): Promise<void> {
+  try {
+    await lstat(file);
+  } catch (error) {
+    if (isErrorCode(error, "ENOENT")) return;
+    throw new RunnerError("attempt_write_failed", "attempt file could not be checked");
+  }
+  if (code === "attempt_exists") {
+    throw new RunnerError("attempt_exists", "an attempt already exists for this run identity");
+  }
+  throw new RunnerError("attempt_write_failed", "attempt file already exists");
+}
+
+async function pathExists(file: string): Promise<boolean> {
+  try {
+    await lstat(file);
+    return true;
+  } catch (error) {
+    return !isErrorCode(error, "ENOENT");
+  }
+}
+
+function parseAttemptManifest(
+  value: JsonValue,
+  requirementVerifier: SanitizerRequirementVerifier | undefined,
+): AttemptManifest {
   const manifest = requiredObject(value);
   assertKeys(manifest, [
     "attemptVersion",
@@ -232,6 +542,7 @@ function parseAttemptManifest(value: JsonValue): AttemptManifest {
     "provenance",
     "run",
     "approval",
+    "sanitizerRequirement",
     "sanitizer",
     "stages",
     "document",
@@ -241,9 +552,14 @@ function parseAttemptManifest(value: JsonValue): AttemptManifest {
   const attemptId = requiredDigest(manifest.attemptId);
   const runId = requiredDigest(manifest.runId);
   if (attemptId !== runId) invalid();
-  const caseId = requiredString(manifest.caseId);
-  const documentKind = requiredString(manifest.documentKind);
+  const caseId = requiredSafeLabel(manifest.caseId);
+  const documentKind = requiredSafeLabel(manifest.documentKind);
   const bundleManifestDigest = requiredDigest(manifest.bundleManifestDigest);
+  const sanitizerRequirement = parseSanitizerRequirement(
+    manifest.sanitizerRequirement,
+    documentKind,
+    requirementVerifier,
+  );
   const inputs = parseInputs(manifest.inputs);
   const identity = parseIdentity(manifest.caseInputIdentity);
   let recomputedIdentity: CaseInputIdentity;
@@ -274,6 +590,8 @@ function parseAttemptManifest(value: JsonValue): AttemptManifest {
   if (
     typeof timing.startedAt !== "string" ||
     typeof timing.finishedAt !== "string" ||
+    !isDateTime(timing.startedAt) ||
+    !isDateTime(timing.finishedAt) ||
     typeof timing.durationMs !== "number" ||
     !Number.isSafeInteger(timing.durationMs) ||
     timing.durationMs < 0
@@ -281,21 +599,28 @@ function parseAttemptManifest(value: JsonValue): AttemptManifest {
     invalid();
   }
   parseProvenance(manifest.provenance);
-  const sanitizer = requiredObject(manifest.sanitizer);
-  assertKeys(sanitizer, [
-    "required",
-    "applied",
-    "id",
-    "protocolVersion",
-    "policyVersion",
-    "policyDigest",
-    "policyTargetIdentityDigest",
-    "policyBindingIdentity",
-    "policyBindingDigest",
-    "findings",
-  ]);
-  parseSanitizerFindings(sanitizer.findings);
-  validateSanitizerBinding(sanitizer, identity.digest);
+  let sanitizer: AttemptManifest["sanitizer"];
+  if (sanitizerRequirement.sanitizerRequired) {
+    const sanitizerRecord = requiredObject(manifest.sanitizer);
+    assertKeys(sanitizerRecord, [
+      "required",
+      "applied",
+      "id",
+      "protocolVersion",
+      "policyVersion",
+      "policyDigest",
+      "policyTargetIdentityDigest",
+      "policyBindingIdentity",
+      "policyBindingDigest",
+      "findings",
+    ]);
+    parseSanitizerFindings(sanitizerRecord.findings);
+    validateSanitizerBinding(sanitizerRecord, identity.digest);
+    if (sanitizerRecord.required !== true || sanitizerRecord.applied !== true) invalid();
+    sanitizer = sanitizerRecord as unknown as NonNullable<AttemptManifest["sanitizer"]>;
+  } else if (Object.hasOwn(manifest, "sanitizer")) {
+    invalid();
+  }
   const run = requiredObject(manifest.run);
   assertKeys(run, ["providerId", "route", "requested", "responded"]);
   parseResponded(run.responded);
@@ -313,10 +638,10 @@ function parseAttemptManifest(value: JsonValue): AttemptManifest {
     "runtimeBindingDigest",
     "runtimeBindingIdentity",
   ]);
-  parseApprovalMetadata(approval);
+  const approvalMetadata = parseApprovalMetadata(approval);
   const approvalBinding = parseAppliedBinding(approval);
-  const sanitizerBindingDigest = nullableString(sanitizer.policyBindingDigest);
-  parseStages(manifest.stages);
+  const sanitizerBindingDigest = sanitizer === undefined ? null : nullableDigest(sanitizer.policyBindingDigest);
+  parseStages(manifest.stages, sanitizerRequirement.sanitizerRequired);
   if (
     computeRunIdentity({
       caseInputIdentityDigest: identity.digest,
@@ -328,7 +653,21 @@ function parseAttemptManifest(value: JsonValue): AttemptManifest {
       maxTokens: requested.maxTokens,
       approvalBindingDigest: approvalBinding.digest,
       approvalBindingIdentity: approvalBinding.identity,
+      approvalGateId: approvalMetadata.gateId,
+      approvalProtocolVersion: approvalMetadata.protocolVersion,
+      approvalSnapshotDigest: approvalMetadata.snapshotDigest,
+      approvalRequired: approvalMetadata.required,
       sanitizerBindingDigest,
+      sanitizerId: sanitizer === undefined ? null : nullableSafeLabel(sanitizer.id),
+      sanitizerProtocolVersion: sanitizer === undefined ? null : nullableProtocolVersion(sanitizer.protocolVersion),
+      sanitizerRequired: sanitizer !== undefined,
+      policyRequired: sanitizer !== undefined,
+      sanitizerRequirementVersion: sanitizerRequirement.sanitizerRequirementVersion,
+      sanitizerRequirementReason: sanitizerRequirement.sanitizerRequirementReason,
+      requirementVerifierId: sanitizerRequirement.requirementVerifierId,
+      requirementVerifierVersion: sanitizerRequirement.requirementVerifierVersion,
+      consumerSourceCommit: sanitizerRequirement.consumerSourceCommit,
+      requirementDecisionDigest: sanitizerRequirement.requirementDecisionDigest,
     }) !== runId
   ) {
     throw new RunnerError("attempt_identity_mismatch", "attempt run identity is invalid");
@@ -336,6 +675,93 @@ function parseAttemptManifest(value: JsonValue): AttemptManifest {
   // The writer creates this shape from typed values. Re-check the identity and
   // binding invariants here, then return the parsed value for normal consumers.
   return manifest as unknown as AttemptManifest;
+}
+
+function parseSanitizerRequirement(
+  value: JsonValue | undefined,
+  documentKind: string,
+  verifier: SanitizerRequirementVerifier | undefined,
+): SanitizerRequirementDecisionV1 {
+  const requirement = requiredObject(value);
+  assertKeys(requirement, [
+    "sanitizerRequirementVersion",
+    "sanitizerRequired",
+    "policyRequired",
+    "sanitizerRequirementReason",
+    "requirementVerifierId",
+    "requirementVerifierVersion",
+    "consumerSourceCommit",
+    "requirementDecisionDigest",
+  ]);
+  if (requirement.sanitizerRequirementVersion !== 1) invalid();
+  if (typeof requirement.sanitizerRequired !== "boolean" || typeof requirement.policyRequired !== "boolean") {
+    invalid();
+  }
+  if (requirement.sanitizerRequired !== requirement.policyRequired) invalid();
+  const core: SanitizerRequirementCoreV1 = {
+    sanitizerRequired: requirement.sanitizerRequired,
+    policyRequired: requirement.policyRequired,
+    sanitizerRequirementReason: requiredSafeLabel(requirement.sanitizerRequirementReason),
+    consumerSourceCommit: nullableSafeLabel(requirement.consumerSourceCommit),
+  };
+  const requirementVerifierId = requiredSafeLabel(requirement.requirementVerifierId);
+  const requirementVerifierVersion = requiredSafeLabel(requirement.requirementVerifierVersion);
+  const requirementDecisionDigest = requiredDigest(requirement.requirementDecisionDigest);
+  const expected: SanitizerRequirementDecisionV1 = {
+    ...core,
+    sanitizerRequirementVersion: 1,
+    requirementVerifierId,
+    requirementVerifierVersion,
+    requirementDecisionDigest: computeSanitizerRequirementDigest({
+      ...core,
+      sanitizerRequirementVersion: 1,
+      requirementVerifierId,
+      requirementVerifierVersion,
+    }),
+  };
+  if (requirementDecisionDigest !== expected.requirementDecisionDigest) {
+    throw new RunnerError("attempt_identity_mismatch", "attempt sanitizer requirement is invalid");
+  }
+  if (verifier !== undefined) {
+    if (!isSafeLabel(verifier.id) || !isSafeLabel(verifier.version)) invalid();
+    let derived: SanitizerRequirementCoreV1;
+    try {
+      derived = verifier.derive(documentKind);
+      if (
+        derived === null ||
+        typeof derived !== "object" ||
+        typeof derived.sanitizerRequired !== "boolean" ||
+        typeof derived.policyRequired !== "boolean" ||
+        typeof derived.sanitizerRequirementReason !== "string" ||
+        !isSafeLabel(derived.sanitizerRequirementReason) ||
+        (derived.consumerSourceCommit !== null &&
+          (typeof derived.consumerSourceCommit !== "string" || !isSafeLabel(derived.consumerSourceCommit))) ||
+        derived.sanitizerRequired !== derived.policyRequired
+      ) {
+        throw new Error();
+      }
+    } catch {
+      throw new RunnerError("attempt_identity_mismatch", "attempt sanitizer requirement is invalid");
+    }
+    const derivedDigest = computeSanitizerRequirementDigest({
+      ...derived,
+      sanitizerRequirementVersion: 1,
+      requirementVerifierId: verifier.id,
+      requirementVerifierVersion: verifier.version,
+    });
+    if (
+      verifier.id !== requirementVerifierId ||
+      verifier.version !== requirementVerifierVersion ||
+      derivedDigest !== requirementDecisionDigest ||
+      derived.sanitizerRequired !== core.sanitizerRequired ||
+      derived.policyRequired !== core.policyRequired ||
+      derived.sanitizerRequirementReason !== core.sanitizerRequirementReason ||
+      derived.consumerSourceCommit !== core.consumerSourceCommit
+    ) {
+      throw new RunnerError("attempt_identity_mismatch", "attempt sanitizer requirement is invalid");
+    }
+  }
+  return expected;
 }
 
 function parseInputs(value: JsonValue | undefined): AttemptInputManifest {
@@ -354,7 +780,7 @@ function parseInput(value: JsonValue | undefined): { sha256: string; mediaType: 
   assertKeys(input, ["sha256", "mediaType"]);
   return {
     sha256: requiredDigest(input.sha256),
-    mediaType: requiredString(input.mediaType),
+    mediaType: requiredMediaType(input.mediaType),
   };
 }
 
@@ -366,10 +792,10 @@ function parseIdentity(value: JsonValue | undefined): CaseInputIdentity {
   if (identity.identityVersion !== 1) invalid();
   const result: CaseInputIdentity = {
     identityVersion: 1,
-    caseId: requiredString(identity.caseId),
-    documentKind: requiredString(identity.documentKind),
+    caseId: requiredSafeLabel(identity.caseId),
+    documentKind: requiredSafeLabel(identity.documentKind),
     preparedImage: {
-      mediaType: requiredString(preparedImage.mediaType),
+      mediaType: requiredMediaType(preparedImage.mediaType),
       sha256: requiredDigest(preparedImage.sha256),
     },
     digest: requiredDigest(identity.digest),
@@ -452,8 +878,8 @@ function parsePolicyBindingIdentity(
 function parseRequested(value: JsonValue | undefined): RequestedExecutionSettings {
   const requested = requiredObject(value);
   assertKeys(requested, ["model", "effort", "maxTokens"]);
-  const model = nullableString(requested.model);
-  const effort = nullableString(requested.effort);
+  const model = nullableSafeLabel(requested.model);
+  const effort = nullableSafeLabel(requested.effort);
   const maxTokens = requested.maxTokens;
   if (maxTokens === null) return { model, effort, maxTokens: null };
   if (typeof maxTokens !== "number" || !Number.isSafeInteger(maxTokens) || maxTokens < 1) invalid();
@@ -466,8 +892,8 @@ function parseAppliedBinding(approval: Record<string, JsonValue>): {
 } {
   const applied = approval.applied;
   if (typeof applied !== "boolean") invalid();
-  const binding = nullableString(approval.runtimeBindingDigest);
-  const identity = nullableString(approval.runtimeBindingIdentity);
+  const binding = nullableDigest(approval.runtimeBindingDigest);
+  const identity = nullableSafeLabel(approval.runtimeBindingIdentity);
   if (!applied && (binding !== null || identity !== null)) {
     throw new RunnerError("attempt_identity_mismatch", "attempt approval binding is invalid");
   }
@@ -477,20 +903,20 @@ function parseAppliedBinding(approval: Record<string, JsonValue>): {
 function parseProvenance(value: JsonValue | undefined): void {
   const provenance = requiredObject(value);
   assertKeys(provenance, ["harnessVersion", "harnessCommit", "promptVersion", "preprocessVersion", "sourceCommit"]);
-  requiredString(provenance.harnessVersion);
-  nullableString(provenance.harnessCommit);
-  requiredString(provenance.promptVersion);
-  requiredString(provenance.preprocessVersion);
-  nullableString(provenance.sourceCommit);
+  requiredSafeLabel(provenance.harnessVersion);
+  nullableSafeLabel(provenance.harnessCommit);
+  requiredSafeLabel(provenance.promptVersion);
+  requiredSafeLabel(provenance.preprocessVersion);
+  nullableSafeLabel(provenance.sourceCommit);
 }
 
 function parseResponded(value: JsonValue | undefined): void {
   const responded = requiredObject(value);
   assertKeys(responded, ["model", "effort", "usage", "stopReason"]);
-  nullableString(responded.model);
-  nullableString(responded.effort);
+  nullableSafeLabel(responded.model);
+  nullableSafeLabel(responded.effort);
   parseUsage(responded.usage);
-  nullableString(responded.stopReason);
+  nullableSafeLabel(responded.stopReason);
 }
 
 function parseUsage(value: JsonValue | undefined): void {
@@ -507,19 +933,28 @@ function parseUsage(value: JsonValue | undefined): void {
   }
 }
 
-function parseApprovalMetadata(approval: Record<string, JsonValue>): void {
+function parseApprovalMetadata(approval: Record<string, JsonValue>): {
+  required: boolean;
+  applied: boolean;
+  gateId: string | null;
+  protocolVersion: 1 | null;
+  snapshotDigest: string | null;
+  runtimeBindingDigest: string | null;
+  runtimeBindingIdentity: string | null;
+} {
   const required = approval.required;
   const applied = approval.applied;
   if (typeof required !== "boolean" || typeof applied !== "boolean") invalid();
   if (required && !applied) {
     throw new RunnerError("attempt_identity_mismatch", "attempt approval binding is incomplete");
   }
-  const gateId = nullableString(approval.gateId);
+  if (!required && applied) invalid();
+  const gateId = nullableSafeLabel(approval.gateId);
   const protocolVersion = approval.protocolVersion;
   if (protocolVersion !== null && protocolVersion !== 1) invalid();
   const snapshotDigest = nullableDigest(approval.snapshotDigest);
   const runtimeBindingDigest = nullableDigest(approval.runtimeBindingDigest);
-  const runtimeBindingIdentity = nullableString(approval.runtimeBindingIdentity);
+  const runtimeBindingIdentity = nullableSafeLabel(approval.runtimeBindingIdentity);
   if (applied) {
     if (
       gateId === null ||
@@ -538,6 +973,15 @@ function parseApprovalMetadata(approval: Record<string, JsonValue>): void {
   ) {
     throw new RunnerError("attempt_identity_mismatch", "attempt approval binding is invalid");
   }
+  return {
+    required,
+    applied,
+    gateId,
+    protocolVersion: protocolVersion === 1 ? 1 : null,
+    snapshotDigest,
+    runtimeBindingDigest,
+    runtimeBindingIdentity,
+  };
 }
 
 function parseSanitizerFindings(value: JsonValue | undefined): void {
@@ -545,7 +989,7 @@ function parseSanitizerFindings(value: JsonValue | undefined): void {
   for (const findingValue of value) {
     const finding = requiredObject(findingValue);
     assertKeys(finding, ["code", "severity", "classification", "hardGate", "path"]);
-    requiredString(finding.code);
+    requiredSafeLabel(finding.code);
     if (
       finding.severity !== "info" &&
       finding.severity !== "warning" &&
@@ -553,28 +997,36 @@ function parseSanitizerFindings(value: JsonValue | undefined): void {
     ) {
       invalid();
     }
-    requiredString(finding.classification);
+    requiredSafeLabel(finding.classification);
     if (typeof finding.hardGate !== "boolean") invalid();
-    nullableString(finding.path);
+    if (finding.path !== null) invalid();
   }
 }
 
-function parseStages(value: JsonValue | undefined): void {
+function parseStages(value: JsonValue | undefined, sanitizerRequired: boolean): void {
   const stages = requiredObject(value);
-  const names = [
-    "policyTargetPreflight",
+  const requiredNames = [
     "approval",
     "provider",
     "parse",
-    "sanitizer",
-    "targetBinding",
     "schemaValidation",
   ] as const;
-  assertKeys(stages, [...names]);
-  for (const name of names) {
+  const conditionalNames = ["policyTargetPreflight", "sanitizer", "targetBinding"] as const;
+  assertKeys(stages, sanitizerRequired ? [...requiredNames, ...conditionalNames] : [...requiredNames]);
+  for (const name of requiredNames) {
     const stage = requiredObject(stages[name]);
     assertKeys(stage, ["status", "errorCode"]);
     if (stage.status !== "passed" || stage.errorCode !== null) invalid();
+  }
+  for (const name of conditionalNames) {
+    const stageValue = stages[name];
+    if (sanitizerRequired) {
+      const stage = requiredObject(stageValue);
+      assertKeys(stage, ["status", "errorCode"]);
+      if (stage.status !== "passed" || stage.errorCode !== null) invalid();
+    } else if (stageValue !== undefined) {
+      invalid();
+    }
   }
 }
 
@@ -591,8 +1043,20 @@ function requiredObject(value: JsonValue | undefined): Record<string, JsonValue>
 }
 
 function requiredString(value: JsonValue | undefined): string {
-  if (typeof value !== "string" || value.length === 0) invalid();
+  if (typeof value !== "string" || value.length === 0 || value.length > 240) invalid();
   return value;
+}
+
+function requiredSafeLabel(value: JsonValue | undefined): string {
+  const result = requiredString(value);
+  if (!isSafeLabel(result)) invalid();
+  return result;
+}
+
+function requiredMediaType(value: JsonValue | undefined): string {
+  const result = requiredString(value);
+  if (!/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/u.test(result)) invalid();
+  return result;
 }
 
 function requiredDigest(value: JsonValue | undefined): string {
@@ -609,8 +1073,51 @@ function nullableDigest(value: JsonValue | undefined): string | null {
 
 function nullableString(value: JsonValue | undefined): string | null {
   if (value === null) return null;
-  if (typeof value === "string") return value;
+  if (typeof value === "string" && value.length <= 240) return value;
   invalid();
+}
+
+function nullableSafeLabel(value: JsonValue | undefined): string | null {
+  const result = nullableString(value);
+  if (result !== null && !isSafeLabel(result)) invalid();
+  return result;
+}
+
+function nullableProtocolVersion(value: JsonValue | undefined): 1 | null {
+  if (value === null) return null;
+  if (value === 1) return 1;
+  invalid();
+}
+
+function isDateTime(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/u.exec(value);
+  if (match === null) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) return false;
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  if (match[7] !== "Z" && (Number(match[8]) > 23 || Number(match[9]) > 59)) return false;
+  return true;
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    return leap ? 29 : 28;
+  }
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function sameFile(left: { dev: number; ino: number }, right: { dev: number; ino: number }): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }
 
 function isSafeLabel(value: string): boolean {

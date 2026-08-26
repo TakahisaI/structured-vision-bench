@@ -3,6 +3,38 @@ import { createHash } from "node:crypto";
 export const CASE_INPUT_IDENTITY_VERSION = 1 as const;
 export const POLICY_BINDING_VERSION = 1 as const;
 export const RUN_IDENTITY_VERSION = 1 as const;
+export const SANITIZER_REQUIREMENT_VERSION = 1 as const;
+
+export type SanitizerRequirementCoreV1 = {
+  sanitizerRequired: boolean;
+  policyRequired: boolean;
+  sanitizerRequirementReason: string;
+  consumerSourceCommit: string | null;
+};
+
+export type SanitizerRequirementDecisionV1 = SanitizerRequirementCoreV1 & {
+  sanitizerRequirementVersion: typeof SANITIZER_REQUIREMENT_VERSION;
+  requirementVerifierId: string;
+  requirementVerifierVersion: string;
+  requirementDecisionDigest: string;
+};
+
+export type SanitizerRequirementVerifier = {
+  readonly id: string;
+  readonly version: string;
+  derive: (documentKind: string) => SanitizerRequirementCoreV1;
+};
+
+export type SanitizerRequirementSettings = {
+  decision: SanitizerRequirementDecisionV1;
+  verifier: SanitizerRequirementVerifier;
+};
+
+export type SanitizerRequirementDigestInput = SanitizerRequirementCoreV1 & {
+  sanitizerRequirementVersion: typeof SANITIZER_REQUIREMENT_VERSION;
+  requirementVerifierId: string;
+  requirementVerifierVersion: string;
+};
 
 export type CaseInputIdentityInput = {
   caseId: string;
@@ -40,7 +72,21 @@ export type RunIdentityInput = {
   maxTokens?: number | null;
   approvalBindingDigest?: string | null;
   approvalBindingIdentity?: string | null;
+  approvalGateId?: string | null;
+  approvalProtocolVersion?: number | null;
+  approvalSnapshotDigest?: string | null;
+  approvalRequired?: boolean;
   sanitizerBindingDigest?: string | null;
+  sanitizerId?: string | null;
+  sanitizerProtocolVersion?: number | null;
+  sanitizerRequired?: boolean;
+  policyRequired?: boolean;
+  sanitizerRequirementVersion?: number | null;
+  sanitizerRequirementReason?: string | null;
+  requirementVerifierId?: string | null;
+  requirementVerifierVersion?: string | null;
+  consumerSourceCommit?: string | null;
+  requirementDecisionDigest?: string | null;
 };
 
 /**
@@ -75,6 +121,36 @@ export function computePolicyBindingDigest(input: PolicyBindingInput): string {
   ]);
 }
 
+/** Computes the digest committed by a consumer-owned sanitizer decision. */
+export function computeSanitizerRequirementDigest(input: SanitizerRequirementDigestInput): string {
+  return sha256([
+    Buffer.from("svbench-sanitizer-requirement-v1", "ascii"),
+    lengthPrefixedUtf8(String(input.sanitizerRequirementVersion)),
+    lengthPrefixedUtf8(input.requirementVerifierId),
+    lengthPrefixedUtf8(input.requirementVerifierVersion),
+    Buffer.from(input.sanitizerRequired ? "1" : "0", "ascii"),
+    Buffer.from(input.policyRequired ? "1" : "0", "ascii"),
+    lengthPrefixedUtf8(input.sanitizerRequirementReason),
+    optionalUtf8(input.consumerSourceCommit),
+  ]);
+}
+
+export function createSanitizerRequirementDecision(
+  core: SanitizerRequirementCoreV1,
+  verifier: SanitizerRequirementVerifier,
+): SanitizerRequirementDecisionV1 {
+  const digestInput: SanitizerRequirementDigestInput = {
+    ...core,
+    sanitizerRequirementVersion: SANITIZER_REQUIREMENT_VERSION,
+    requirementVerifierId: verifier.id,
+    requirementVerifierVersion: verifier.version,
+  };
+  return {
+    ...digestInput,
+    requirementDecisionDigest: computeSanitizerRequirementDigest(digestInput),
+  };
+}
+
 /**
  * Computes a stable identity for one requested execution. It includes the
  * bundle manifest digest, run settings, and binding identities, never input
@@ -84,15 +160,29 @@ export function computeRunIdentity(input: RunIdentityInput): string {
   return sha256([
     Buffer.from("svbench-run-v1", "ascii"),
     lengthPrefixedAscii(input.caseInputIdentityDigest),
-    lengthPrefixedAscii(input.bundleManifestDigest ?? ""),
+    optionalAscii(input.bundleManifestDigest),
     lengthPrefixedUtf8(input.providerId),
     lengthPrefixedUtf8(input.providerRoute),
-    lengthPrefixedUtf8(input.requestedModel ?? ""),
-    lengthPrefixedUtf8(input.requestedEffort ?? ""),
-    lengthPrefixedUtf8(input.maxTokens === undefined || input.maxTokens === null ? "" : String(input.maxTokens)),
-    lengthPrefixedAscii(input.approvalBindingDigest ?? ""),
-    lengthPrefixedUtf8(input.approvalBindingIdentity ?? ""),
-    lengthPrefixedAscii(input.sanitizerBindingDigest ?? ""),
+    optionalUtf8(input.requestedModel),
+    optionalUtf8(input.requestedEffort),
+    optionalNumber(input.maxTokens),
+    optionalAscii(input.approvalBindingDigest),
+    optionalUtf8(input.approvalBindingIdentity),
+    optionalUtf8(input.approvalGateId),
+    optionalNumber(input.approvalProtocolVersion),
+    optionalAscii(input.approvalSnapshotDigest),
+    optionalAscii(input.sanitizerBindingDigest),
+    optionalBoolean(input.approvalRequired),
+    optionalUtf8(input.sanitizerId),
+    optionalNumber(input.sanitizerProtocolVersion),
+    optionalBoolean(input.sanitizerRequired),
+    optionalBoolean(input.policyRequired),
+    optionalNumber(input.sanitizerRequirementVersion),
+    optionalUtf8(input.sanitizerRequirementReason),
+    optionalUtf8(input.requirementVerifierId),
+    optionalUtf8(input.requirementVerifierVersion),
+    optionalUtf8(input.consumerSourceCommit),
+    optionalAscii(input.requirementDecisionDigest),
   ]);
 }
 
@@ -109,6 +199,28 @@ function lengthPrefixedUtf8(value: string): Buffer {
 function lengthPrefixedAscii(value: string): Buffer {
   if (!/^[\x00-\x7f]*$/u.test(value)) throw new Error("identity input must be ASCII");
   return lengthPrefix(Buffer.from(value, "ascii"));
+}
+
+function optionalUtf8(value: string | null | undefined): Buffer {
+  if (value === undefined) return Buffer.from([0]);
+  if (value === null) return Buffer.from([1, 0]);
+  return Buffer.concat([Buffer.from([1, 1]), lengthPrefixedUtf8(value)]);
+}
+
+function optionalAscii(value: string | null | undefined): Buffer {
+  if (value === undefined) return Buffer.from([0]);
+  if (value === null) return Buffer.from([1, 0]);
+  return Buffer.concat([Buffer.from([1, 1]), lengthPrefixedAscii(value)]);
+}
+
+function optionalBoolean(value: boolean | undefined): Buffer {
+  return value === undefined ? Buffer.from([0]) : Buffer.from([1, value ? 1 : 0]);
+}
+
+function optionalNumber(value: number | null | undefined): Buffer {
+  if (value === undefined) return Buffer.from([0]);
+  if (value === null) return Buffer.from([1, 0]);
+  return Buffer.concat([Buffer.from([1, 1]), lengthPrefixedUtf8(String(value))]);
 }
 
 function lengthPrefix(value: Buffer): Buffer {

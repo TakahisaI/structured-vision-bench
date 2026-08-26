@@ -3,6 +3,10 @@ import path from "node:path";
 
 import { createMockProvider } from "../provider/mock.js";
 import { RunnerError } from "../runner/errors.js";
+import {
+  createSanitizerRequirementDecision,
+  type SanitizerRequirementSettings,
+} from "../runner/identity.js";
 import { runBundle } from "../runner/run.js";
 import { BundleValidationError } from "../bundle/validate-bundle.js";
 
@@ -42,6 +46,7 @@ if (runArguments !== undefined) {
       requestedModel: runArguments.model,
       requestedEffort: runArguments.effort,
       maxTokens: runArguments.maxTokens,
+      sanitizerRequirement: cliSanitizerRequirement(),
     });
     if (asJson) {
       console.log(
@@ -75,6 +80,7 @@ if (runArguments !== undefined) {
 }
 
 function parseRunArguments(): RunArguments {
+  if (process.argv[2] !== "run") throw new Error();
   const { positionals, values } = parseArgs({
     args: process.argv.slice(3),
     options: {
@@ -110,6 +116,24 @@ function parseRunArguments(): RunArguments {
     effort: optionalNonEmptyString(values.effort),
     maxTokens,
     attemptRoot,
+  };
+}
+
+function cliSanitizerRequirement(): SanitizerRequirementSettings {
+  const verifier = {
+    id: "svbench-cli",
+    version: "v1",
+    derive: (_documentKind: string) => ({
+      sanitizerRequired: false,
+      policyRequired: false,
+      sanitizerRequirementReason: "mock_provider_policy_not_required",
+      consumerSourceCommit: null,
+    }),
+  };
+  const core = verifier.derive("");
+  return {
+    verifier,
+    decision: createSanitizerRequirementDecision(core, verifier),
   };
 }
 

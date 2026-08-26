@@ -17,7 +17,7 @@
     "provenance",
     "run",
     "approval",
-    "sanitizer",
+    "sanitizerRequirement",
     "stages",
     "document",
     "timing"
@@ -37,11 +37,13 @@
     },
     "caseId": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]{1,64}$"
     },
     "documentKind": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]{1,64}$"
     },
     "bundleManifestDigest": {
       "$ref": "#/$defs/digest"
@@ -86,11 +88,13 @@
         },
         "caseId": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "documentKind": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "preparedImage": {
           "$ref": "#/$defs/input"
@@ -113,7 +117,8 @@
       "properties": {
         "harnessVersion": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "harnessCommit": {
           "type": [
@@ -123,11 +128,13 @@
         },
         "promptVersion": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "preprocessVersion": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "sourceCommit": {
           "type": [
@@ -166,6 +173,9 @@
     "approval": {
       "$ref": "#/$defs/approval"
     },
+    "sanitizerRequirement": {
+      "$ref": "#/$defs/sanitizerRequirement"
+    },
     "sanitizer": {
       "$ref": "#/$defs/sanitizer"
     },
@@ -173,12 +183,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "policyTargetPreflight",
         "approval",
         "provider",
         "parse",
-        "sanitizer",
-        "targetBinding",
         "schemaValidation"
       ],
       "properties": {
@@ -245,7 +252,120 @@
       }
     }
   },
+  "oneOf": [
+    {
+      "properties": {
+        "sanitizerRequirement": {
+          "properties": {
+            "sanitizerRequired": {
+              "const": false
+            },
+            "policyRequired": {
+              "const": false
+            }
+          }
+        },
+        "stages": {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "policyTargetPreflight"
+                ]
+              },
+              {
+                "required": [
+                  "sanitizer"
+                ]
+              },
+              {
+                "required": [
+                  "targetBinding"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "not": {
+        "required": [
+          "sanitizer"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "sanitizerRequirement": {
+          "properties": {
+            "sanitizerRequired": {
+              "const": true
+            },
+            "policyRequired": {
+              "const": true
+            }
+          }
+        },
+        "stages": {
+          "required": [
+            "policyTargetPreflight",
+            "sanitizer",
+            "targetBinding"
+          ]
+        }
+      },
+      "required": [
+        "sanitizer"
+      ]
+    }
+  ],
   "$defs": {
+    "sanitizerRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sanitizerRequirementVersion",
+        "sanitizerRequired",
+        "policyRequired",
+        "sanitizerRequirementReason",
+        "requirementVerifierId",
+        "requirementVerifierVersion",
+        "consumerSourceCommit",
+        "requirementDecisionDigest"
+      ],
+      "properties": {
+        "sanitizerRequirementVersion": {
+          "const": 1
+        },
+        "sanitizerRequired": {
+          "type": "boolean"
+        },
+        "policyRequired": {
+          "type": "boolean"
+        },
+        "sanitizerRequirementReason": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "requirementVerifierId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "requirementVerifierVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "consumerSourceCommit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "requirementDecisionDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
     "digest": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
@@ -263,7 +383,8 @@
         },
         "mediaType": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9!#$&^_.+-]+\\/[A-Za-z0-9!#$&^_.+-]+$"
         }
       }
     },
@@ -280,13 +401,15 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "effort": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "maxTokens": {
           "type": [
@@ -311,13 +434,15 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "effort": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "usage": {
           "$ref": "#/$defs/usage"
@@ -326,7 +451,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         }
       }
     },
@@ -427,7 +553,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         }
       }
     },
@@ -547,7 +674,7 @@
       "properties": {
         "code": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "severity": {
           "enum": [
@@ -558,16 +685,13 @@
         },
         "classification": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "hardGate": {
           "type": "boolean"
         },
         "path": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "const": null
         }
       }
     },

@@ -32,9 +32,10 @@ export function createMockProvider(options: MockProviderOptions = {}): Provider 
       await request.system.readText();
       await request.instruction.readText();
       return {
-        rawDocument: options.document ?? documentForSchema(request.schema),
-        respondedModel: options.respondedModel ?? "mock-v1",
-        effectiveEffort: options.effectiveEffort ?? request.requested.effort,
+        rawDocument: options.document !== undefined ? options.document : documentForSchema(request.schema),
+        respondedModel: options.respondedModel === undefined ? "mock-v1" : options.respondedModel,
+        effectiveEffort:
+          options.effectiveEffort === undefined ? request.requested.effort : options.effectiveEffort,
         usage: { available: false },
         stopReason: "stop",
       };

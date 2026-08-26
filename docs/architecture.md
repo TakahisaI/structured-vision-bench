@@ -23,7 +23,8 @@ Its run-facing settings are separate and never enter a bundle:
 
 - provider route, requested model, effort, and token limit;
 - repeat and retry policy;
-- sanitizer command.
+- sanitizer command;
+- consumer-owned sanitizer requirement verifier and attestation.
 
 The final contract splits ownership as follows: the **bundle** carries image, schema, system,
 instruction, optional truth, comparison policy, and consumer metadata; **run or suite
@@ -35,16 +36,17 @@ later private command adapter may invoke the consumer's production API provider 
 ### Bundle validator
 
 The validator validates the manifest contract, path containment, regular-file boundary, digests,
-strict UTF-8, and JSON syntax before a provider can see the case. Runner-facing loading stages
-provider inputs from the verified read path rather than reopening the mutable bundle for a provider.
+strict UTF-8, JSON syntax, and the supported output-schema definition before a provider can see the
+case. Runner-facing loading stages provider inputs from the verified read path rather than reopening
+the mutable bundle for a provider; input staging occurs only after approval.
 
 ### Runner
 
 The Issue #2 runner turns one validated bundle into one immutable attempt. It owns provider-input
-staging, case/run identity, approval and sanitizer binding checks, cancellation/timeout signaling,
-atomic finalization, and machine-readable attempt metadata. It does not own application-specific
-validation. A provider, approval, sanitizer, parse, policy, or schema failure creates no formal
-attempt.
+staging, case/run identity, consumer requirement attestation, approval and sanitizer
+binding checks, cancellation/timeout signaling, exclusive attempt claiming, final-manifest
+publication, and machine-readable attempt metadata. It does not own application-specific validation.
+A provider, approval, sanitizer, parse, policy, or schema failure creates no formal attempt.
 
 ### Provider
 
@@ -106,13 +108,17 @@ confidential storage and is passed to a local checkout of the public harness.
 ## Data flow
 
 1. The consumer freezes one source revision and exports a bundle to confidential storage.
-2. The validator rejects malformed, incomplete, changed, or escaping inputs.
-3. The runner stages verified provider inputs outside the bundle and derives identities.
+2. The validator rejects malformed, incomplete, changed, or escaping inputs and preflights the output schema.
+3. The consumer verifier derives the sanitizer requirement from document kind; the runner attests every
+   decision field and digest.
 4. Approval and sanitizer policy bindings are checked before the relevant boundary is crossed.
-5. The selected provider returns structured data or a classified failure.
-6. The runner sanitizes, schema-validates, and atomically finalizes the attempt.
-7. Comparison and reports derive results without mutating bundle or attempt input.
-8. Only anonymized aggregate facts may be copied to a public Issue.
+5. After approval, the runner stages verified provider inputs outside the bundle and claims the run
+   directory before provider work.
+6. The selected provider returns structured data or a classified failure.
+7. The runner canonicalizes, sanitizes when required, schema-validates, and publishes the attempt by
+   renaming its fully validated pending manifest to `attempt.json`.
+8. Comparison and reports derive results without mutating bundle or attempt input.
+9. Only anonymized aggregate facts may be copied to a public Issue.
 
 ## Dependency direction
 

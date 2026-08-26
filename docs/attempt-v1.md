@@ -7,8 +7,9 @@ writes one successful attempt outside the bundle. It does not own a production p
 schema, preprocessing, provider credentials, comparison logic, repeat policy, or resume policy.
 
 The sanitizer and approval process protocols are separate work items (#8 and #9). This milestone
-therefore exposes typed injection boundaries and deterministic fakes; it does not implement a real
-command, login, or hosted-model adapter.
+does implement the consumer-owned sanitizer-requirement attestation boundary: a consumer verifier
+must derive and approve the decision before the provider runs. It does not implement a real command,
+login, or hosted-model adapter.
 
 ## CLI
 
@@ -37,45 +38,65 @@ summary is written to stdout; human mode writes failures to stderr.
 
 `runBundle()` performs the following steps in order:
 
-1. **Preflight and staging.** It validates the bundle using the bundle v1 validator. The image,
-   system text, and instruction text are copied into a private temporary staging directory and
-   re-verified against the declared digest. The schema value comes from the digest-verified JSON
-   read. The provider receives callbacks over staged inputs, never a fresh open of the mutable
-   bundle directory.
+1. **Manifest/path preflight.** It validates the bundle manifest, referenced path syntax, and the
+   output-schema definition without opening provider input contents. It also rejects an attempt root
+   that resolves to the bundle or one of its descendants. This phase computes the declared image
+   metadata needed for the case identity.
 2. **Identity.** It snapshots `caseId`, `documentKind`, and prepared-image media type and SHA-256
    into `caseInputIdentity` v1. Schema, prompt text, instruction text, truth, comparison policy,
    bundle path, and bundle manifest digest are not part of this case identity.
-3. **Policy preflight.** If a sanitizer policy is configured, the runner hashes the exact envelope
-   bytes, parses it with strict UTF-8 and JSON rules, recomputes its target identity, and computes
-   the policy binding. A missing, malformed, swapped, or mismatched policy fails before provider
-   invocation.
-4. **Approval.** A required approval gate must be present and match its expected gate ID,
-   protocol version, snapshot digest, runtime binding identity, and runtime binding digest. The gate
-   request contains run settings and safe provenance only; it contains no image, prompt, schema,
-   truth, comparison, or case identity. Approval is complete before the provider callback can read
-   the staged image or text.
-5. **Provider invocation.** The provider receives two separate typed values:
-   - `ProviderModelRequest`: staged prepared image, schema, system text, instruction text, and
-     requested model/effort/max tokens;
+3. **Consumer requirement decision.** The caller supplies a consumer-owned verifier and an immutable
+   decision. The verifier derives the decision from `documentKind`; the runner compares every field,
+   recomputes `requirementDecisionDigest`, and rejects a caller downgrade. The decision records
+   `sanitizerRequirementVersion`, `sanitizerRequired`, `policyRequired`, a safe reason code, verifier
+   identity/version, and optional consumer source commit.
+4. **Policy preflight.** When the decision requires sanitization, the runner hashes the exact policy
+   envelope bytes, parses it with strict UTF-8 and JSON rules, recomputes its target identity, and
+   computes the policy binding. A missing, malformed, swapped, or mismatched policy fails before
+   provider invocation.
+5. **Approval.** A required approval gate must be present and match its expected gate ID, protocol
+   version, snapshot digest, runtime binding identity, and runtime binding digest. The gate request
+   contains run settings and safe provenance only; it contains no image, prompt, schema, truth,
+   comparison, or case identity.
+6. **Complete verification and staging.** After approval, the runner revalidates the complete bundle,
+   verifies all declared digests and truth projection, and copies image/system/instruction bytes into a
+   private per-run staging directory. It then claims `<attempt-root>/<run-id>` with a non-recursive
+   exclusive directory create. An existing entry is `attempt_exists`; only the process that wins this
+   claim may build or clean up the unpublished attempt. The claim contains a private nonce marker
+   until the final manifest publication. The provider receives callbacks over staged inputs, never a
+   fresh open of the mutable bundle directory. If the manifest or declared image identity changed
+   after approval, the run fails before provider invocation.
+7. **Provider invocation.** The provider receives two separate typed values:
+   - `ProviderModelRequest`: allowlisted staged prepared image, output schema snapshot, system text,
+     instruction text, and requested model/effort/max tokens;
    - `ProviderAdapterContext`: local case/provenance context and input digests. It is not model
      payload and does not contain truth or comparison data.
 
-   The provider may return a JSON value, strict JSON text, or UTF-8 JSON bytes. Text and bytes are
-   decoded and parsed through the public strict JSON contract. Approval, provider, and sanitizer
-   timeouts abort their optional `AbortSignal`; no attempt is finalized.
-6. **Sanitization and binding.** Raw provider output remains in memory only. When sanitizer policy
-   is configured, the sanitizer must return a sanitized document plus the exact current identity,
-   policy digest/version, target identity digest, and policy binding digest. Findings are restricted
-   to value-free `code`, `severity`, `classification`, `hardGate`, and optional `path` fields.
-7. **Schema validation.** Only the sanitizer output (or the formal provider document when the
-   optional sanitizer is omitted) is validated against the bundle schema. A
-   schema mismatch is a classified failure and cannot create an attempt.
-8. **Atomic finalization.** The formal document is serialized to `document.json`, its exact stored
-   bytes are hashed, and `attempt.json` is written with the matching digest. Both files are created
-   in a temporary attempt directory, which is renamed into place only after all work has succeeded.
+   The provider may return a JSON value, strict JSON text, or UTF-8 JSON bytes. All forms are
+   immediately converted to one bounded, strict canonical JSON value before validation. Approval,
+   provider, and sanitizer timeouts abort their optional `AbortSignal`; provider reads are invalidated
+   when a timeout fires, and no attempt is finalized.
+8. **Sanitization and binding.** When the consumer decision requires sanitization, the sanitizer must
+   return a sanitized document plus the exact current identity, policy digest/version, target identity
+   digest, and policy binding digest. Findings are reduced to bounded value-free codes/classifications;
+   persisted finding paths are always null. When sanitization is not required, the strict canonical
+   provider document becomes the formal document and no sanitizer/policy/target-binding block is
+   emitted.
+9. **Schema validation.** Only the formal canonical document is validated against the preflighted
+   bundle output schema. A schema mismatch is a classified failure and cannot create an attempt.
+10. **Atomic finalization.** The formal document is serialized to `document.json.part`, its exact
+    bytes are hashed, and it is renamed to `document.json` inside the claimed directory.
+    The matching manifest is written to `attempt.json.pending` and self-validated together with the
+    document while the private owner marker is present. Cleanup may remove the directory only when
+    the claim owner is proven and `attempt.json` does not exist. The owner marker is then removed and
+    the final `attempt.json.pending` → `attempt.json` rename is the sole publication point. No
+    operation after that rename is needed to make the attempt readable.
 
 A provider, sanitizer, approval failure, timeout, parse error, policy mismatch, or schema mismatch
-leaves no formal attempt directory. Temporary input and attempt staging is removed on failure.
+leaves no formal attempt. An unpublished claim directory may remain after a crash or after an
+attempt-root identity change prevents safe cleanup; because it has no final `attempt.json`, it is not
+a formal attempt and must not be consumed. Temporary input staging is removed on failure. A provider
+that ignores abort may finish in memory, but all staged-input callbacks reject after timeout.
 
 ## Identity rules
 
@@ -118,9 +139,40 @@ rather than trusted from its declared digest. The manifest stores the policy bin
 ### Run identity
 
 `runId` is a separate identity. It includes the case identity, bundle manifest digest, provider ID
-and stable route label, requested model/effort/max tokens, and approval/sanitizer binding labels.
-Changing a requested execution setting produces a different run ID without changing
+and stable route label, requested model/effort/max tokens, the complete approval metadata, the
+sanitizer identity/binding metadata, and the complete consumer sanitizer-requirement decision. All
+optional tuple members use an explicit presence tag, so absent and null/empty values cannot collide.
+Changing a requested execution or security setting produces a different run ID without changing
 `caseInputIdentity`. A route is a stable provider label, not an endpoint or account identifier.
+
+### Consumer sanitizer requirement
+
+Every run carries a consumer-owned `sanitizerRequirement` decision. The consumer supplies a verifier
+whose `derive(documentKind)` result is compared field-by-field with the supplied attestation. The
+attestation contains:
+
+- `sanitizerRequirementVersion`;
+- `sanitizerRequired` and `policyRequired` (v1 requires these flags to agree);
+- a bounded `sanitizerRequirementReason` code;
+- `requirementVerifierId` and `requirementVerifierVersion`;
+- optional bounded `consumerSourceCommit`;
+- `requirementDecisionDigest`, computed over the version, verifier identity, flags, reason, and
+  source-commit presence/value.
+
+The runner rejects a missing, malformed, stale, or downgraded decision before provider invocation.
+The attempt schema is a discriminator: a not-required decision omits `sanitizer` and the
+policy-target/sanitizer/target-binding stages; a required decision requires all of them.
+
+### Output schema subset
+
+The public validator implements a deliberately bounded JSON Schema subset. It supports local `$ref`,
+`type` (including type arrays), `const`, `enum`, string/number/array/object bounds, `pattern`,
+`date-time`, `properties`, `required`, boolean or schema-valued `additionalProperties`, `items`,
+`anyOf`, `oneOf`, `allOf`, and `not`. Local references must be acyclic, and schema nesting is bounded
+to keep evaluation resource use finite. A bundle output schema is meta-validated against this subset
+before provider invocation; unsupported keywords, malformed references, invalid patterns, malformed
+keyword shapes, cyclic references, and excessive nesting are stable `output_schema_invalid` failures.
+This is not a claim of full Draft 2020-12 coverage.
 
 ## Attempt layout and manifest
 
@@ -138,22 +190,36 @@ It records:
 - attempt/run/bundle versions and IDs;
 - case ID, document kind, bundle manifest digest, and the four provider-input digests/media types;
 - the complete case input identity;
+- the consumer-owned sanitizer requirement decision and its decision digest;
 - harness version/commit and bundle prompt/preprocess/source metadata;
 - provider ID/stable route, requested settings, and only provider metadata actually returned;
-- approval and sanitizer status, versions, digests, policy binding identity/binding digest, and
-  value-free findings;
-- passed stage records for policy-target preflight, approval, provider, parse, sanitizer, target
-  binding, and schema validation;
+- approval status, gate/protocol/snapshot/runtime binding metadata;
+- when sanitizer is required, sanitizer status/version, policy digests, policy binding identity/
+  binding digest, and bounded value-free findings;
+- passed stage records for approval, provider, parse, and schema validation, plus policy-target
+  preflight/sanitizer/target binding only when sanitizer is required;
 - exact stored `document.json` digest and timing.
 
 Unknown model, effort, token usage, or stop-reason metadata is `null`/unavailable; it is never
-invented from a request. The manifest contains no raw provider response, raw document, prompt text,
-image bytes, policy content, policy path, endpoint, account, secret, or failure traceback.
+invented from a request. The manifest contains no raw provider response bytes/text, prompt text, image
+bytes, policy content, policy path, endpoint, account, secret, or failure traceback. The no-sanitizer
+formal document is a strict canonical JSON value, not the raw provider serialization; sanitizer
+findings never persist a provider-supplied path.
 
 `readAttempt()` treats the files as untrusted. It rejects symlinks, size violations, invalid strict
-JSON, unknown manifest fields, document digest changes, case identity changes, run identity changes,
-and sanitizer policy-binding changes. It hashes the exact stored document bytes, not a reserialized
-value.
+JSON, unknown manifest fields or directory entries, non-private modes, document digest changes, case
+identity changes, run identity changes, consumer-decision changes, and sanitizer policy-binding
+changes. Pass the consumer verifier in `readAttempt(path, { requirementVerifier })` to rederive the
+decision from `documentKind`; without it, the stored decision digest and shape are still checked. It
+hashes the exact stored document bytes, not a reserialized value.
+
+The reader recognizes only a directory containing the final `attempt.json` and `document.json` as a
+published attempt. A directory containing `attempt.json.pending`, the owner marker, or neither
+manifest is an unpublished claim and is rejected as an attempt. The runner uses a no-follow attempt
+root handle and device/inode checks through the last pre-publication validation. The Node-only
+contract prevents competing harness writers from replacing a claimed run directory; protection
+against an adversarial same-UID process replacing the attempt root in the final path-based syscall
+window is outside this portable harness threat model.
 
 ## TypeScript boundaries
 
