@@ -31,6 +31,12 @@ start an upstream-supported process in an environment where the operator has alr
 A ChatGPT subscription credential and an OpenAI Platform API key are different routes and must not
 be substituted or reported as one another.
 
+The Codex app-server protocol never reads either credential form. Issue #25 passes only explicitly
+allowlisted environment entries to the absolute executable and uses a fresh empty workspace. Both
+layers treat ephemeral thread mode only as data minimization rather than proof of non-persistence.
+The complete fixed-protocol boundary is in
+[`docs/codex-app-server-transport-v1.md`](codex-app-server-transport-v1.md).
+
 ## Filesystem boundary
 
 Bundle paths use normalized forward-slash relative paths. The validator rejects:
