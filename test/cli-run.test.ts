@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,11 +8,20 @@ import test from "node:test";
 
 import { readAttempt } from "../src/runner/attempt.js";
 import { MAX_TIMEOUT_MS } from "../src/runner/run.js";
+import {
+  computeCaseInputIdentity,
+  computePolicyBindingDigest,
+  createSanitizerRequirementDecision,
+} from "../src/runner/identity.js";
+import { createSanitizerPolicyEnvelope } from "../src/runner/sanitizer.js";
+import { MAX_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES } from "../src/runner/command-sanitizer.js";
 
 const CLI = path.join(".tmp", "build", "src", "cli", "svbench.js");
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
 const FAKE_APPROVAL_GATE = path.resolve("test/fixtures/fake-approval-gate.mjs");
 const FAKE_COMMAND_PROVIDER = path.resolve("test/fixtures/fake-command-provider.mjs");
+const FAKE_COMMAND_SANITIZER = path.resolve("test/fixtures/fake-command-sanitizer.mjs");
+const IMAGE_SHA256 = "dda43d98857bc0977a1bdc67e8005428c3af95ca73cddda69c9e8737eee03cc9";
 
 function commandProviderArguments(mode = "success"): string[] {
   return [
@@ -58,6 +68,55 @@ function approvalArguments(mode = "request-boundary"): string[] {
     "c".repeat(64),
     "--approval-phase",
     "development",
+  ];
+}
+
+function requiredSanitizerArguments(input: {
+  policyPath: string;
+  policyDigest: string;
+  caseInputIdentityDigest: string;
+  policyBindingDigest: string;
+}): string[] {
+  const verifier = {
+    id: "synthetic-cli-verifier",
+    version: "v1",
+    derive: (_documentKind: string) => ({
+      sanitizerRequired: true,
+      policyRequired: true,
+      sanitizerRequirementReason: "synthetic_policy_required",
+      consumerSourceCommit: null,
+    }),
+  };
+  const decision = createSanitizerRequirementDecision(verifier.derive(""), verifier);
+  return [
+    "--sanitizer",
+    "required",
+    "--sanitizer-command",
+    process.execPath,
+    "--sanitizer-arg",
+    FAKE_COMMAND_SANITIZER,
+    "--sanitizer-arg",
+    "success",
+    "--sanitizer-id",
+    "synthetic-command-sanitizer",
+    "--sanitizer-policy",
+    input.policyPath,
+    "--sanitizer-policy-version",
+    "1",
+    "--sanitizer-policy-digest",
+    input.policyDigest,
+    "--sanitizer-case-input-digest",
+    input.caseInputIdentityDigest,
+    "--sanitizer-binding-digest",
+    input.policyBindingDigest,
+    "--requirement-verifier-id",
+    verifier.id,
+    "--requirement-verifier-version",
+    verifier.version,
+    "--requirement-reason",
+    "synthetic_policy_required",
+    "--requirement-decision-digest",
+    decision.requirementDecisionDigest,
   ];
 }
 
@@ -221,6 +280,134 @@ test("runs the policy-free command provider from the public CLI", async () => {
     assert.equal(attempt.manifest.run.protocolVersion, "command-provider-v1");
     assert.equal(attempt.manifest.approval.applied, true);
     assert.equal(attempt.manifest.sanitizer, undefined);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("runs a target-bound private command sanitizer from the public CLI", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
+  const attempts = path.join(temporary, "attempts");
+  const policyPath = path.join(temporary, "synthetic-policy.json");
+  const identity = computeCaseInputIdentity({
+    caseId: "synthetic-invoice-basic",
+    documentKind: "synthetic_invoice",
+    preparedImage: { mediaType: "image/png", sha256: IMAGE_SHA256 },
+  });
+  const policyBytes = createSanitizerPolicyEnvelope({
+    target: identity,
+    policyVersion: 1,
+    policy: { syntheticRule: "remove-extra-fields" },
+  });
+  const policyDigest = createHash("sha256").update(policyBytes).digest("hex");
+  const policyBindingDigest = computePolicyBindingDigest({
+    caseInputIdentityDigest: identity.digest,
+    policyVersion: 1,
+    policyDigest,
+  });
+  try {
+    await writeFile(policyPath, policyBytes, { mode: 0o600 });
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "run",
+        "--bundle",
+        FIXTURE,
+        "--provider",
+        "mock",
+        "--attempt-root",
+        attempts,
+        ...requiredSanitizerArguments({
+          policyPath,
+          policyDigest,
+          caseInputIdentityDigest: identity.digest,
+          policyBindingDigest,
+        }),
+        "--json",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stdout);
+    assert.equal(result.stderr, "");
+    const summary = JSON.parse(result.stdout) as { attemptId: string };
+    const attempt = await readAttempt(path.join(attempts, summary.attemptId));
+    assert.equal(attempt.manifest.sanitizer?.id, "synthetic-command-sanitizer");
+    assert.equal(attempt.manifest.sanitizer?.policyDigest, policyDigest);
+    assert.equal(attempt.manifest.sanitizer?.policyBindingDigest, policyBindingDigest);
+    assert.equal(attempt.manifest.sanitizer?.findings[0]?.path, null);
+    assert.equal(JSON.stringify(attempt.manifest).includes(policyPath), false);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects invalid private sanitizer CLI configuration before runner execution", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
+  const policyPath = path.join(temporary, "synthetic-policy.json");
+  const identity = computeCaseInputIdentity({
+    caseId: "synthetic-invoice-basic",
+    documentKind: "synthetic_invoice",
+    preparedImage: { mediaType: "image/png", sha256: IMAGE_SHA256 },
+  });
+  const policyBytes = createSanitizerPolicyEnvelope({
+    target: identity,
+    policyVersion: 1,
+    policy: { syntheticRule: "remove-extra-fields" },
+  });
+  const policyDigest = createHash("sha256").update(policyBytes).digest("hex");
+  const policyBindingDigest = computePolicyBindingDigest({
+    caseInputIdentityDigest: identity.digest,
+    policyVersion: 1,
+    policyDigest,
+  });
+  const valid = requiredSanitizerArguments({
+    policyPath,
+    policyDigest,
+    caseInputIdentityDigest: identity.digest,
+    policyBindingDigest,
+  });
+  try {
+    await writeFile(policyPath, policyBytes, { mode: 0o600 });
+    const invalidArguments = [
+      ["--sanitizer", "required"],
+      valid.map((value) => (value === process.execPath ? "./synthetic-sanitizer" : value)),
+      valid.map((value) => (value === policyDigest ? "synthetic-invalid-digest" : value)),
+      [...valid, "--sanitizer-env", "PATH", "--sanitizer-env", "Path"],
+      [...valid, "--sanitizer-output-limit", String(MAX_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES + 1)],
+      [...valid, "--sanitizer-timeout-ms", String(MAX_TIMEOUT_MS + 1)],
+      valid.map((value) =>
+        /^[a-f0-9]{64}$/u.test(value) && value !== policyDigest && value !== identity.digest && value !== policyBindingDigest
+          ? "f".repeat(64)
+          : value,
+      ),
+    ];
+    for (const [index, args] of invalidArguments.entries()) {
+      const attempts = path.join(temporary, `invalid-attempts-${index}`);
+      const result = spawnSync(
+        process.execPath,
+        [
+          CLI,
+          "run",
+          "--bundle",
+          FIXTURE,
+          "--provider",
+          "mock",
+          "--attempt-root",
+          attempts,
+          ...args,
+          "--json",
+        ],
+        { encoding: "utf8" },
+      );
+      assert.equal(result.status, 2, result.stdout);
+      assert.equal(result.stderr, "");
+      assert.equal(
+        (JSON.parse(result.stdout) as { error: { code: string } }).error.code,
+        "invalid_arguments",
+      );
+      await assert.rejects(readdir(attempts), /ENOENT/u);
+    }
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

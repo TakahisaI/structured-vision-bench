@@ -28,6 +28,7 @@ import {
   type SanitizerRequirementDecisionV1,
 } from "./identity.js";
 import { prepareSanitizerPolicy, type PreparedSanitizerPolicy } from "./sanitizer.js";
+import { isAbortSettlingCommandSanitizer } from "./command-sanitizer.js";
 import {
   createCommandApprovalGate,
   DEFAULT_APPROVAL_OUTPUT_LIMIT_BYTES,
@@ -113,6 +114,7 @@ type ValidatedSanitizerImplementation = Readonly<{
   id: string;
   protocolVersion: 1;
   sanitize: Sanitizer["sanitize"];
+  awaitAbort: boolean;
 }>;
 
 export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
@@ -167,9 +169,14 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       sanitizerSettings,
       sanitizerImplementation,
     );
-    const preparedPolicy = requirement.policyRequired
-      ? prepareSanitizerPolicy(sanitizerSettings, identity)
-      : undefined;
+    let preparedPolicy: PreparedSanitizerPolicy | undefined;
+    try {
+      preparedPolicy = requirement.policyRequired
+        ? prepareSanitizerPolicy(sanitizerSettings, identity)
+        : undefined;
+    } finally {
+      sanitizerSettings?.policyEnvelopeBytes?.fill(0);
+    }
     const approvalPlan = validateApprovalSettings(approvalSettings, requirement);
     if (approvalPlan !== undefined && approvalPlan.phase !== phase) {
       throw new RunnerError(
@@ -439,7 +446,6 @@ function validateBoundarySettings(
   sanitizerImplementation: ValidatedSanitizerImplementation | undefined,
 ): void {
   validateCommandSettings(approval, "approval_configuration_invalid");
-  validateCommandSettings(sanitizer, "sanitizer_configuration_invalid");
   validateTimeoutSetting(approval?.timeoutMs, "approval_configuration_invalid");
   validateTimeoutSetting(sanitizer?.timeoutMs, "sanitizer_configuration_invalid");
   if (approval !== undefined && typeof approval.required !== "boolean") {
@@ -521,6 +527,7 @@ function validateSanitizerImplementation(
       id,
       protocolVersion: 1,
       sanitize: Function.prototype.bind.call(sanitize, value) as Sanitizer["sanitize"],
+      awaitAbort: isAbortSettlingCommandSanitizer(value),
     });
   } catch {
     throw new RunnerError(
@@ -542,12 +549,9 @@ function snapshotSanitizerSettings(
     } else {
       snapshot.sanitizer = sanitizer;
     }
-    if (settings.policyEnvelopeBytes instanceof Uint8Array) {
-      snapshot.policyEnvelopeBytes = Uint8Array.from(settings.policyEnvelopeBytes);
-    }
-    if (Array.isArray(settings.argv)) snapshot.argv = [...settings.argv];
-    if (Array.isArray(settings.envAllowlist)) {
-      snapshot.envAllowlist = [...settings.envAllowlist];
+    if (snapshot.policyEnvelopeBytes !== undefined) {
+      if (!(snapshot.policyEnvelopeBytes instanceof Uint8Array)) throw new Error();
+      snapshot.policyEnvelopeBytes = Uint8Array.from(snapshot.policyEnvelopeBytes);
     }
     return Object.freeze(snapshot);
   } catch {
@@ -1501,12 +1505,14 @@ async function executeSanitizer(
       }),
       provenance: freezeObject({ ...provenance }),
     });
-    response = await withTimeout(
+    const responseValue = await withTimeout(
       () => sanitizer.sanitize(request, controller.signal),
       settings.timeoutMs ?? DEFAULT_SANITIZER_TIMEOUT_MS,
       "sanitizer_timeout",
       () => controller.abort(),
+      sanitizer.awaitAbort,
     );
+    response = snapshotSanitizerResponse(responseValue);
   } catch (error) {
     if (isInternalRunnerError(error)) throw error;
     throw internalRunnerError("sanitizer_failed", "sanitizer failed");
@@ -1557,8 +1563,14 @@ function normalizeFindings(findings: SanitizerFinding[] | undefined): SanitizerF
     throw new RunnerError("sanitizer_response_invalid", "sanitizer findings are invalid");
   }
   return findings.map((finding) => {
+    const allowedKeys = new Set(["code", "severity", "classification", "hardGate", "path"]);
     if (
       !isJsonObject(finding) ||
+      Object.keys(finding).some((key) => !allowedKeys.has(key)) ||
+      !Object.hasOwn(finding, "code") ||
+      !Object.hasOwn(finding, "severity") ||
+      !Object.hasOwn(finding, "classification") ||
+      !Object.hasOwn(finding, "hardGate") ||
       typeof finding.code !== "string" ||
       !isSafeLabel(finding.code) ||
       (finding.severity !== "info" &&
@@ -1569,7 +1581,9 @@ function normalizeFindings(findings: SanitizerFinding[] | undefined): SanitizerF
       typeof finding.hardGate !== "boolean" ||
       (finding.path !== undefined &&
         finding.path !== null &&
-        typeof finding.path !== "string")
+        (typeof finding.path !== "string" ||
+          finding.path.length > 1024 ||
+          !/^(?:\/(?:[^~/]|~[01])*)*$/u.test(finding.path)))
     ) {
       throw new RunnerError("sanitizer_response_invalid", "sanitizer findings are invalid");
     }
@@ -1581,6 +1595,74 @@ function normalizeFindings(findings: SanitizerFinding[] | undefined): SanitizerF
       path: null,
     };
   });
+}
+
+function snapshotSanitizerResponse(value: unknown): SanitizerResponse {
+  try {
+    const normalized = normalizeJsonValue(
+      value,
+      "sanitizer response",
+      MAX_DOCUMENT_BYTES + 256 * 1024,
+    );
+    if (!isJsonObject(normalized)) throw new Error();
+    const allowedKeys = new Set([
+      "sanitizedDocument",
+      "sanitizerId",
+      "protocolVersion",
+      "policyVersion",
+      "policyDigest",
+      "caseInputIdentityVersion",
+      "caseInputIdentityDigest",
+      "policyTargetIdentityDigest",
+      "policyBindingDigest",
+      "findings",
+    ]);
+    const requiredKeys = [...allowedKeys].filter((key) => key !== "findings");
+    if (
+      Object.keys(normalized).some((key) => !allowedKeys.has(key)) ||
+      requiredKeys.some((key) => !Object.hasOwn(normalized, key)) ||
+      typeof normalized.sanitizerId !== "string" ||
+      !isSafeLabel(normalized.sanitizerId) ||
+      normalized.protocolVersion !== 1 ||
+      typeof normalized.policyVersion !== "number" ||
+      !Number.isSafeInteger(normalized.policyVersion) ||
+      normalized.policyVersion < 1 ||
+      typeof normalized.policyDigest !== "string" ||
+      !isDigest(normalized.policyDigest) ||
+      normalized.caseInputIdentityVersion !== 1 ||
+      typeof normalized.caseInputIdentityDigest !== "string" ||
+      !isDigest(normalized.caseInputIdentityDigest) ||
+      typeof normalized.policyTargetIdentityDigest !== "string" ||
+      !isDigest(normalized.policyTargetIdentityDigest) ||
+      typeof normalized.policyBindingDigest !== "string" ||
+      !isDigest(normalized.policyBindingDigest)
+    ) {
+      throw new Error();
+    }
+    const findings = normalizeFindings(
+      normalized.findings === undefined
+        ? undefined
+        : (normalized.findings as SanitizerFinding[]),
+    );
+    return freezeObject({
+      sanitizedDocument: normalizeJsonValue(
+        normalized.sanitizedDocument,
+        "sanitizer document",
+        MAX_DOCUMENT_BYTES,
+      ),
+      sanitizerId: normalized.sanitizerId,
+      protocolVersion: 1,
+      policyVersion: normalized.policyVersion,
+      policyDigest: normalized.policyDigest,
+      caseInputIdentityVersion: 1,
+      caseInputIdentityDigest: normalized.caseInputIdentityDigest,
+      policyTargetIdentityDigest: normalized.policyTargetIdentityDigest,
+      policyBindingDigest: normalized.policyBindingDigest,
+      findings,
+    });
+  } catch {
+    throw internalRunnerError("sanitizer_response_invalid", "sanitizer response is invalid");
+  }
 }
 
 function parseProviderOutput(output: ProviderOutput): JsonValue {

@@ -64,6 +64,17 @@ terminate the child. The private directory is removed after exit. The adapter cr
 file and never persists its command, arguments, environment names/values, response diagnostics, or
 private identities beyond the allowlisted attempt fields.
 
+The private command sanitizer adds the corresponding post-provider boundary without materializing
+its raw document or policy as files. It receives one versioned request on stdin only, from a fresh
+private mode-0700 empty working directory, with `shell: false` and an allowlist-only environment.
+The factory snapshots command configuration and allowlisted environment values before provider
+execution. Request and response objects are strict and unknown-field rejecting; current case-input,
+policy target, exact policy identity, and policy binding are checked before spawn and again before
+publication. Stdout and stderr share a bound, stderr is discarded, and timeout/abort waits for the
+initial process group and working-directory cleanup. Request/output buffers are zeroed best-effort.
+Detached descendants are non-conforming and must not receive request data or descriptors. The full
+boundary is in [`docs/sanitizer-v1.md`](sanitizer-v1.md).
+
 Approval executes after bundle manifest/path/schema preflight and requirement-decision rederivation,
 but before complete provider-input verification, staging, provider process invocation, or image read.
 The request excludes image, schema, prompts, truth, comparison, prior attempts, policy, bundle root,
