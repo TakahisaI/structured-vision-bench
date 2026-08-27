@@ -28,6 +28,7 @@ import {
   type SanitizerRequirementDecisionV1,
 } from "./identity.js";
 import { prepareSanitizerPolicy, type PreparedSanitizerPolicy } from "./sanitizer.js";
+import { isAbortSettlingCommandSanitizer } from "./command-sanitizer.js";
 import {
   createCommandApprovalGate,
   DEFAULT_APPROVAL_OUTPUT_LIMIT_BYTES,
@@ -113,6 +114,7 @@ type ValidatedSanitizerImplementation = Readonly<{
   id: string;
   protocolVersion: 1;
   sanitize: Sanitizer["sanitize"];
+  awaitAbort: boolean;
 }>;
 
 export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
@@ -524,6 +526,7 @@ function validateSanitizerImplementation(
       id,
       protocolVersion: 1,
       sanitize: Function.prototype.bind.call(sanitize, value) as Sanitizer["sanitize"],
+      awaitAbort: isAbortSettlingCommandSanitizer(value),
     });
   } catch {
     throw new RunnerError(
@@ -1506,6 +1509,7 @@ async function executeSanitizer(
       settings.timeoutMs ?? DEFAULT_SANITIZER_TIMEOUT_MS,
       "sanitizer_timeout",
       () => controller.abort(),
+      sanitizer.awaitAbort,
     );
     response = snapshotSanitizerResponse(responseValue);
   } catch (error) {

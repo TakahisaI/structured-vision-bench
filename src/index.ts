@@ -21,6 +21,7 @@ export type {
 } from "./provider/command.js";
 export * from "./runner/attempt.js";
 export * from "./runner/approval.js";
+export * from "./runner/command-sanitizer.js";
 export * from "./runner/errors.js";
 export * from "./runner/identity.js";
 export * from "./runner/run.js";

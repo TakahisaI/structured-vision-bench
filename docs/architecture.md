@@ -102,6 +102,14 @@ Providers are transport adapters, not autonomous agents. The Codex app-server pr
 Issue #3 must fail rather than execute tool requests, shell commands, workspace reads, or approval
 requests.
 
+### Sanitizer
+
+When the consumer decision requires sanitization, the runner passes the canonical provider document
+and preflighted target-bound policy envelope to a validated sanitizer. The private command adapter
+uses one versioned stdin request, a fresh private empty working directory, and an allowlist-only
+environment. Only a strictly bound sanitized document can reach schema validation and formal
+publication. See [`docs/sanitizer-v1.md`](sanitizer-v1.md).
+
 ### Comparison
 
 Comparison, introduced by Issue #4, consumes truth, a structured result, and an explicit comparison
