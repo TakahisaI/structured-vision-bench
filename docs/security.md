@@ -133,6 +133,12 @@ outside that group are non-conforming and outside the portable cleanup guarantee
 transfer request data or descriptors to such descendants. See
 [`docs/command-provider-v1.md`](command-provider-v1.md).
 
+The sanitizer policy reader opens only bounded private regular files with no-follow and non-blocking
+semantics. It fails closed on Windows before opening the configured path because Node's portable
+flags do not enforce those semantics for Windows reparse points and special device or pipe paths.
+Windows sanitizer-policy support therefore requires a future native secure-open implementation;
+digest binding alone does not replace this path-level boundary.
+
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through
 the last pre-publication validation. Before provider work, the attempt-identity destination is claimed

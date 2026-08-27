@@ -7,8 +7,10 @@ import {
   CODEX_APP_SERVER_CLI_VERSION,
   CODEX_APP_SERVER_GENERATED_SCHEMA_SHA256,
   CODEX_APP_SERVER_PROTOCOL_VERSION,
+  CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES,
   runCodexAppServerProtocol,
   type CodexAppServerProtocolConnection,
+  type CodexAppServerProtocolReceivedMessage,
   type CodexAppServerProtocolRequest,
 } from "../src/provider/codex-app-server.js";
 import type { RequestedExecutionSettings } from "../src/runner/types.js";
@@ -231,6 +233,96 @@ test("fails closed on requests, tools, files, identity drift, and trailing event
   }
 });
 
+test("rejects missing required nullable generated-schema fields", async () => {
+  const cases: Array<{
+    mode: string;
+    keys: string[];
+    select: (message: Record<string, JsonValue>) => Record<string, JsonValue> | undefined;
+  }> = [
+    {
+      mode: "success",
+      keys: [
+        "forkedFromId",
+        "parentThreadId",
+        "section",
+        "sectionEnteredAt",
+        "projectId",
+        "recencyAt",
+        "path",
+        "threadSource",
+        "agentNickname",
+        "agentRole",
+        "gitInfo",
+        "name",
+      ],
+      select: threadResponseTarget,
+    },
+    {
+      mode: "success",
+      keys: ["error", "startedAt", "completedAt", "durationMs"],
+      select: turnResponseTarget,
+    },
+    {
+      mode: "success",
+      keys: ["serviceTier"],
+      select: threadStartResultTarget,
+    },
+    {
+      mode: "success",
+      keys: ["clientId"],
+      select: itemTarget("userMessage"),
+    },
+    {
+      mode: "success",
+      keys: ["phase", "memoryCitation", "delivery"],
+      select: itemTarget("agentMessage"),
+    },
+    {
+      mode: "reasoning-success",
+      keys: ["summary", "content"],
+      select: itemTarget("reasoning"),
+    },
+    {
+      mode: "success",
+      keys: ["cacheWriteInputTokens"],
+      select: tokenUsageTotalTarget,
+    },
+    {
+      mode: "success",
+      keys: ["modelContextWindow"],
+      select: threadTokenUsageTarget,
+    },
+  ];
+
+  for (const entry of cases) {
+    for (const key of entry.keys) {
+      const connection = new RequiredKeyDeletingConnection(
+        entry.mode,
+        key,
+        entry.select,
+      );
+      await assert.rejects(
+        runCodexAppServerProtocol(connection, request()),
+        /codex app-server protocol failed/u,
+      );
+      assert.equal(connection.deleted, true, `${entry.mode}.${key}`);
+      assert.equal(connection.closed, true, `${entry.mode}.${key}`);
+    }
+  }
+});
+
+test("bounds active item lifecycles and aggregate received bytes", async () => {
+  for (const mode of ["active-item-flood", "aggregate-byte-flood"]) {
+    const connection = new SyntheticConnection(mode);
+    await assert.rejects(
+      runCodexAppServerProtocol(connection, request()),
+      /codex app-server protocol failed/u,
+      mode,
+    );
+    assert.equal(connection.closed, true, mode);
+  }
+});
+
 test("accepts every fixed turn-start response race while preserving status order", async () => {
   for (const mode of [
     "response-status-started",
@@ -265,6 +357,21 @@ test("sends one best-effort interrupt and closes input when aborted", async () =
   await new Promise<void>((resolve) => setImmediate(resolve));
   controller.abort();
   await assert.rejects(running);
+  assert.equal(connection.closed, true);
+  assert.equal(
+    connection.sent.filter((message) => message.method === "turn/interrupt").length,
+    1,
+  );
+});
+
+test("waits for a delayed interrupt send before closing input", async () => {
+  const connection = new DelayedInterruptConnection();
+  const controller = new AbortController();
+  const running = runCodexAppServerProtocol(connection, request(), controller.signal);
+  await connection.turnAccepted;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  controller.abort();
+  await assert.rejects(running, /codex app-server protocol failed/u);
   assert.equal(connection.closed, true);
   assert.equal(
     connection.sent.filter((message) => message.method === "turn/interrupt").length,
@@ -316,7 +423,9 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
   readonly turnAccepted: Promise<void>;
   private readonly mode: string;
   private readonly queue: JsonValue[] = [];
-  private receiver: ((value: JsonValue | undefined) => void) | undefined;
+  private receiver:
+    | ((value: CodexAppServerProtocolReceivedMessage | undefined) => void)
+    | undefined;
   private resolveTurnAccepted!: () => void;
 
   constructor(mode: string) {
@@ -499,6 +608,29 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
           this.enqueue(itemStartedWith(userItem));
         }
         this.enqueue(itemCompletedWith(userItem));
+        if (this.mode === "active-item-flood") {
+          for (let index = 0; index < 17; index += 1) {
+            this.enqueue(itemStartedWith(reasoningItem(`synthetic-reasoning-${index}`)));
+          }
+          return;
+        }
+        if (this.mode === "aggregate-byte-flood") {
+          for (let index = 0; index < 5; index += 1) {
+            this.enqueue({
+              method: "thread/status/changed",
+              params: {
+                threadId: "synthetic-thread",
+                status: { type: "idle", syntheticIndex: index },
+              },
+            });
+          }
+          return;
+        }
+        if (this.mode === "reasoning-success") {
+          const reasoning = reasoningItem("synthetic-reasoning");
+          this.enqueue(itemStartedWith(reasoning));
+          this.enqueue(itemCompletedWith(reasoning));
+        }
         this.enqueue(itemStarted("agentMessage"));
       }
       this.enqueue({
@@ -556,11 +688,11 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
     }
   }
 
-  async receive(): Promise<JsonValue | undefined> {
+  async receive(): Promise<CodexAppServerProtocolReceivedMessage | undefined> {
     const queued = this.queue.shift();
     if (queued !== undefined) {
       this.observe(queued);
-      return queued;
+      return this.received(queued);
     }
     if (this.closed) return undefined;
     return new Promise((resolve) => {
@@ -587,7 +719,7 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
     else {
       this.receiver = undefined;
       this.observe(value);
-      receiver(value);
+      receiver(this.received(value));
     }
   }
 
@@ -600,6 +732,67 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
     ) {
       this.resolveTurnAccepted();
     }
+  }
+
+  private received(value: JsonValue): CodexAppServerProtocolReceivedMessage {
+    const message = object(value);
+    const status =
+      message.method === "thread/status/changed"
+        ? nestedObject(message, ["params", "status"])
+        : undefined;
+    return {
+      message: value,
+      byteLength:
+        this.mode === "aggregate-byte-flood" && status?.type === "idle"
+          ? CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES
+          : Buffer.byteLength(JSON.stringify(value), "utf8") + 1,
+    };
+  }
+}
+
+class RequiredKeyDeletingConnection extends SyntheticConnection {
+  deleted = false;
+  private readonly key: string;
+  private readonly select: (
+    message: Record<string, JsonValue>,
+  ) => Record<string, JsonValue> | undefined;
+
+  constructor(
+    mode: string,
+    key: string,
+    select: (
+      message: Record<string, JsonValue>,
+    ) => Record<string, JsonValue> | undefined,
+  ) {
+    super(mode);
+    this.key = key;
+    this.select = select;
+  }
+
+  override async receive(): Promise<CodexAppServerProtocolReceivedMessage | undefined> {
+    const received = await super.receive();
+    if (received === undefined || this.deleted) return received;
+    const snapshot = cloneObject(received.message);
+    const target = this.select(snapshot);
+    if (target !== undefined && Object.hasOwn(target, this.key)) {
+      delete target[this.key];
+      this.deleted = true;
+    }
+    return { ...received, message: snapshot };
+  }
+}
+
+class DelayedInterruptConnection extends SyntheticConnection {
+  constructor() {
+    super("timeout");
+  }
+
+  override async send(value: JsonValue): Promise<void> {
+    if (object(value).method === "turn/interrupt") {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (this.closed) throw new Error("synthetic input closed before interrupt");
+    }
+    await super.send(value);
   }
 }
 
@@ -710,6 +903,15 @@ function agentItem(text: string): Record<string, JsonValue> {
   };
 }
 
+function reasoningItem(id: string, summary = "synthetic reasoning"): Record<string, JsonValue> {
+  return {
+    id,
+    type: "reasoning",
+    summary: [summary],
+    content: [],
+  };
+}
+
 function tokenUsage(inputTokens: number, outputTokens: number): JsonValue {
   return {
     inputTokens,
@@ -731,6 +933,68 @@ function syntheticDocument(): JsonValue {
 
 function cloneObject(value: JsonValue): Record<string, JsonValue> {
   return object(structuredClone(value));
+}
+
+function threadResponseTarget(
+  message: Record<string, JsonValue>,
+): Record<string, JsonValue> | undefined {
+  return nestedObject(message, ["result", "thread"]);
+}
+
+function turnResponseTarget(
+  message: Record<string, JsonValue>,
+): Record<string, JsonValue> | undefined {
+  return nestedObject(message, ["result", "turn"]);
+}
+
+function threadStartResultTarget(
+  message: Record<string, JsonValue>,
+): Record<string, JsonValue> | undefined {
+  const result = nestedObject(message, ["result"]);
+  return result !== undefined && Object.hasOwn(result, "thread") ? result : undefined;
+}
+
+function itemTarget(
+  type: string,
+): (message: Record<string, JsonValue>) => Record<string, JsonValue> | undefined {
+  return (message) => {
+    const item = nestedObject(message, ["params", "item"]);
+    return item?.type === type ? item : undefined;
+  };
+}
+
+function tokenUsageTotalTarget(
+  message: Record<string, JsonValue>,
+): Record<string, JsonValue> | undefined {
+  return nestedObject(message, ["params", "tokenUsage", "total"]);
+}
+
+function threadTokenUsageTarget(
+  message: Record<string, JsonValue>,
+): Record<string, JsonValue> | undefined {
+  return nestedObject(message, ["params", "tokenUsage"]);
+}
+
+function nestedObject(
+  value: Record<string, JsonValue>,
+  keys: readonly string[],
+): Record<string, JsonValue> | undefined {
+  let current: JsonValue = value;
+  for (const key of keys) {
+    if (
+      typeof current !== "object" ||
+      current === null ||
+      Array.isArray(current) ||
+      !Object.hasOwn(current, key)
+    ) {
+      return undefined;
+    }
+    current = current[key] as JsonValue;
+  }
+  if (typeof current !== "object" || current === null || Array.isArray(current)) {
+    return undefined;
+  }
+  return current;
 }
 
 function object(value: JsonValue | undefined): Record<string, JsonValue> {

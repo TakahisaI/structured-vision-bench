@@ -28,6 +28,7 @@ import {
   MAX_SANITIZER_POLICY_BYTES,
 } from "../src/runner/sanitizer.js";
 import { MAX_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES } from "../src/runner/command-sanitizer.js";
+import { assertSanitizerPolicyPlatformSupported } from "../src/cli/sanitizer-policy.js";
 
 const CLI = path.join(".tmp", "build", "src", "cli", "svbench.js");
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
@@ -35,6 +36,17 @@ const FAKE_APPROVAL_GATE = path.resolve("test/fixtures/fake-approval-gate.mjs");
 const FAKE_COMMAND_PROVIDER = path.resolve("test/fixtures/fake-command-provider.mjs");
 const FAKE_COMMAND_SANITIZER = path.resolve("test/fixtures/fake-command-sanitizer.mjs");
 const IMAGE_SHA256 = "dda43d98857bc0977a1bdc67e8005428c3af95ca73cddda69c9e8737eee03cc9";
+
+test("fails closed before opening sanitizer policies on Windows", () => {
+  const syntheticPath = "synthetic-policy-path";
+  assert.throws(
+    () => assertSanitizerPolicyPlatformSupported("win32"),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message === "sanitizer policy is unreadable" &&
+      !error.message.includes(syntheticPath),
+  );
+});
 
 function commandProviderArguments(mode = "success"): string[] {
   return [
