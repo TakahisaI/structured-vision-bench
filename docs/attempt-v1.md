@@ -6,7 +6,8 @@ Issue #2 adds a provider-neutral single-case runner. It consumes one already val
 writes one successful attempt outside the bundle. It does not own a production prompt, business
 schema, preprocessing, provider credentials, comparison logic, repeat policy, or resume policy.
 
-The command sanitizer protocol remains a separate work item (#8). Approval protocol v1 Phase A is
+The private sanitizer wire contract is defined in [`docs/sanitizer-v1.md`](sanitizer-v1.md); its
+local process adapter remains Issue #23. Approval protocol v1 Phase A is
 implemented for this single-run lifecycle: a consumer verifier must derive the requirement decision,
 and a configured private gate must approve the expected snapshot, runtime binding, and scope before
 the provider runs. Suite/resume approval integration remains Phase B of #9 after #5. This repository
