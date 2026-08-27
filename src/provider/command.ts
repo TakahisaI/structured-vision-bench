@@ -8,6 +8,7 @@ import path from "node:path";
 import {
   decodeUtf8Strict,
   isJsonObject,
+  normalizeJsonValue,
   parseJson,
   type JsonValue,
 } from "../bundle/json.js";
@@ -16,6 +17,7 @@ import { RunnerError } from "../runner/errors.js";
 import {
   computeCaseInputIdentity,
   computeSanitizerRequirementDigest,
+  type SanitizerRequirementDecisionV1,
 } from "../runner/identity.js";
 import type {
   ApprovalResponse,
@@ -146,6 +148,11 @@ type ValidatedCommandProviderOptions = Readonly<{
   implementationVersion: string;
 }>;
 
+type ValidatedInvocation = Readonly<{
+  request: ProviderModelRequest;
+  context: ProviderAdapterContext;
+}>;
+
 /** Creates a shell-free provider backed by a consumer-owned local process. */
 export function createCommandProvider(options: CommandProviderOptions): Provider {
   const validated = validateOptions(options);
@@ -267,11 +274,13 @@ function validateOptions(options: CommandProviderOptions): ValidatedCommandProvi
 
 async function invokeCommandProvider(
   options: ValidatedCommandProviderOptions,
-  request: ProviderModelRequest,
-  context: ProviderAdapterContext,
+  sourceRequest: ProviderModelRequest,
+  sourceContext: ProviderAdapterContext,
   signal: AbortSignal | undefined,
 ): Promise<ProviderResponse> {
-  assertInvocationContext(options, request, context);
+  const invocation = assertInvocationContext(sourceRequest, sourceContext);
+  const { request, context } = invocation;
+  const { approval, phase, sanitizerRequirement } = context;
   assertActive(signal);
   let imageBytes: Buffer | undefined;
   let schemaBytes: Buffer | undefined;
@@ -280,10 +289,14 @@ async function invokeCommandProvider(
   let requestRoot: string | undefined;
   let workingRoot: string | undefined;
   try {
-    imageBytes = await readInputBytes(request.image.readBytes, signal);
-    schemaBytes = await readInputBytes(request.schemaInput.readBytes, signal);
-    systemBytes = await readInputText(request.system.readText, signal);
-    instructionBytes = await readInputText(request.instruction.readText, signal);
+    imageBytes = await readInputBytes(request.image.readBytes, approval, signal);
+    schemaBytes = await readInputBytes(request.schemaInput.readBytes, approval, signal);
+    systemBytes = await readInputText(request.system.readText, approval, signal);
+    instructionBytes = await readInputText(
+      request.instruction.readText,
+      approval,
+      signal,
+    );
     const inputBytes = {
       image: imageBytes,
       schema: schemaBytes,
@@ -292,7 +305,14 @@ async function invokeCommandProvider(
     };
     validateInputBytes(inputBytes, request, context);
     const environment = snapshotAllowedEnvironment(options);
-    const manifest = createRequestManifest(options, request, context);
+    const manifest = createRequestManifest(
+      options,
+      request,
+      context,
+      phase,
+      sanitizerRequirement,
+      approval,
+    );
     const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`, "utf8");
     if (manifestBytes.byteLength > MAX_REQUEST_MANIFEST_BYTES) throw new Error();
     const materializeRequest = async (): Promise<string> => {
@@ -321,7 +341,7 @@ async function invokeCommandProvider(
     const workingDirectory = workingRoot;
     if ((await readdir(workingDirectory)).length !== 0) throw new Error();
     const responseBytes =
-      context.approval === null
+      approval === null
         ? await runCommand(
             options,
             await materializeRequest(),
@@ -334,11 +354,18 @@ async function invokeCommandProvider(
             options,
             workingDirectory,
             environment,
-            context.approval,
+            approval,
             materializeRequest,
             signal,
           );
-    const response = parseResponse(responseBytes, options, context);
+    const response = parseResponse(
+      responseBytes,
+      options,
+      context,
+      phase,
+      sanitizerRequirement,
+      approval,
+    );
     return {
       rawDocument: response.document,
       ...(response.approval === null ? {} : { approval: response.approval }),
@@ -358,13 +385,14 @@ async function invokeCommandProvider(
 
 async function readInputBytes(
   reader: () => Promise<Buffer>,
+  approval: ApprovalResponse | null,
   signal: AbortSignal | undefined,
 ): Promise<Buffer> {
-  assertActive(signal);
+  assertInputAccessActive(approval, signal);
   const value = await reader();
   if (!Buffer.isBuffer(value)) throw new Error();
   try {
-    assertActive(signal);
+    assertInputAccessActive(approval, signal);
     if (value.byteLength > MAX_PROVIDER_INPUT_BYTES) throw new Error();
     return Buffer.from(value);
   } finally {
@@ -374,11 +402,12 @@ async function readInputBytes(
 
 async function readInputText(
   reader: () => Promise<string>,
+  approval: ApprovalResponse | null,
   signal: AbortSignal | undefined,
 ): Promise<Buffer> {
-  assertActive(signal);
+  assertInputAccessActive(approval, signal);
   const value = await reader();
-  assertActive(signal);
+  assertInputAccessActive(approval, signal);
   if (typeof value !== "string") throw new Error();
   const bytes = Buffer.from(value, "utf8");
   if (bytes.byteLength > MAX_PROVIDER_INPUT_BYTES) {
@@ -388,27 +417,24 @@ async function readInputText(
   return bytes;
 }
 
-function assertInvocationContext(
-  options: ValidatedCommandProviderOptions,
-  request: ProviderModelRequest,
-  context: ProviderAdapterContext,
+function assertInputAccessActive(
+  approval: ApprovalResponse | null,
+  signal: AbortSignal | undefined,
 ): void {
+  assertActive(signal);
+  assertApprovalActive(approval);
+}
+
+function assertInvocationContext(
+  sourceRequest: ProviderModelRequest,
+  sourceContext: ProviderAdapterContext,
+): ValidatedInvocation {
+  const request = snapshotProviderModelRequest(sourceRequest);
+  const context = snapshotProviderAdapterContext(sourceContext);
   const identity = computeCaseInputIdentity({
     caseId: context.caseInputIdentity.caseId,
     documentKind: context.caseInputIdentity.documentKind,
     preparedImage: { ...context.caseInputIdentity.preparedImage },
-  });
-  const requirementDigest = computeSanitizerRequirementDigest({
-    sanitizerRequirementVersion:
-      context.sanitizerRequirement.sanitizerRequirementVersion,
-    sanitizerRequired: context.sanitizerRequirement.sanitizerRequired,
-    policyRequired: context.sanitizerRequirement.policyRequired,
-    sanitizerRequirementReason:
-      context.sanitizerRequirement.sanitizerRequirementReason,
-    consumerSourceCommit: context.sanitizerRequirement.consumerSourceCommit,
-    requirementVerifierId: context.sanitizerRequirement.requirementVerifierId,
-    requirementVerifierVersion:
-      context.sanitizerRequirement.requirementVerifierVersion,
   });
   if (
     context.bundle.version !== 1 ||
@@ -422,53 +448,247 @@ function assertInvocationContext(
     context.caseInputIdentity.digest !== identity.digest ||
     context.caseInputIdentity.preparedImage.mediaType !== request.image.mediaType ||
     context.caseInputIdentity.preparedImage.sha256 !== context.inputDigests.image ||
-    !isDigest(context.inputDigests.schema) ||
-    !isDigest(context.inputDigests.system) ||
-    !isDigest(context.inputDigests.instruction) ||
-    !isNullableSafeLabel(context.requested.model) ||
-    !isNullableSafeLabel(context.requested.effort) ||
-    (context.requested.maxTokens !== null &&
-      (!Number.isSafeInteger(context.requested.maxTokens) ||
-        context.requested.maxTokens < 1)) ||
-    !isSafeLabel(context.provenance.harnessVersion) ||
-    !isNullableSafeLabel(context.provenance.harnessCommit) ||
-    !isSafeLabel(context.provenance.promptVersion) ||
-    !isSafeLabel(context.provenance.preprocessVersion) ||
-    !isNullableSafeLabel(context.provenance.sourceCommit) ||
-    !isSafeLabel(context.sanitizerRequirement.sanitizerRequirementReason) ||
-    !isSafeLabel(context.sanitizerRequirement.requirementVerifierId) ||
-    !isSafeLabel(context.sanitizerRequirement.requirementVerifierVersion) ||
-    !isNullableSafeLabel(context.sanitizerRequirement.consumerSourceCommit) ||
     context.requested.model !== request.requested.model ||
     context.requested.effort !== request.requested.effort ||
     context.requested.maxTokens !== request.requested.maxTokens ||
     context.sanitizerRequirement.sanitizerRequired ||
-    context.sanitizerRequirement.policyRequired ||
-    context.sanitizerRequirement.requirementDecisionDigest !== requirementDigest
+    context.sanitizerRequirement.policyRequired
   ) {
     throw new Error();
   }
   if (context.approval !== null) {
-    const approval = snapshotApprovalResponse(context.approval);
+    assertApprovalActive(context.approval);
     if (
-      approval.phase !== context.phase ||
-      approval.requirementVerifierId !==
+      context.approval.phase !== context.phase ||
+      context.approval.requirementVerifierId !==
         context.sanitizerRequirement.requirementVerifierId ||
-      approval.requirementVerifierVersion !==
+      context.approval.requirementVerifierVersion !==
         context.sanitizerRequirement.requirementVerifierVersion ||
-      approval.consumerSourceCommit !== context.sanitizerRequirement.consumerSourceCommit ||
-      approval.requirementDecisionDigest !==
+      context.approval.consumerSourceCommit !==
+        context.sanitizerRequirement.consumerSourceCommit ||
+      context.approval.requirementDecisionDigest !==
         context.sanitizerRequirement.requirementDecisionDigest ||
-      approval.sanitizerRequirementVersion !==
+      context.approval.sanitizerRequirementVersion !==
         context.sanitizerRequirement.sanitizerRequirementVersion ||
-      approval.sanitizerRequired !== context.sanitizerRequirement.sanitizerRequired ||
-      approval.policyRequired !== context.sanitizerRequirement.policyRequired ||
-      approval.sanitizerRequirementReason !==
+      context.approval.sanitizerRequired !==
+        context.sanitizerRequirement.sanitizerRequired ||
+      context.approval.policyRequired !== context.sanitizerRequirement.policyRequired ||
+      context.approval.sanitizerRequirementReason !==
         context.sanitizerRequirement.sanitizerRequirementReason
     ) {
       throw new Error();
     }
   }
+  return Object.freeze({ request, context });
+}
+
+function snapshotProviderModelRequest(value: unknown): ProviderModelRequest {
+  const source = requiredRuntimeObject(value);
+  assertRuntimeKeys(source, [
+    "image",
+    "schema",
+    "schemaInput",
+    "system",
+    "instruction",
+    "requested",
+  ]);
+  const imageValue = source.image;
+  const schemaValue = source.schema;
+  const schemaInputValue = source.schemaInput;
+  const systemValue = source.system;
+  const instructionValue = source.instruction;
+  const requestedValue = source.requested;
+  const image = snapshotBinaryInput(imageValue);
+  const schema = deepFreeze(
+    normalizeJsonValue(schemaValue, "command provider schema", MAX_PROVIDER_INPUT_BYTES),
+  );
+  const schemaInput = snapshotBinaryInput(schemaInputValue);
+  const system = snapshotTextInput(systemValue);
+  const instruction = snapshotTextInput(instructionValue);
+  const requested = snapshotRequestedSettings(requestedValue);
+  return Object.freeze({
+    image,
+    schema,
+    schemaInput,
+    system,
+    instruction,
+    requested,
+  });
+}
+
+function snapshotBinaryInput(value: unknown): ProviderModelRequest["image"] {
+  const input = requiredRuntimeObject(value);
+  assertRuntimeKeys(input, ["mediaType", "readBytes"]);
+  const mediaType = input.mediaType;
+  const readBytes = input.readBytes;
+  if (!isBoundedText(mediaType) || typeof readBytes !== "function") throw new Error();
+  return Object.freeze({
+    mediaType,
+    readBytes: readBytes as () => Promise<Buffer>,
+  });
+}
+
+function snapshotTextInput(value: unknown): ProviderModelRequest["system"] {
+  const input = requiredRuntimeObject(value);
+  assertRuntimeKeys(input, ["mediaType", "readText"]);
+  const mediaType = input.mediaType;
+  const readText = input.readText;
+  if (!isBoundedText(mediaType) || typeof readText !== "function") throw new Error();
+  return Object.freeze({
+    mediaType,
+    readText: readText as () => Promise<string>,
+  });
+}
+
+function snapshotProviderAdapterContext(value: unknown): ProviderAdapterContext {
+  const source = requiredRuntimeObject(value);
+  assertRuntimeKeys(source, [
+    "phase",
+    "bundle",
+    "caseId",
+    "documentKind",
+    "caseInputIdentity",
+    "inputDigests",
+    "requested",
+    "provenance",
+    "sanitizerRequirement",
+    "approval",
+  ]);
+  const phase = source.phase;
+  const bundleValue = source.bundle;
+  const caseId = source.caseId;
+  const documentKind = source.documentKind;
+  const caseInputIdentityValue = source.caseInputIdentity;
+  const inputDigestsValue = source.inputDigests;
+  const requestedValue = source.requested;
+  const provenanceValue = source.provenance;
+  const sanitizerRequirementValue = source.sanitizerRequirement;
+  const approvalValue = source.approval;
+  if (!isSafeLabel(phase) || !isCaseId(caseId) || !isSafeLabel(documentKind)) {
+    throw new Error();
+  }
+  const bundle = snapshotBundleIdentity(bundleValue);
+  const caseInputIdentity = snapshotCaseInputIdentity(caseInputIdentityValue);
+  const inputDigests = snapshotInputDigests(inputDigestsValue);
+  const requested = snapshotRequestedSettings(requestedValue);
+  const provenance = snapshotProvenance(provenanceValue);
+  const sanitizerRequirement = snapshotSanitizerRequirement(
+    sanitizerRequirementValue,
+  );
+  const approval =
+    approvalValue === null ? null : snapshotApprovalResponse(approvalValue);
+  return Object.freeze({
+    phase,
+    bundle,
+    caseId,
+    documentKind,
+    caseInputIdentity,
+    inputDigests,
+    requested,
+    provenance,
+    sanitizerRequirement,
+    approval,
+  });
+}
+
+function snapshotBundleIdentity(value: unknown): ProviderAdapterContext["bundle"] {
+  const bundle = requiredRuntimeObject(value);
+  assertRuntimeKeys(bundle, ["version", "manifestDigest"]);
+  const version = bundle.version;
+  const manifestDigest = bundle.manifestDigest;
+  if (version !== 1 || !isDigest(manifestDigest)) throw new Error();
+  return Object.freeze({ version: 1, manifestDigest });
+}
+
+function snapshotCaseInputIdentity(
+  value: unknown,
+): ProviderAdapterContext["caseInputIdentity"] {
+  const identity = requiredRuntimeObject(value);
+  assertRuntimeKeys(identity, [
+    "identityVersion",
+    "caseId",
+    "documentKind",
+    "preparedImage",
+    "digest",
+  ]);
+  const identityVersion = identity.identityVersion;
+  const caseId = identity.caseId;
+  const documentKind = identity.documentKind;
+  const preparedImageValue = identity.preparedImage;
+  const identityDigest = identity.digest;
+  const preparedImage = requiredRuntimeObject(preparedImageValue);
+  assertRuntimeKeys(preparedImage, ["mediaType", "sha256"]);
+  const mediaType = preparedImage.mediaType;
+  const sha256 = preparedImage.sha256;
+  if (
+    identityVersion !== 1 ||
+    !isCaseId(caseId) ||
+    !isSafeLabel(documentKind) ||
+    !isBoundedText(mediaType) ||
+    !isDigest(sha256) ||
+    !isDigest(identityDigest)
+  ) {
+    throw new Error();
+  }
+  return deepFreeze({
+    identityVersion: 1,
+    caseId,
+    documentKind,
+    preparedImage: { mediaType, sha256 },
+    digest: identityDigest,
+  });
+}
+
+function snapshotInputDigests(
+  value: unknown,
+): ProviderAdapterContext["inputDigests"] {
+  const inputs = requiredRuntimeObject(value);
+  assertRuntimeKeys(inputs, ["image", "schema", "system", "instruction"]);
+  const image = inputs.image;
+  const schema = inputs.schema;
+  const system = inputs.system;
+  const instruction = inputs.instruction;
+  if (
+    !isDigest(image) ||
+    !isDigest(schema) ||
+    !isDigest(system) ||
+    !isDigest(instruction)
+  ) {
+    throw new Error();
+  }
+  return Object.freeze({ image, schema, system, instruction });
+}
+
+function snapshotProvenance(value: unknown): ProviderAdapterContext["provenance"] {
+  const provenance = requiredRuntimeObject(value);
+  assertRuntimeKeys(provenance, [
+    "harnessVersion",
+    "harnessCommit",
+    "promptVersion",
+    "preprocessVersion",
+    "sourceCommit",
+  ]);
+  const harnessVersion = provenance.harnessVersion;
+  const harnessCommit = provenance.harnessCommit;
+  const promptVersion = provenance.promptVersion;
+  const preprocessVersion = provenance.preprocessVersion;
+  const sourceCommit = provenance.sourceCommit;
+  if (
+    !isSafeLabel(harnessVersion) ||
+    !isNullableSafeLabel(harnessCommit) ||
+    !isSafeLabel(promptVersion) ||
+    !isSafeLabel(preprocessVersion) ||
+    !isNullableSafeLabel(sourceCommit)
+  ) {
+    throw new Error();
+  }
+  return Object.freeze({
+    harnessVersion,
+    harnessCommit,
+    promptVersion,
+    preprocessVersion,
+    sourceCommit,
+  });
 }
 
 function validateInputBytes(
@@ -499,10 +719,13 @@ function createRequestManifest(
   options: ValidatedCommandProviderOptions,
   request: ProviderModelRequest,
   context: ProviderAdapterContext,
+  phase: string,
+  sanitizerRequirement: SanitizerRequirementDecisionV1,
+  approval: ApprovalResponse | null,
 ): CommandProviderRequestManifestV1 {
   return deepFreeze({
     requestVersion: 1,
-    phase: context.phase,
+    phase,
     provider: {
       id: options.providerId,
       route: options.route,
@@ -538,8 +761,8 @@ function createRequestManifest(
     },
     requested: { ...request.requested },
     provenance: { ...context.provenance },
-    sanitizerRequirement: { ...context.sanitizerRequirement },
-    approval: context.approval === null ? null : snapshotApprovalResponse(context.approval),
+    sanitizerRequirement: { ...sanitizerRequirement },
+    approval,
   });
 }
 
@@ -1034,6 +1257,9 @@ function parseResponse(
   bytes: Buffer,
   options: ValidatedCommandProviderOptions,
   context: ProviderAdapterContext,
+  expectedPhase: string,
+  expectedSanitizerRequirement: SanitizerRequirementDecisionV1,
+  expectedApproval: ApprovalResponse | null,
 ): CommandProviderResponseV1 {
   const value = parseJson(
     decodeUtf8Strict(bytes, "command provider response"),
@@ -1051,7 +1277,7 @@ function parseResponse(
     "document",
     "responded",
   ]);
-  if (value.responseVersion !== 1 || value.phase !== context.phase) throw new Error();
+  if (value.responseVersion !== 1 || value.phase !== expectedPhase) throw new Error();
   const provider = requiredObject(value.provider);
   assertKeys(provider, ["id", "route", "implementationVersion", "protocolVersion"]);
   if (
@@ -1073,10 +1299,10 @@ function parseResponse(
     throw new Error();
   }
   const sanitizerRequirement = requiredObject(value.sanitizerRequirement);
-  assertSanitizerRequirement(sanitizerRequirement, context);
+  assertSanitizerRequirement(sanitizerRequirement, expectedSanitizerRequirement);
   const approval =
     value.approval === null ? null : snapshotApprovalResponse(requiredObject(value.approval));
-  if (!approvalEqual(approval, context.approval)) throw new Error();
+  if (!approvalEqual(approval, expectedApproval)) throw new Error();
   if (!Object.hasOwn(value, "document")) throw new Error();
   const responded = requiredObject(value.responded);
   assertKeys(responded, ["model", "effort", "usage", "stopReason"]);
@@ -1086,7 +1312,7 @@ function parseResponse(
   const usage = snapshotUsage(responded.usage);
   return deepFreeze({
     responseVersion: 1,
-    phase: context.phase,
+    phase: expectedPhase,
     provider: {
       id: options.providerId,
       route: options.route,
@@ -1098,7 +1324,7 @@ function parseResponse(
       identityVersion: context.caseInputIdentity.identityVersion,
       digest: context.caseInputIdentity.digest,
     },
-    sanitizerRequirement: { ...context.sanitizerRequirement },
+    sanitizerRequirement: { ...expectedSanitizerRequirement },
     approval,
     document: value.document!,
     responded: { model, effort, usage, stopReason },
@@ -1123,9 +1349,10 @@ function snapshotRequestedSettings(value: unknown): RequestedExecutionSettings {
 function assertApprovalActive(approval: ApprovalResponse | null): void {
   if (
     approval !== null &&
-    approval.expiresAt !== undefined &&
-    approval.expiresAt !== null &&
-    Date.parse(approval.expiresAt) <= Date.now()
+    (!approval.approved ||
+      (approval.expiresAt !== undefined &&
+        approval.expiresAt !== null &&
+        Date.parse(approval.expiresAt) <= Date.now()))
   ) {
     throw new Error();
   }
@@ -1133,7 +1360,7 @@ function assertApprovalActive(approval: ApprovalResponse | null): void {
 
 function assertSanitizerRequirement(
   value: Record<string, JsonValue>,
-  context: ProviderAdapterContext,
+  expected: SanitizerRequirementDecisionV1,
 ): void {
   const keys = [
     "sanitizerRequirementVersion",
@@ -1147,11 +1374,65 @@ function assertSanitizerRequirement(
   ];
   assertKeys(value, keys);
   for (const key of keys) {
-    const expected = context.sanitizerRequirement[
-      key as keyof ProviderAdapterContext["sanitizerRequirement"]
-    ];
-    if (value[key] !== expected) throw new Error();
+    if (value[key] !== expected[key as keyof SanitizerRequirementDecisionV1]) {
+      throw new Error();
+    }
   }
+}
+
+function snapshotSanitizerRequirement(value: unknown): SanitizerRequirementDecisionV1 {
+  const requirement = requiredObject(value);
+  const keys = [
+    "sanitizerRequirementVersion",
+    "sanitizerRequired",
+    "policyRequired",
+    "sanitizerRequirementReason",
+    "consumerSourceCommit",
+    "requirementVerifierId",
+    "requirementVerifierVersion",
+    "requirementDecisionDigest",
+  ];
+  assertKeys(requirement, keys);
+  const sanitizerRequirementVersion = requirement.sanitizerRequirementVersion;
+  const sanitizerRequired = requirement.sanitizerRequired;
+  const policyRequired = requirement.policyRequired;
+  const sanitizerRequirementReason = requirement.sanitizerRequirementReason;
+  const consumerSourceCommit = requirement.consumerSourceCommit;
+  const requirementVerifierId = requirement.requirementVerifierId;
+  const requirementVerifierVersion = requirement.requirementVerifierVersion;
+  const requirementDecisionDigest = requirement.requirementDecisionDigest;
+  if (
+    sanitizerRequirementVersion !== 1 ||
+    typeof sanitizerRequired !== "boolean" ||
+    typeof policyRequired !== "boolean" ||
+    !isSafeLabel(sanitizerRequirementReason) ||
+    !isNullableSafeLabel(consumerSourceCommit) ||
+    !isSafeLabel(requirementVerifierId) ||
+    !isSafeLabel(requirementVerifierVersion) ||
+    !isDigest(requirementDecisionDigest)
+  ) {
+    throw new Error();
+  }
+  const expectedDigest = computeSanitizerRequirementDigest({
+    sanitizerRequirementVersion: 1,
+    sanitizerRequired,
+    policyRequired,
+    sanitizerRequirementReason,
+    consumerSourceCommit,
+    requirementVerifierId,
+    requirementVerifierVersion,
+  });
+  if (requirementDecisionDigest !== expectedDigest) throw new Error();
+  return deepFreeze({
+    sanitizerRequirementVersion: 1,
+    sanitizerRequired,
+    policyRequired,
+    sanitizerRequirementReason,
+    consumerSourceCommit,
+    requirementVerifierId,
+    requirementVerifierVersion,
+    requirementDecisionDigest,
+  });
 }
 
 function snapshotApprovalResponse(value: unknown): ApprovalResponse {
@@ -1178,53 +1459,74 @@ function snapshotApprovalResponse(value: unknown): ApprovalResponse {
   ];
   const optional = ["checkedAt", "expiresAt", "reasonCode"];
   assertKeys(approval, required, optional);
+  const responseVersion = approval.responseVersion;
+  const approved = approval.approved;
+  const gateId = approval.gateId;
+  const protocolVersion = approval.protocolVersion;
+  const snapshotDigest = approval.snapshotDigest;
+  const runtimeBindingDigest = approval.runtimeBindingDigest;
+  const runtimeBindingIdentity = approval.runtimeBindingIdentity;
+  const approvedScopeDigest = approval.approvedScopeDigest;
+  const approvedScopeIdentity = approval.approvedScopeIdentity;
+  const phase = approval.phase;
+  const requirementVerifierId = approval.requirementVerifierId;
+  const requirementVerifierVersion = approval.requirementVerifierVersion;
+  const consumerSourceCommit = approval.consumerSourceCommit;
+  const requirementDecisionDigest = approval.requirementDecisionDigest;
+  const sanitizerRequirementVersion = approval.sanitizerRequirementVersion;
+  const sanitizerRequired = approval.sanitizerRequired;
+  const policyRequired = approval.policyRequired;
+  const sanitizerRequirementReason = approval.sanitizerRequirementReason;
+  const checkedAt = Object.hasOwn(approval, "checkedAt") ? approval.checkedAt : undefined;
+  const expiresAt = Object.hasOwn(approval, "expiresAt") ? approval.expiresAt : undefined;
+  const reasonCode = Object.hasOwn(approval, "reasonCode") ? approval.reasonCode : undefined;
   if (
-    approval.responseVersion !== 1 ||
-    typeof approval.approved !== "boolean" ||
-    !isSafeLabel(approval.gateId) ||
-    approval.protocolVersion !== 1 ||
-    !isDigest(approval.snapshotDigest) ||
-    !isDigest(approval.runtimeBindingDigest) ||
-    !isSafeLabel(approval.runtimeBindingIdentity) ||
-    !isDigest(approval.approvedScopeDigest) ||
-    !isSafeLabel(approval.approvedScopeIdentity) ||
-    !isSafeLabel(approval.phase) ||
-    !isSafeLabel(approval.requirementVerifierId) ||
-    !isSafeLabel(approval.requirementVerifierVersion) ||
-    !isNullableSafeLabel(approval.consumerSourceCommit) ||
-    !isDigest(approval.requirementDecisionDigest) ||
-    approval.sanitizerRequirementVersion !== 1 ||
-    typeof approval.sanitizerRequired !== "boolean" ||
-    typeof approval.policyRequired !== "boolean" ||
-    !isSafeLabel(approval.sanitizerRequirementReason) ||
-    !isOptionalDateTime(approval.checkedAt) ||
-    !isOptionalDateTime(approval.expiresAt) ||
-    (approval.reasonCode !== undefined && !isSafeLabel(approval.reasonCode))
+    responseVersion !== 1 ||
+    typeof approved !== "boolean" ||
+    !isSafeLabel(gateId) ||
+    protocolVersion !== 1 ||
+    !isDigest(snapshotDigest) ||
+    !isDigest(runtimeBindingDigest) ||
+    !isSafeLabel(runtimeBindingIdentity) ||
+    !isDigest(approvedScopeDigest) ||
+    !isSafeLabel(approvedScopeIdentity) ||
+    !isSafeLabel(phase) ||
+    !isSafeLabel(requirementVerifierId) ||
+    !isSafeLabel(requirementVerifierVersion) ||
+    !isNullableSafeLabel(consumerSourceCommit) ||
+    !isDigest(requirementDecisionDigest) ||
+    sanitizerRequirementVersion !== 1 ||
+    typeof sanitizerRequired !== "boolean" ||
+    typeof policyRequired !== "boolean" ||
+    !isSafeLabel(sanitizerRequirementReason) ||
+    !isOptionalDateTime(checkedAt) ||
+    !isOptionalDateTime(expiresAt) ||
+    (reasonCode !== undefined && !isSafeLabel(reasonCode))
   ) {
     throw new Error();
   }
   return deepFreeze({
     responseVersion: 1,
-    approved: approval.approved,
-    gateId: approval.gateId,
+    approved,
+    gateId,
     protocolVersion: 1,
-    snapshotDigest: approval.snapshotDigest,
-    runtimeBindingDigest: approval.runtimeBindingDigest,
-    runtimeBindingIdentity: approval.runtimeBindingIdentity,
-    approvedScopeDigest: approval.approvedScopeDigest,
-    approvedScopeIdentity: approval.approvedScopeIdentity,
-    phase: approval.phase,
-    requirementVerifierId: approval.requirementVerifierId,
-    requirementVerifierVersion: approval.requirementVerifierVersion,
-    consumerSourceCommit: approval.consumerSourceCommit,
-    requirementDecisionDigest: approval.requirementDecisionDigest,
+    snapshotDigest,
+    runtimeBindingDigest,
+    runtimeBindingIdentity,
+    approvedScopeDigest,
+    approvedScopeIdentity,
+    phase,
+    requirementVerifierId,
+    requirementVerifierVersion,
+    consumerSourceCommit,
+    requirementDecisionDigest,
     sanitizerRequirementVersion: 1,
-    sanitizerRequired: approval.sanitizerRequired,
-    policyRequired: approval.policyRequired,
-    sanitizerRequirementReason: approval.sanitizerRequirementReason,
-    ...(approval.checkedAt === undefined ? {} : { checkedAt: approval.checkedAt }),
-    ...(approval.expiresAt === undefined ? {} : { expiresAt: approval.expiresAt }),
-    ...(approval.reasonCode === undefined ? {} : { reasonCode: approval.reasonCode }),
+    sanitizerRequired,
+    policyRequired,
+    sanitizerRequirementReason,
+    ...(checkedAt === undefined ? {} : { checkedAt }),
+    ...(expiresAt === undefined ? {} : { expiresAt }),
+    ...(reasonCode === undefined ? {} : { reasonCode }),
   });
 }
 
@@ -1281,6 +1583,29 @@ function requiredObject(value: unknown): Record<string, JsonValue> {
   return value;
 }
 
+function requiredRuntimeObject(value: unknown): Record<string, unknown> {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (Object.getPrototypeOf(value) !== Object.prototype &&
+      Object.getPrototypeOf(value) !== null)
+  ) {
+    throw new Error();
+  }
+  return value as Record<string, unknown>;
+}
+
+function assertRuntimeKeys(value: Record<string, unknown>, required: string[]): void {
+  const allowed = new Set(required);
+  if (
+    required.some((key) => !Object.hasOwn(value, key)) ||
+    Object.keys(value).some((key) => !allowed.has(key))
+  ) {
+    throw new Error();
+  }
+}
+
 function assertKeys(
   value: Record<string, JsonValue>,
   required: string[],
@@ -1301,7 +1626,7 @@ function nullableSafeLabel(value: JsonValue | undefined): string | null {
   return value;
 }
 
-function isNullableSafeLabel(value: JsonValue | undefined): value is string | null {
+function isNullableSafeLabel(value: unknown): value is string | null {
   return value === null || isSafeLabel(value);
 }
 
@@ -1342,6 +1667,10 @@ function isCaseId(value: unknown): value is string {
     value.length <= 128 &&
     /^[a-z0-9][a-z0-9._-]*$/u.test(value)
   );
+}
+
+function isBoundedText(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 128;
 }
 
 function isDigest(value: unknown): value is string {

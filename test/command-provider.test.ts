@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { loadBundleForRunner } from "../src/bundle/validate-bundle.js";
 import {
   COMMAND_PROVIDER_PROTOCOL_VERSION,
   createCommandProvider,
@@ -21,6 +22,7 @@ import { readAttempt, type AttemptManifest } from "../src/runner/attempt.js";
 import { RunnerError } from "../src/runner/errors.js";
 import {
   computeAttemptIdentity,
+  computeCaseInputIdentity,
   computeRunIdentity,
   createSanitizerRequirementDecision,
   type SanitizerRequirementSettings,
@@ -31,6 +33,8 @@ import type {
   ApprovalRequest,
   ApprovalResponse,
   ApprovalSettings,
+  ProviderAdapterContext,
+  ProviderModelRequest,
 } from "../src/runner/types.js";
 
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
@@ -143,6 +147,310 @@ test("uses the snapshotted command configuration after source mutation", async (
     assert.equal(argvReads, 1);
     assert.equal(envReads, 1);
   } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects denied and expired approvals at the public invoke boundary", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  const marker = path.join(temporary, "synthetic-operation-marker");
+  const previousMarker = process.env.SYNTHETIC_COMMAND_MARKER;
+  let inputReads = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    process.env.SYNTHETIC_COMMAND_MARKER = marker;
+    const requirement = syntheticRequirement();
+    const direct = await directInvocation(
+      bundle,
+      path.join(temporary, "staging"),
+      requirement,
+      () => {
+        inputReads += 1;
+      },
+    );
+    try {
+      const provider = commandProvider("success", {
+        envAllowlist: ["SYNTHETIC_COMMAND_MARKER"],
+      });
+      let approvedReads = 0;
+      const hostileApproval = directApprovalResponse(requirement);
+      Object.defineProperty(hostileApproval, "approved", {
+        enumerable: true,
+        get: () => {
+          approvedReads += 1;
+          return approvedReads === 1 ? false : true;
+        },
+      });
+      for (const approval of [
+        directApprovalResponse(requirement, {
+          approved: false,
+          reasonCode: "synthetic_denied",
+        }),
+        directApprovalResponse(requirement, {
+          expiresAt: "2000-01-01T00:00:00Z",
+        }),
+        hostileApproval,
+      ]) {
+        await assert.rejects(
+          provider.invoke(direct.request, { ...direct.context, approval }),
+          /command provider failed/u,
+        );
+      }
+      let contextApprovalReads = 0;
+      const hostileContext = { ...direct.context };
+      Object.defineProperty(hostileContext, "approval", {
+        enumerable: true,
+        get: () => {
+          contextApprovalReads += 1;
+          return contextApprovalReads === 1
+            ? directApprovalResponse(requirement, { approved: false })
+            : directApprovalResponse(requirement);
+        },
+      });
+      await assert.rejects(
+        provider.invoke(direct.request, hostileContext),
+        /command provider failed/u,
+      );
+      assert.equal(inputReads, 0);
+      assert.equal(approvedReads, 1);
+      assert.equal(contextApprovalReads, 1);
+      await assert.rejects(readFile(marker), /ENOENT/u);
+    } finally {
+      await direct.cleanup();
+    }
+  } finally {
+    if (previousMarker === undefined) delete process.env.SYNTHETIC_COMMAND_MARKER;
+    else process.env.SYNTHETIC_COMMAND_MARKER = previousMarker;
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("stops direct input access when approval expires during a callback", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  const marker = path.join(temporary, "synthetic-operation-marker");
+  const previousMarker = process.env.SYNTHETIC_COMMAND_MARKER;
+  const originalNow = Date.now;
+  const activeTime = Date.parse("2098-01-01T00:00:00Z");
+  const expiredTime = Date.parse("2100-01-01T00:00:00Z");
+  let expired = false;
+  let inputReads = 0;
+  let callbackBuffer: Buffer | undefined;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    process.env.SYNTHETIC_COMMAND_MARKER = marker;
+    Date.now = () => (expired ? expiredTime : activeTime);
+    const requirement = syntheticRequirement();
+    const direct = await directInvocation(
+      bundle,
+      path.join(temporary, "staging"),
+      requirement,
+      () => {
+        inputReads += 1;
+      },
+    );
+    const readImage = direct.request.image.readBytes;
+    direct.request.image.readBytes = async () => {
+      callbackBuffer = await readImage();
+      expired = true;
+      return callbackBuffer;
+    };
+    try {
+      await assert.rejects(
+        commandProvider("success", {
+          envAllowlist: ["SYNTHETIC_COMMAND_MARKER"],
+        }).invoke(direct.request, {
+          ...direct.context,
+          approval: directApprovalResponse(requirement),
+        }),
+        /command provider failed/u,
+      );
+      assert.equal(inputReads, 1);
+      assert.ok(callbackBuffer !== undefined);
+      assert.ok(callbackBuffer.every((byte) => byte === 0));
+      await assert.rejects(readFile(marker), /ENOENT/u);
+    } finally {
+      await direct.cleanup();
+    }
+  } finally {
+    Date.now = originalNow;
+    if (previousMarker === undefined) delete process.env.SYNTHETIC_COMMAND_MARKER;
+    else process.env.SYNTHETIC_COMMAND_MARKER = previousMarker;
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("uses one approval snapshot when direct invoke callbacks mutate the source", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  let inputReads = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const requirement = syntheticRequirement();
+    const approval = directApprovalResponse(requirement);
+    const direct = await directInvocation(
+      bundle,
+      path.join(temporary, "staging"),
+      requirement,
+      () => {
+        inputReads += 1;
+        approval.approved = false;
+      },
+    );
+    try {
+      const response = await commandProvider("success").invoke(direct.request, {
+        ...direct.context,
+        approval,
+      });
+      assert.equal(inputReads, 4);
+      assert.equal(approval.approved, false);
+      assert.equal(response.approval?.approved, true);
+    } finally {
+      await direct.cleanup();
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("uses the approved phase snapshot after direct invoke callback mutation", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  let inputReads = 0;
+  let mutableContext: ProviderAdapterContext | undefined;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const requirement = syntheticRequirement();
+    const direct = await directInvocation(
+      bundle,
+      path.join(temporary, "staging"),
+      requirement,
+      () => {
+        inputReads += 1;
+        if (mutableContext !== undefined) mutableContext.phase = "synthetic-other-phase";
+      },
+    );
+    mutableContext = {
+      ...direct.context,
+      approval: directApprovalResponse(requirement),
+    };
+    try {
+      const response = await commandProvider("echo-phase").invoke(
+        direct.request,
+        mutableContext,
+      );
+      assert.equal(inputReads, 4);
+      assert.equal(mutableContext.phase, "synthetic-other-phase");
+      assert.equal(
+        (response.rawDocument as { syntheticPhase?: unknown }).syntheticPhase,
+        PHASE,
+      );
+      assert.equal(response.approval?.phase, PHASE);
+    } finally {
+      await direct.cleanup();
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("uses one immutable request and context snapshot after direct callback mutation", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  let inputReads = 0;
+  let mutableRequest: ProviderModelRequest | undefined;
+  let mutableContext: ProviderAdapterContext | undefined;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const requirement = syntheticRequirement();
+    const direct = await directInvocation(
+      bundle,
+      path.join(temporary, "staging"),
+      requirement,
+      () => {
+        inputReads += 1;
+        if (mutableRequest !== undefined && mutableContext !== undefined) {
+          mutableRequest.requested.model = "synthetic-model-b";
+          mutableContext.caseId = "synthetic-mutated-case";
+          mutableContext.provenance.harnessVersion = "synthetic-mutated-harness";
+        }
+      },
+    );
+    mutableRequest = direct.request;
+    mutableContext = direct.context;
+    mutableRequest.requested.model = "synthetic-model-a";
+    try {
+      const response = await commandProvider("echo-contract").invoke(
+        mutableRequest,
+        mutableContext,
+      );
+      const document = response.rawDocument as Record<string, unknown>;
+      assert.equal(inputReads, 4);
+      assert.equal(mutableRequest.requested.model, "synthetic-model-b");
+      assert.equal(mutableContext.caseId, "synthetic-mutated-case");
+      assert.equal(
+        mutableContext.provenance.harnessVersion,
+        "synthetic-mutated-harness",
+      );
+      assert.equal(document.syntheticRequestedModel, "synthetic-model-a");
+      assert.equal(document.syntheticCaseId, direct.context.caseInputIdentity.caseId);
+      assert.equal(document.syntheticHarnessVersion, "synthetic-harness");
+      assert.equal(response.respondedModel, "synthetic-model-a");
+    } finally {
+      await direct.cleanup();
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("snapshots required sanitizer decisions before direct invoke input access", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  const marker = path.join(temporary, "synthetic-operation-marker");
+  const previousMarker = process.env.SYNTHETIC_COMMAND_MARKER;
+  let inputReads = 0;
+  let requiredReads = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    process.env.SYNTHETIC_COMMAND_MARKER = marker;
+    const requirement = syntheticRequirement(true);
+    const direct = await directInvocation(
+      bundle,
+      path.join(temporary, "staging"),
+      requirement,
+      () => {
+        inputReads += 1;
+      },
+    );
+    const hostileRequirement = { ...requirement.decision };
+    Object.defineProperty(hostileRequirement, "sanitizerRequired", {
+      enumerable: true,
+      get: () => {
+        requiredReads += 1;
+        return requiredReads === 1;
+      },
+    });
+    try {
+      await assert.rejects(
+        commandProvider("success", {
+          envAllowlist: ["SYNTHETIC_COMMAND_MARKER"],
+        }).invoke(direct.request, {
+          ...direct.context,
+          sanitizerRequirement: hostileRequirement,
+        }),
+        /command provider failed/u,
+      );
+      assert.equal(requiredReads, 1);
+      assert.equal(inputReads, 0);
+      await assert.rejects(readFile(marker), /ENOENT/u);
+    } finally {
+      await direct.cleanup();
+    }
+  } finally {
+    if (previousMarker === undefined) delete process.env.SYNTHETIC_COMMAND_MARKER;
+    else process.env.SYNTHETIC_COMMAND_MARKER = previousMarker;
     await rm(temporary, { recursive: true, force: true });
   }
 });
@@ -768,6 +1076,87 @@ function commandProvider(
     implementationVersion: "synthetic-v1",
     ...overrides,
   });
+}
+
+async function directInvocation(
+  bundleDirectory: string,
+  stagingDirectory: string,
+  requirement: SanitizerRequirementSettings,
+  onInputRead: () => void,
+): Promise<{
+  request: ProviderModelRequest;
+  context: ProviderAdapterContext;
+  cleanup: () => Promise<void>;
+}> {
+  const loaded = await loadBundleForRunner(bundleDirectory, stagingDirectory);
+  const requested = { model: null, effort: null, maxTokens: null };
+  const identity = computeCaseInputIdentity({
+    caseId: loaded.caseId,
+    documentKind: loaded.documentKind,
+    preparedImage: {
+      mediaType: loaded.inputs.image.mediaType,
+      sha256: loaded.inputs.image.sha256,
+    },
+  });
+  const request: ProviderModelRequest = {
+    image: {
+      mediaType: loaded.inputs.image.mediaType,
+      readBytes: async () => {
+        onInputRead();
+        return loaded.inputs.image.readBytes();
+      },
+    },
+    schema: loaded.inputs.schema.value,
+    schemaInput: {
+      mediaType: loaded.inputs.schema.mediaType,
+      readBytes: async () => {
+        onInputRead();
+        return loaded.inputs.schema.readBytes();
+      },
+    },
+    system: {
+      mediaType: loaded.inputs.system.mediaType,
+      readText: async () => {
+        onInputRead();
+        return loaded.inputs.system.readText();
+      },
+    },
+    instruction: {
+      mediaType: loaded.inputs.instruction.mediaType,
+      readText: async () => {
+        onInputRead();
+        return loaded.inputs.instruction.readText();
+      },
+    },
+    requested,
+  };
+  return {
+    request,
+    context: {
+      phase: PHASE,
+      bundle: { version: loaded.bundleVersion, manifestDigest: loaded.manifestDigest },
+      caseId: loaded.caseId,
+      documentKind: loaded.documentKind,
+      caseInputIdentity: identity,
+      inputDigests: {
+        image: loaded.inputs.image.sha256,
+        schema: loaded.inputs.schema.sha256,
+        system: loaded.inputs.system.sha256,
+        instruction: loaded.inputs.instruction.sha256,
+      },
+      requested,
+      provenance: {
+        harnessVersion: "synthetic-harness",
+        harnessCommit: null,
+        promptVersion: loaded.metadata.promptVersion,
+        preprocessVersion: loaded.metadata.preprocessVersion,
+        sourceCommit: loaded.metadata.sourceCommit,
+      },
+      sanitizerRequirement: requirement.decision,
+      approval: null,
+    },
+    cleanup: loaded.cleanup,
+  };
 }
 
 function syntheticRequirement(required = false): SanitizerRequirementSettings {

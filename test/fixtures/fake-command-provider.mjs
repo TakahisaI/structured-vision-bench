@@ -224,6 +224,12 @@ if (mode === "approval-mismatch" && response.approval !== null) {
   response.approval.runtimeBindingDigest = "0".repeat(64);
 }
 if (mode === "unknown-field") response.syntheticUnknown = true;
+if (mode === "echo-phase") response.document.syntheticPhase = request.phase;
+if (mode === "echo-contract") {
+  response.document.syntheticRequestedModel = request.requested.model;
+  response.document.syntheticCaseId = request.case.id;
+  response.document.syntheticHarnessVersion = request.provenance.harnessVersion;
+}
 
 process.stdout.write(`${JSON.stringify(response)}\n`);
 

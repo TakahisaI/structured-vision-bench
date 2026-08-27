@@ -97,6 +97,13 @@ directory as `cwd`; relative arguments therefore cannot resolve bundle-controlle
 approved run the request path is absent from the spawn environment and is sent only after inline
 reattestation; an unapproved run receives it in the reserved request-directory variable.
 Allowlist names are unique case-insensitively and cannot use any case variant of a reserved name.
+The public provider boundary rejects denied and expired approvals before reading any input callback.
+It snapshots the complete provider request and adapter context before any callback, including
+callbacks, parsed schema, requested settings, identities, digests, provenance, phase, approval, and
+the consumer sanitizer-requirement decision. The decision digest is recomputed from that immutable
+snapshot, and later mutation of caller-owned objects cannot change the released request or response
+checks. Approval expiry is checked before and after every callback so expiry during one read stops
+all later input access and zeroes any returned binary buffer.
 Stdout and stderr have a shared configured bound and are never echoed. Response phase/provider/case-input/requirement/approval
 identities and requested settings are exact-match checked. Cancellation or overflow kills the child
 process group, timeouts await command cleanup, callback-returned binary buffers and private input

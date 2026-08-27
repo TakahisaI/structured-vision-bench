@@ -56,6 +56,16 @@ exit before request release prevents request materialization and extraction.
 
 Both checks reject `sanitizerRequired: true` or `policyRequired: true` before starting a child.
 Those runs require Phase B and never start a Phase A command process.
+The public provider `invoke()` boundary also rejects a denied or expired approval before calling any
+input callback, even if a caller bypasses the runner and omits the `prepareTransport()` hook. It
+reads the complete provider request and adapter context once into one immutable validated snapshot
+before calling any input callback. This includes the callback functions, media types, parsed schema,
+requested settings, phase, bundle/case/input identities and digests, provenance, sanitizer decision,
+and approval. The sanitizer decision digest is recomputed while taking the snapshot. The same
+snapshot is used for Phase A admission, callback reads, digest checks, approval binding, the
+manifest, inline handshake, and final response validation; later source-object mutation has no
+effect. Approval activity is rechecked immediately before and after each callback read; expiry
+during one callback zeroes any returned binary buffer and prevents every later callback.
 
 ## Private request directory
 
@@ -78,10 +88,11 @@ schema. The other three files likewise contain the exact verified provider input
 relative names are protocol names and disclose no confidential corpus filename or path.
 
 The extraction process is spawned with `shell: false`, the configured argument vector, and a
-separate fresh, empty, mode-0700 directory as `cwd`; the request root is not its sibling. For an
-approved run, `SVBENCH_COMMAND_OPERATION` is `invoke`, the request-directory variable is absent,
-and the absolute path is released only in the second stdin line after inline reattestation. For a
-run without approval, the process starts after materialization and receives the path in
+separate fresh, empty, mode-0700 directory as `cwd`. The request root is an independently randomized
+temporary-directory entry, not a fixed-name `../request` sibling. For an approved run,
+`SVBENCH_COMMAND_OPERATION` is `invoke`, the request-directory variable is absent, and the absolute
+path is released only in the second stdin line after inline reattestation. For a run without
+approval, the process starts after materialization and receives the path in
 `SVBENCH_COMMAND_REQUEST_DIRECTORY`. The child receives no other inherited environment except
 explicitly allowlisted names, and the reserved names cannot be
 allowlisted or overridden. Environment allowlist names must also be unique under ASCII
@@ -115,7 +126,11 @@ requirement metadata must not be forwarded to the hosted model.
 
 ## Response
 
-Stdout must contain exactly one strict UTF-8 JSON object:
+For a run without approval, stdout in its entirety must contain exactly one strict UTF-8 JSON
+object. For an approved run, stdout contains exactly two payloads: the first newline-terminated line
+is the transport attestation described above, and all bytes after that line through EOF are exactly
+one strict UTF-8 response JSON object. No bytes other than the attestation line and final response
+are allowed. The final response has this shape:
 
 ```text
 responseVersion: 1
