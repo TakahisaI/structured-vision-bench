@@ -11,7 +11,6 @@ import type {
   JsonRecord,
   Sanitizer,
   SanitizerPolicyBindingIdentity,
-  SanitizerResponse,
   SanitizerSettings,
 } from "./types.js";
 
@@ -71,13 +70,19 @@ export function prepareSanitizerPolicy(
 
   let envelope: JsonValue;
   let policyDigest: string;
+  let policyBytes: Buffer | undefined;
   try {
-    const bytes = Buffer.from(settings.policyEnvelopeBytes);
-    if (bytes.length > MAX_SANITIZER_POLICY_BYTES) throw new Error();
-    policyDigest = createHash("sha256").update(bytes).digest("hex");
-    envelope = parseJson(decodeUtf8Strict(bytes, "sanitizer policy"), "sanitizer policy");
+    policyBytes = Buffer.from(settings.policyEnvelopeBytes);
+    if (policyBytes.length > MAX_SANITIZER_POLICY_BYTES) throw new Error();
+    policyDigest = createHash("sha256").update(policyBytes).digest("hex");
+    envelope = parseJson(
+      decodeUtf8Strict(policyBytes, "sanitizer policy"),
+      "sanitizer policy",
+    );
   } catch {
     throw new RunnerError("sanitizer_policy_invalid", "sanitizer policy is invalid");
+  } finally {
+    policyBytes?.fill(0);
   }
   if (!isJsonObject(envelope)) {
     throw new RunnerError("sanitizer_policy_invalid", "sanitizer policy is invalid");
@@ -206,27 +211,6 @@ export function prepareSanitizerPolicy(
       policyDigest,
     },
     policyBindingDigest,
-  };
-}
-
-export function createPassthroughSanitizer(): Sanitizer {
-  return {
-    id: "builtin-noop-sanitizer",
-    protocolVersion: 1,
-    async sanitize(request): Promise<SanitizerResponse> {
-      return {
-        sanitizedDocument: request.document,
-        sanitizerId: "builtin-noop-sanitizer",
-        protocolVersion: 1,
-        policyVersion: request.policyVersion,
-        policyDigest: request.policyDigest,
-        caseInputIdentityVersion: request.caseInputIdentity.identityVersion,
-        caseInputIdentityDigest: request.caseInputIdentity.digest,
-        policyTargetIdentityDigest: request.caseInputIdentity.digest,
-        policyBindingDigest: request.policyBindingDigest,
-        findings: [],
-      };
-    },
   };
 }
 

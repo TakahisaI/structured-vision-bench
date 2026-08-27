@@ -298,7 +298,7 @@ The implementation is split into these public modules:
 - `src/runner/identity.ts` — case, policy, run, and attempt identity helpers;
 - `src/runner/attempt.ts` — attempt writer/reader and exact document digest;
 - `src/runner/approval.ts` — shell-free bounded command approval adapter;
-- `src/runner/sanitizer.ts` — policy envelope preflight and test helper;
+- `src/runner/sanitizer.ts` — policy envelope preflight;
 - `src/provider/mock.ts` — deterministic synthetic provider double;
 - `src/runner/load-bundle.ts` — runner-facing re-export of verified staging.
 

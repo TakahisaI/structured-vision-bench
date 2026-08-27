@@ -259,10 +259,6 @@ export interface Sanitizer {
 export type SanitizerSettings = {
   required: boolean;
   sanitizer?: Sanitizer;
-  executable?: string;
-  argv?: string[];
-  envAllowlist?: string[];
-  outputLimitBytes?: number;
   expectedSanitizerId?: string;
   expectedProtocolVersion?: 1;
   policyEnvelopeBytes?: Uint8Array;
