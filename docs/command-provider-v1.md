@@ -7,7 +7,7 @@ public runner invoke a consumer-owned adapter without importing private provider
 The adapter process is local invocation infrastructure, not a hosted-model payload.
 
 Phase A accepts only runs whose consumer-attested sanitizer and policy requirements are both false.
-Target-bound pre-sanitized responses are Phase B work after Issue #8. Suite, repeat, and resume
+Target-bound pre-sanitized responses are tracked by Issue #18 using sanitizer protocol v1. Suite, repeat, and resume
 integration are Phase C work after Issue #5. A Phase A adapter must not turn missing Phase B fields
 into empty strings, zeroes, null-filled blocks, or dummy digests.
 

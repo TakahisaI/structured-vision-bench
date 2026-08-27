@@ -98,5 +98,29 @@ hygiene. JavaScript values and strings cannot be promised deterministic erasure,
 claim an OS memory-sandbox boundary. The consumer-owned sanitizer and its conforming descendants
 are one trusted local invocation boundary.
 
+## CLI
+
+`svbench run --sanitizer required` requires the command, sanitizer ID, policy file, exact policy
+identity, expected case-input identity, policy-binding digest, and consumer requirement identity.
+The requirement-decision digest is recomputed from the supplied verifier ID/version, source commit,
+required flags, and reason before runner execution. Optional timeout, output limit, argv, and
+environment-name options use the same bounds as the programmatic factory. Invalid CLI configuration
+is `invalid_arguments`; a policy read or runtime sanitizer failure is a classified runner failure and
+creates no formal attempt.
+
+The required options are:
+
+- `--sanitizer-command`, repeatable `--sanitizer-arg`, and repeatable `--sanitizer-env`;
+- `--sanitizer-id` (protocol version is fixed to v1);
+- `--sanitizer-policy`, `--sanitizer-policy-version`, and `--sanitizer-policy-digest`;
+- `--sanitizer-case-input-digest` and `--sanitizer-binding-digest`;
+- `--requirement-verifier-id`, `--requirement-verifier-version`, `--requirement-reason`, and
+  `--requirement-decision-digest`;
+- optional `--requirement-consumer-source-commit` when the decision has one.
+
+`--sanitizer-timeout-ms` and `--sanitizer-output-limit` override bounded defaults. The policy path
+is opened as a bounded, no-follow, non-blocking regular file and must not be group/other accessible
+on Unix. It is local configuration and is never written to an attempt or diagnostic.
+
 CI and automated tests use only a fake local sanitizer, fictional policies, and synthetic documents.
 They never start a real provider, login flow, or consumer sanitizer.

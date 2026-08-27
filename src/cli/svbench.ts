@@ -1,5 +1,7 @@
 import { parseArgs } from "node:util";
 import path from "node:path";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 
 import {
   compareAttempt,
@@ -16,19 +18,29 @@ import {
 } from "../provider/command.js";
 import { RunnerError } from "../runner/errors.js";
 import {
+  createCommandSanitizer,
+  MAX_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES,
+  type CommandSanitizerOptions,
+} from "../runner/command-sanitizer.js";
+import {
   createSanitizerRequirementDecision,
   type SanitizerRequirementSettings,
 } from "../runner/identity.js";
+import { MAX_SANITIZER_POLICY_BYTES } from "../runner/sanitizer.js";
 import {
   DEFAULT_EXECUTION_PHASE,
   MAX_TIMEOUT_MS,
   runBundle,
 } from "../runner/run.js";
 import { BundleValidationError } from "../bundle/validate-bundle.js";
-import type { ApprovalSettings, Provider } from "../runner/types.js";
+import type {
+  ApprovalSettings,
+  Provider,
+  SanitizerSettings,
+} from "../runner/types.js";
 
 const RUN_USAGE =
-  "usage: svbench run --bundle <bundle-directory> --provider mock|command [--phase <label>] [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--provider-command <absolute-executable> <command provider identity options>] [--approval required|optional --approval-command <executable> <approval identity options>] [--json]";
+  "usage: svbench run --bundle <bundle-directory> --provider mock|command [--phase <label>] [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--provider-command <absolute-executable> <command provider identity options>] [--approval required|optional --approval-command <executable> <approval identity options>] [--sanitizer required --sanitizer-command <absolute-executable> <sanitizer identity and policy options>] [--json]";
 const COMPARE_USAGE =
   "usage: svbench compare --bundle <bundle-directory> --attempt <attempt-directory> [--rescore --rescore-reason <code>] [--json]";
 const asJson = process.argv.slice(2).includes("--json");
@@ -44,6 +56,12 @@ type RunArguments = {
   attemptRoot: string;
   providerTimeoutMs: number | undefined;
   approval: ApprovalSettings | undefined;
+  sanitizerRequirement: SanitizerRequirementSettings;
+  sanitizer: ParsedSanitizerSettings | undefined;
+};
+
+type ParsedSanitizerSettings = Omit<SanitizerSettings, "policyEnvelopeBytes"> & {
+  policyPath: string;
 };
 
 type CompareArguments = {
@@ -113,6 +131,13 @@ if (command !== undefined) {
 }
 
 async function executeRun(runArguments: RunArguments): Promise<void> {
+  let sanitizer: SanitizerSettings | undefined;
+  let policyEnvelopeBytes: Buffer | undefined;
+  if (runArguments.sanitizer !== undefined) {
+    const { policyPath, ...settings } = runArguments.sanitizer;
+    policyEnvelopeBytes = await readPrivateSanitizerPolicy(policyPath);
+    sanitizer = { ...settings, policyEnvelopeBytes };
+  }
   const result = await runBundle({
     bundleDirectory: runArguments.bundle,
     attemptRoot: runArguments.attemptRoot,
@@ -125,9 +150,10 @@ async function executeRun(runArguments: RunArguments): Promise<void> {
       ? {}
       : { providerTimeoutMs: runArguments.providerTimeoutMs }),
     ...(runArguments.attemptKey === undefined ? {} : { attemptKey: runArguments.attemptKey }),
-    sanitizerRequirement: cliSanitizerRequirement(),
+    sanitizerRequirement: runArguments.sanitizerRequirement,
     ...(runArguments.approval === undefined ? {} : { approval: runArguments.approval }),
-  });
+    ...(sanitizer === undefined ? {} : { sanitizer }),
+  }).finally(() => policyEnvelopeBytes?.fill(0));
   if (asJson) {
     console.log(
       JSON.stringify({
@@ -143,6 +169,45 @@ async function executeRun(runArguments: RunArguments): Promise<void> {
     console.log(
       `run complete: ${result.caseId} (phase ${result.phase}, key ${result.attemptKey}, attempt ${result.attemptId}, run ${result.runId})`,
     );
+  }
+}
+
+async function readPrivateSanitizerPolicy(file: string): Promise<Buffer> {
+  const flags =
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(file, flags);
+    const metadata = await handle.stat();
+    if (
+      !metadata.isFile() ||
+      metadata.size > MAX_SANITIZER_POLICY_BYTES ||
+      (process.platform !== "win32" && (metadata.mode & 0o077) !== 0)
+    ) {
+      throw new Error();
+    }
+    const bounded = Buffer.allocUnsafe(MAX_SANITIZER_POLICY_BYTES + 1);
+    let total = 0;
+    try {
+      while (total < bounded.byteLength) {
+        const { bytesRead } = await handle.read(
+          bounded,
+          total,
+          bounded.byteLength - total,
+          null,
+        );
+        if (bytesRead === 0) break;
+        total += bytesRead;
+      }
+      if (total > MAX_SANITIZER_POLICY_BYTES) throw new Error();
+      return Buffer.from(bounded.subarray(0, total));
+    } finally {
+      bounded.fill(0);
+    }
+  } catch {
+    throw new RunnerError("sanitizer_policy_invalid", "sanitizer policy is unreadable");
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 
@@ -196,6 +261,23 @@ function parseRunArguments(): RunArguments {
       "approval-phase": { type: "string" },
       "approval-timeout-ms": { type: "string" },
       "approval-output-limit": { type: "string" },
+      sanitizer: { type: "string" },
+      "sanitizer-command": { type: "string" },
+      "sanitizer-arg": { type: "string", multiple: true },
+      "sanitizer-env": { type: "string", multiple: true },
+      "sanitizer-id": { type: "string" },
+      "sanitizer-policy": { type: "string" },
+      "sanitizer-policy-version": { type: "string" },
+      "sanitizer-policy-digest": { type: "string" },
+      "sanitizer-case-input-digest": { type: "string" },
+      "sanitizer-binding-digest": { type: "string" },
+      "sanitizer-timeout-ms": { type: "string" },
+      "sanitizer-output-limit": { type: "string" },
+      "requirement-verifier-id": { type: "string" },
+      "requirement-verifier-version": { type: "string" },
+      "requirement-consumer-source-commit": { type: "string" },
+      "requirement-reason": { type: "string" },
+      "requirement-decision-digest": { type: "string" },
       json: { type: "boolean", default: false },
     },
     allowPositionals: true,
@@ -228,6 +310,25 @@ function parseRunArguments(): RunArguments {
     typeof values["attempt-root"] === "string" && values["attempt-root"].length > 0
       ? values["attempt-root"]
       : path.resolve("attempts");
+  const sanitizerPlan = parseCommandSanitizer({
+    mode: values.sanitizer,
+    executable: values["sanitizer-command"],
+    argv: values["sanitizer-arg"],
+    envAllowlist: values["sanitizer-env"],
+    sanitizerId: values["sanitizer-id"],
+    policyPath: values["sanitizer-policy"],
+    policyVersion: values["sanitizer-policy-version"],
+    policyDigest: values["sanitizer-policy-digest"],
+    caseInputIdentityDigest: values["sanitizer-case-input-digest"],
+    policyBindingDigest: values["sanitizer-binding-digest"],
+    timeoutMs: values["sanitizer-timeout-ms"],
+    outputLimitBytes: values["sanitizer-output-limit"],
+    requirementVerifierId: values["requirement-verifier-id"],
+    requirementVerifierVersion: values["requirement-verifier-version"],
+    requirementConsumerSourceCommit: values["requirement-consumer-source-commit"],
+    requirementReason: values["requirement-reason"],
+    requirementDecisionDigest: values["requirement-decision-digest"],
+  });
   const approval = parseCommandApproval({
     mode: values.approval,
     executable: values["approval-command"],
@@ -242,7 +343,7 @@ function parseRunArguments(): RunArguments {
     phase: values["approval-phase"],
     timeoutMs: values["approval-timeout-ms"],
     outputLimitBytes: values["approval-output-limit"],
-  });
+  }, sanitizerPlan.requirement);
   if (approval?.phase !== undefined && approval.phase !== phase) throw new Error();
   return {
     bundle: values.bundle,
@@ -258,6 +359,8 @@ function parseRunArguments(): RunArguments {
         ? undefined
         : parseTimeoutMs(values["provider-timeout-ms"]),
     approval,
+    sanitizerRequirement: sanitizerPlan.requirement,
+    sanitizer: sanitizerPlan.settings,
   };
 }
 
@@ -338,7 +441,7 @@ function parseCommandApproval(input: {
   phase: string | undefined;
   timeoutMs: string | undefined;
   outputLimitBytes: string | undefined;
-}): ApprovalSettings | undefined {
+}, sanitizerRequirement: SanitizerRequirementSettings): ApprovalSettings | undefined {
   const hasConfiguration = Object.entries(input).some(
     ([key, value]) => key !== "mode" && value !== undefined,
   );
@@ -368,7 +471,7 @@ function parseCommandApproval(input: {
   ) {
     throw new Error();
   }
-  const requirement = cliSanitizerRequirement().decision;
+  const requirement = sanitizerRequirement.decision;
   return {
     required: input.mode === "required",
     executable: input.executable,
@@ -396,6 +499,91 @@ function parseCommandApproval(input: {
     ...(input.outputLimitBytes === undefined
       ? {}
       : { outputLimitBytes: parseApprovalOutputLimit(input.outputLimitBytes) }),
+  };
+}
+
+function parseCommandSanitizer(input: {
+  mode: string | undefined;
+  executable: string | undefined;
+  argv: string[] | undefined;
+  envAllowlist: string[] | undefined;
+  sanitizerId: string | undefined;
+  policyPath: string | undefined;
+  policyVersion: string | undefined;
+  policyDigest: string | undefined;
+  caseInputIdentityDigest: string | undefined;
+  policyBindingDigest: string | undefined;
+  timeoutMs: string | undefined;
+  outputLimitBytes: string | undefined;
+  requirementVerifierId: string | undefined;
+  requirementVerifierVersion: string | undefined;
+  requirementConsumerSourceCommit: string | undefined;
+  requirementReason: string | undefined;
+  requirementDecisionDigest: string | undefined;
+}): {
+  requirement: SanitizerRequirementSettings;
+  settings: ParsedSanitizerSettings | undefined;
+} {
+  const configured = Object.entries(input).some(
+    ([key, value]) => key !== "mode" && value !== undefined,
+  );
+  if (input.mode === undefined) {
+    if (configured) throw new Error();
+    return { requirement: cliSanitizerRequirement(false), settings: undefined };
+  }
+  if (input.mode !== "required") throw new Error();
+  if (
+    input.executable === undefined ||
+    !path.isAbsolute(input.executable) ||
+    input.policyPath === undefined ||
+    input.policyPath.length === 0
+  ) {
+    throw new Error();
+  }
+  const sanitizerId = requiredSafeLabel(input.sanitizerId);
+  const policyVersion = parsePositiveSafeInteger(input.policyVersion ?? "");
+  const policyDigest = requiredDigest(input.policyDigest);
+  const caseInputIdentityDigest = requiredDigest(input.caseInputIdentityDigest);
+  const policyBindingDigest = requiredDigest(input.policyBindingDigest);
+  const requirementVerifierId = requiredSafeLabel(input.requirementVerifierId);
+  const requirementVerifierVersion = requiredSafeLabel(input.requirementVerifierVersion);
+  const requirementReason = requiredSafeLabel(input.requirementReason);
+  const consumerSourceCommit =
+    input.requirementConsumerSourceCommit === undefined
+      ? null
+      : requiredSafeLabel(input.requirementConsumerSourceCommit);
+  const requirement = cliSanitizerRequirement(true, {
+    verifierId: requirementVerifierId,
+    verifierVersion: requirementVerifierVersion,
+    reason: requirementReason,
+    consumerSourceCommit,
+    expectedDecisionDigest: requiredDigest(input.requirementDecisionDigest),
+  });
+  const commandOptions: CommandSanitizerOptions = {
+    executable: input.executable,
+    argv: input.argv ?? [],
+    envAllowlist: input.envAllowlist ?? [],
+    sanitizerId,
+    ...(input.outputLimitBytes === undefined
+      ? {}
+      : { outputLimitBytes: parseSanitizerOutputLimit(input.outputLimitBytes) }),
+  };
+  const sanitizer = createCommandSanitizer(commandOptions);
+  return {
+    requirement,
+    settings: {
+      required: true,
+      sanitizer,
+      policyPath: input.policyPath,
+      expectedSanitizerId: sanitizerId,
+      expectedProtocolVersion: 1,
+      expectedPolicyVersion: policyVersion,
+      expectedPolicyDigest: policyDigest,
+      expectedCaseInputIdentityVersion: 1,
+      expectedCaseInputIdentityDigest: caseInputIdentityDigest,
+      expectedPolicyBindingDigest: policyBindingDigest,
+      ...(input.timeoutMs === undefined ? {} : { timeoutMs: parseTimeoutMs(input.timeoutMs) }),
+    },
   };
 }
 
@@ -432,21 +620,37 @@ function parseCompareArguments(): CompareArguments {
   };
 }
 
-function cliSanitizerRequirement(): SanitizerRequirementSettings {
+function cliSanitizerRequirement(
+  required: boolean,
+  identity?: {
+    verifierId: string;
+    verifierVersion: string;
+    reason: string;
+    consumerSourceCommit: string | null;
+    expectedDecisionDigest: string;
+  },
+): SanitizerRequirementSettings {
   const verifier = {
-    id: "svbench-cli",
-    version: "v1",
+    id: identity?.verifierId ?? "svbench-cli",
+    version: identity?.verifierVersion ?? "v1",
     derive: (_documentKind: string) => ({
-      sanitizerRequired: false,
-      policyRequired: false,
-      sanitizerRequirementReason: "cli_policy_not_required",
-      consumerSourceCommit: null,
+      sanitizerRequired: required,
+      policyRequired: required,
+      sanitizerRequirementReason: identity?.reason ?? "cli_policy_not_required",
+      consumerSourceCommit: identity?.consumerSourceCommit ?? null,
     }),
   };
   const core = verifier.derive("");
+  const decision = createSanitizerRequirementDecision(core, verifier);
+  if (
+    identity !== undefined &&
+    decision.requirementDecisionDigest !== identity.expectedDecisionDigest
+  ) {
+    throw new Error();
+  }
   return {
     verifier,
-    decision: createSanitizerRequirementDecision(core, verifier),
+    decision,
   };
 }
 
@@ -494,6 +698,12 @@ function parseApprovalOutputLimit(value: string): number {
 function parseProviderOutputLimit(value: string): number {
   const parsed = parsePositiveSafeInteger(value);
   if (parsed > MAX_COMMAND_PROVIDER_OUTPUT_LIMIT_BYTES) throw new Error();
+  return parsed;
+}
+
+function parseSanitizerOutputLimit(value: string): number {
+  const parsed = parsePositiveSafeInteger(value);
+  if (parsed > MAX_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES) throw new Error();
   return parsed;
 }
 
