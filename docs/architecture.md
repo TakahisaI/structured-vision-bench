@@ -43,7 +43,7 @@ the mutable bundle for a provider; input staging occurs only after approval.
 ### Runner
 
 The Issue #2 runner turns one validated bundle into one immutable attempt. It owns provider-input
-staging, case/run identity, consumer requirement attestation, approval and sanitizer
+staging, case/run/attempt identity, consumer requirement attestation, approval and sanitizer
 binding checks, cancellation/timeout signaling, exclusive attempt claiming, final-manifest
 publication, and machine-readable attempt metadata. It does not own application-specific validation.
 A provider, approval, sanitizer, parse, policy, or schema failure creates no formal attempt.
@@ -67,7 +67,9 @@ Two distinct invocation surfaces must not be conflated:
 Case ID, bundle version/digest, source commit, prompt/preprocess version, approval metadata,
 sanitizer metadata, truth, comparison policy or results, and prior attempts are never sent to the
 hosted model. Truth, comparison policy or results, and prior attempts are also never sent to the
-local adapter or sanitizer. The sanitizer command is run/suite configuration, not bundle content.
+local adapter or sanitizer. Caller-owned attempt keys and derived attempt/run IDs are runner storage
+metadata and are never sent to the local adapter, hosted model, approval gate, or sanitizer. The
+sanitizer command is run/suite configuration, not bundle content.
 
 Providers are transport adapters, not autonomous agents. The Codex app-server provider planned in
 Issue #3 must fail rather than execute tool requests, shell commands, workspace reads, or approval
@@ -114,11 +116,12 @@ confidential storage and is passed to a local checkout of the public harness.
 4. Approval and sanitizer implementations are runtime-validated into bound immutable snapshots, and
    their policy/runtime bindings are checked before the relevant boundary is crossed.
 5. After approval, the runner stages verified provider inputs outside the bundle (bounded to 16 MiB
-   per provider input) and claims the run directory before provider work.
+   per provider input), derives a caller-keyed attempt ID from the stable run ID, and claims the
+   attempt directory before provider work.
 6. The selected provider returns structured data or a classified failure.
 7. The runner canonicalizes, sanitizes when required, schema-validates, and publishes the attempt by
    no-replace linking its fully validated manifest from the private same-filesystem `.claim-<nonce>/`
-   staging area to `attempt.json`; the final link changes the claimed run directory directly to its
+   staging area to `attempt.json`; the final link changes the claimed attempt directory directly to its
    exact two-file reader shape, and source cleanup is best effort.
 8. Comparison and reports derive results without mutating bundle or attempt input.
 9. Only anonymized aggregate facts may be copied to a public Issue.

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const CASE_INPUT_IDENTITY_VERSION = 1 as const;
+export const ATTEMPT_IDENTITY_VERSION = 1 as const;
 export const POLICY_BINDING_VERSION = 1 as const;
 export const RUN_IDENTITY_VERSION = 1 as const;
 export const SANITIZER_REQUIREMENT_VERSION = 1 as const;
@@ -62,6 +63,16 @@ export type PolicyBindingInput = {
   policyDigest: string;
 };
 
+export type AttemptIdentityInput = {
+  runId: string;
+  attemptKey: string;
+};
+
+export type AttemptIdentity = AttemptIdentityInput & {
+  attemptIdentityVersion: typeof ATTEMPT_IDENTITY_VERSION;
+  attemptId: string;
+};
+
 export type RunIdentityInput = {
   caseInputIdentityDigest: string;
   bundleManifestDigest?: string | null;
@@ -119,6 +130,29 @@ export function computePolicyBindingDigest(input: PolicyBindingInput): string {
     lengthPrefixedUtf8(String(input.policyVersion)),
     lengthPrefixedAscii(input.policyDigest),
   ]);
+}
+
+/** Computes one caller-named execution instance identity within a stable run. */
+export function computeAttemptIdentity(input: AttemptIdentityInput): AttemptIdentity {
+  if (typeof input.runId !== "string" || !/^[a-f0-9]{64}$/u.test(input.runId)) {
+    throw new Error("attempt run identity is invalid");
+  }
+  if (
+    typeof input.attemptKey !== "string" ||
+    !/^[A-Za-z0-9._-]{1,64}$/u.test(input.attemptKey)
+  ) {
+    throw new Error("attempt key is invalid");
+  }
+  return {
+    attemptIdentityVersion: ATTEMPT_IDENTITY_VERSION,
+    runId: input.runId,
+    attemptKey: input.attemptKey,
+    attemptId: sha256([
+      Buffer.from("svbench-attempt-v1", "ascii"),
+      lengthPrefixedAscii(input.runId),
+      lengthPrefixedUtf8(input.attemptKey),
+    ]),
+  };
 }
 
 /** Computes the digest committed by a consumer-owned sanitizer decision. */

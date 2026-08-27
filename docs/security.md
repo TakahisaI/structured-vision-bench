@@ -58,7 +58,7 @@ Approval gate callability is validated and snapshotted before approval invocatio
 
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through
-the last pre-publication validation. Before provider work, the run-identity destination is claimed
+the last pre-publication validation. Before provider work, the attempt-identity destination is claimed
 with a non-recursive exclusive `mkdir`; an existing entry is reported as `attempt_exists` and the
 losing process never cleans it up or invokes the provider. The winning process places a private
 owner-nonce marker in the claimed directory, writes and validates `document.json`, and writes the
@@ -66,7 +66,7 @@ complete `attempt.json.pending` into a private same-filesystem `<attempt-root>/.
 staging directory owned by that run, without a shared staging-root lifecycle. The owner marker is
 removed only immediately before final publication. Document and manifest publication use no-replace
 hard links from their complete pending files. The final
-manifest link is the sole visibility point for a complete manifest: it changes the run directory in
+manifest link is the sole visibility point for a complete manifest: it changes the attempt directory in
 one syscall from `document.json` to the exact `attempt.json` plus `document.json` shape. Removing
 the external pending source is post-publication best effort and cannot turn a published attempt into
 a failure.
@@ -77,11 +77,13 @@ after publication only by its recorded file identity, as best-effort staging cle
 The reader recognizes only a directory containing the final `attempt.json` and `document.json`;
 directories containing only `document.json`, the owner marker, or no manifest are rejected and are
 not formal attempts. The
-Node-only contract prevents competing harness writers from replacing a claimed run directory;
+Node-only contract prevents competing harness writers from replacing a claimed attempt directory;
 protection against an adversarial same-UID process replacing the attempt root in the final path-based
 syscall window is outside this portable harness threat model. The reader uses no-follow reads,
 rejects non-private modes, symlinks, non-regular files, size violations, and any directory entry
-other than `attempt.json` and `document.json`.
+other than `attempt.json` and `document.json`. It recomputes the attempt ID from the stored run ID and
+caller key and requires the directory basename to equal that ID. Attempt keys are bounded safe labels;
+the key and derived attempt/run IDs are not exposed to provider, approval, or sanitizer requests.
 
 A provider must not receive a bundle that failed preflight validation, and a provider-facing read
 must not reopen the mutable source bundle after staging.

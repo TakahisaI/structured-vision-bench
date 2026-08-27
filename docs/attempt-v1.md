@@ -22,13 +22,16 @@ svbench run \
   [--model <id>] \
   [--effort <level>] \
   [--max-tokens <n>] \
+  [--attempt-key <label>] \
   [--attempt-root <directory>] \
   [--json]
 ```
 
-`--attempt-root` defaults to `attempts` below the current working directory. A successful run
-creates a child directory named by the run identity. The CLI prints the case and attempt IDs, never
-the model document, input contents, local absolute paths, or provider diagnostics.
+`--attempt-key` is a caller-owned safe label (`[A-Za-z0-9._-]`, 1–64 characters) and defaults to
+`single`. `--attempt-root` defaults to `attempts` below the current working directory. A successful
+run creates a child directory named by the derived attempt identity. The CLI prints the case,
+attempt-key, attempt, and run identities, never the model document, input contents, local absolute
+paths, or provider diagnostics.
 
 Exit status is `0` for a finalized attempt, `1` for a classified bundle/provider/approval/sanitizer
 failure, and `2` for invalid CLI arguments or an unexpected internal failure. In JSON mode the
@@ -68,7 +71,7 @@ summary is written to stdout; human mode writes failures to stderr.
    comparison, or case identity.
 6. **Complete verification and staging.** After approval, the runner revalidates the complete bundle,
    verifies all declared digests and truth projection, and copies image/system/instruction bytes into a
-   private per-run staging directory. It then claims `<attempt-root>/<run-id>` with a non-recursive
+   private per-run staging directory. It then claims `<attempt-root>/<attempt-id>` with a non-recursive
    exclusive directory create. An existing entry is `attempt_exists`; only the process that wins this
    claim may build or clean up the unpublished attempt. The claim contains a private nonce marker
    until the final manifest publication. The provider receives callbacks over staged inputs, never a
@@ -101,7 +104,7 @@ summary is written to stdout; human mode writes failures to stderr.
     remove only files owned by the claim, only when the claim owner is proven, and only while
     `attempt.json` does not exist. The owner marker is then removed and a no-replace hard link
     publishes the complete external pending manifest as `attempt.json`. That final link is the
-    one-syscall visibility point: the claimed run directory changes directly from `document.json` to
+    one-syscall visibility point: the claimed attempt directory changes directly from `document.json` to
     the exact final two-file shape. Removing the
     external pending source is a separate post-publication best-effort cleanup, keyed by its recorded
     file identity, and cannot turn a published attempt into a failure.
@@ -159,6 +162,26 @@ optional tuple members use an explicit presence tag, so absent and null/empty va
 Changing a requested execution or security setting produces a different run ID without changing
 `caseInputIdentity`. A route is a stable provider label, not an endpoint or account identifier.
 
+### Attempt instance identity
+
+`runId` identifies stable execution settings; it is not a uniqueness nonce. A caller selects one
+instance of that run with `attemptKey`. Attempt identity v1 is:
+
+```text
+SHA256(
+  "svbench-attempt-v1" ||
+  LP_ASCII(runId) ||
+  LP_UTF8(attemptKey)
+)
+```
+
+The lowercase-hex result is `attemptId`. The manifest records `attemptIdentityVersion: 1`,
+`attemptKey`, `attemptId`, and `runId` separately. The default key `single` preserves one-attempt
+behavior for callers that do not select a key. The same run with different keys may coexist; the
+same run and key derives the same destination and is rejected as `attempt_exists` before provider
+invocation. `attemptKey`, `attemptId`, and `runId` are runner metadata and are not added to provider,
+approval, or sanitizer requests.
+
 ### Consumer sanitizer requirement
 
 Every run carries a consumer-owned `sanitizerRequirement` decision. The consumer supplies a verifier
@@ -197,7 +220,7 @@ This is not a claim of full Draft 2020-12 coverage.
 A finalized attempt contains only:
 
 ```text
-<attempt-root>/<run-id>/
+<attempt-root>/<attempt-id>/
 ├── attempt.json
 └── document.json
 ```
@@ -205,7 +228,7 @@ A finalized attempt contains only:
 `attempt.json` conforms to [`schemas/attempt-v1.schema.json`](../schemas/attempt-v1.schema.json).
 It records:
 
-- attempt/run/bundle versions and IDs;
+- attempt identity, attempt/run/bundle versions, the caller key, and separate attempt/run IDs;
 - case ID, document kind, bundle manifest digest, and the four provider-input digests/media types;
 - the complete case input identity;
 - the consumer-owned sanitizer requirement decision and its decision digest;
@@ -226,8 +249,9 @@ findings never persist a provider-supplied path.
 
 `readAttempt()` treats the files as untrusted. It rejects symlinks, size violations, invalid strict
 JSON, unknown manifest fields or directory entries, non-private modes, document digest changes, case
-identity changes, run identity changes, consumer-decision changes, and sanitizer policy-binding
-changes. Pass the consumer verifier in `readAttempt(path, { requirementVerifier })` to rederive the
+identity changes, attempt key/ID changes, run identity changes, attempt-directory name mismatches,
+consumer-decision changes, and sanitizer policy-binding changes. Pass the consumer verifier in
+`readAttempt(path, { requirementVerifier })` to rederive the
 decision from `documentKind`; without it, the stored decision digest and shape are still checked. It
 hashes the exact stored document bytes, not a reserialized value.
 
@@ -237,7 +261,7 @@ manifest is an unpublished claim and is rejected as an attempt. Each external `.
 staging directory belongs to one run and is never part of a formal attempt; there is no shared
 staging-directory lifecycle between runs. The runner uses a no-follow attempt root handle and
 device/inode checks through the last pre-publication validation. The Node-only
-contract prevents competing harness writers from replacing a claimed run directory. Final document
+contract prevents competing harness writers from replacing a claimed attempt directory. Final document
 and manifest creation use no-replace filesystem operations, and cleanup uses owned-file unlink plus
 non-recursive directory removal so a newly created final file cannot be deleted by cleanup. Protection
 against an adversarial same-UID process replacing the attempt root in the final path-based syscall
@@ -249,7 +273,7 @@ The implementation is split into these public modules:
 
 - `src/runner/run.ts` — lifecycle and finalization;
 - `src/runner/types.ts` — provider, approval, sanitizer, and run option types;
-- `src/runner/identity.ts` — case, policy, and run identity helpers;
+- `src/runner/identity.ts` — case, policy, run, and attempt identity helpers;
 - `src/runner/attempt.ts` — attempt writer/reader and exact document digest;
 - `src/runner/sanitizer.ts` — policy envelope preflight and test helper;
 - `src/provider/mock.ts` — deterministic synthetic provider double;

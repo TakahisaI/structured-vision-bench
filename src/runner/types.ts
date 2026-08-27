@@ -207,6 +207,7 @@ export type RunBundleOptions = {
   requestedModel?: string | null;
   requestedEffort?: string | null;
   maxTokens?: number | null;
+  attemptKey?: string;
   harnessVersion?: string;
   harnessCommit?: string | null;
   sanitizerRequirement: SanitizerRequirementSettings;
@@ -220,6 +221,7 @@ export type RunResult = {
   attemptDirectory: string;
   attemptId: string;
   runId: string;
+  attemptKey: string;
   caseId: string;
   documentSha256: string;
 };

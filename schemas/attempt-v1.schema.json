@@ -6,6 +6,8 @@
   "additionalProperties": false,
   "required": [
     "attemptVersion",
+    "attemptIdentityVersion",
+    "attemptKey",
     "attemptId",
     "runId",
     "bundleVersion",
@@ -25,6 +27,13 @@
   "properties": {
     "attemptVersion": {
       "const": 1
+    },
+    "attemptIdentityVersion": {
+      "const": 1
+    },
+    "attemptKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,64}$"
     },
     "attemptId": {
       "$ref": "#/$defs/digest"

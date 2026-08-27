@@ -20,6 +20,7 @@ import {
 import { RunnerError } from "./errors.js";
 import {
   computeCaseInputIdentity,
+  computeAttemptIdentity,
   createSanitizerRequirementDecision,
   computeRunIdentity,
   type CaseInputIdentity,
@@ -54,6 +55,7 @@ import {
 } from "../bundle/json.js";
 
 export const DEFAULT_HARNESS_VERSION = "structured-vision-bench-runner-v1";
+export const DEFAULT_ATTEMPT_KEY = "single";
 const DEFAULT_APPROVAL_TIMEOUT_MS = 30_000;
 const DEFAULT_SANITIZER_TIMEOUT_MS = 30_000;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
@@ -82,6 +84,7 @@ type ValidatedSanitizerImplementation = Readonly<{
 
 export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
   const requested = normalizeRequestedSettings(options);
+  const attemptKey = normalizeAttemptKey(options.attemptKey);
   const sanitizerImplementation = validateSanitizerImplementation(options.sanitizer);
   const sanitizerSettings = snapshotSanitizerSettings(
     options.sanitizer,
@@ -162,6 +165,7 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       consumerSourceCommit: requirement.consumerSourceCommit,
       requirementDecisionDigest: requirement.requirementDecisionDigest,
     });
+    const attemptIdentity = computeAttemptIdentity({ runId, attemptKey });
 
     const approval = await executeApproval(
       approvalPlan,
@@ -177,7 +181,7 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     assertBundleMatchesPreparation(prepared, loaded, identity);
     attemptRootHandle = await ensureAttemptRoot(attemptRoot, rootGuard.assertStable);
     await assertAttemptRootHandleStable(attemptRootHandle, attemptRoot, rootGuard);
-    const attemptDirectory = path.join(attemptRoot, runId);
+    const attemptDirectory = path.join(attemptRoot, attemptIdentity.attemptId);
     const claim = await claimAttemptDirectory(attemptDirectory);
     attemptClaim = claim;
     await assertAttemptRootHandleStable(attemptRootHandle, attemptRoot, rootGuard);
@@ -218,7 +222,9 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     const finishedAt = new Date().toISOString();
     const manifest: AttemptManifestBase = {
       attemptVersion: 1,
-      attemptId: runId,
+      attemptIdentityVersion: attemptIdentity.attemptIdentityVersion,
+      attemptKey: attemptIdentity.attemptKey,
+      attemptId: attemptIdentity.attemptId,
       runId,
       bundleVersion: 1,
       caseId: loaded.caseId,
@@ -285,8 +291,9 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     );
     return {
       attemptDirectory: claim.attemptDirectory,
-      attemptId: runId,
+      attemptId: attemptIdentity.attemptId,
       runId,
+      attemptKey: attemptIdentity.attemptKey,
       caseId: loaded.caseId,
       documentSha256: artifact.documentSha256,
     };
@@ -306,6 +313,14 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     await attemptRootHandle?.close().catch(() => undefined);
     await rm(temporaryParent, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+function normalizeAttemptKey(value: unknown): string {
+  const attemptKey = value === undefined ? DEFAULT_ATTEMPT_KEY : value;
+  if (typeof attemptKey !== "string" || !/^[A-Za-z0-9._-]{1,64}$/u.test(attemptKey)) {
+    throw new RunnerError("run_configuration_invalid", "attempt key is invalid");
+  }
+  return attemptKey;
 }
 
 function assertBundleMatchesPreparation(

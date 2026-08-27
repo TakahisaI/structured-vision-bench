@@ -58,14 +58,17 @@ Run the public synthetic fixture with the deterministic mock provider:
   --model mock-v1 \
   --effort medium \
   --max-tokens 512 \
+  --attempt-key dev-001 \
   --attempt-root /tmp/svbench-attempts \
   --json
 ```
 
-The runner exclusively claims the run-identity directory before provider work. The successful attempt
+The runner derives a stable run identity from execution settings, then derives a caller-keyed
+attempt identity (`--attempt-key` defaults to `single`) and exclusively claims that directory before
+provider work. Different keys allow repeat instances of the same run to coexist. The successful attempt
 contains only `attempt.json` and the formal `document.json` under the chosen attempt root; the final
 manifest is published with a no-replace filesystem operation only after its complete bytes have been
-validated. The pending manifest is staged outside the final run directory in a private
+validated. The pending manifest is staged outside the final attempt directory in a private
 `.claim-<nonce>/` directory, so the final manifest link is the sole transition to the reader-visible
 shape; cleanup of that source is best effort after publication. When the consumer decision requires a
 sanitizer, that document is the sanitizer output.
