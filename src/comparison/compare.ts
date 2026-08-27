@@ -163,6 +163,16 @@ type MutableState = {
 };
 
 export async function compareAttempt(options: CompareAttemptOptions): Promise<ComparisonResult> {
+  if (
+    options.mode !== undefined &&
+    options.mode !== "normal" &&
+    options.mode !== "rescore"
+  ) {
+    throw new ComparisonError(
+      "comparison_configuration_invalid",
+      "comparison mode is invalid",
+    );
+  }
   const mode = options.mode ?? "normal";
   const rescoreReason = normalizeRescoreReason(mode, options.rescoreReason);
   const [bundle, attempt] = await Promise.all([

@@ -106,7 +106,37 @@
             }
           ]
         }
-      }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "rescored",
+            "rescoreReason"
+          ],
+          "properties": {
+            "rescored": {
+              "const": false
+            },
+            "rescoreReason": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "required": [
+            "rescored",
+            "rescoreReason"
+          ],
+          "properties": {
+            "rescored": {
+              "const": true
+            },
+            "rescoreReason": {
+              "$ref": "#/$defs/safeLabel"
+            }
+          }
+        }
+      ]
     },
     "fields": {
       "type": "array",

@@ -100,6 +100,15 @@ test("compares a complete match and renders value-free Markdown", async () => {
     );
     assert.deepEqual(validateJsonSchemaDefinition(resultSchema), []);
     assert.deepEqual(validateJsonSchema(resultSchema, result as unknown as JsonValue), []);
+    const mislabeledNormalResult = structuredClone(result) as Record<string, any>;
+    mislabeledNormalResult.identity.rescoreReason = "synthetic-reason";
+    assert.notDeepEqual(
+      validateJsonSchema(resultSchema, mislabeledNormalResult as JsonValue),
+      [],
+    );
+    const reasonlessRescoreResult = structuredClone(result) as Record<string, any>;
+    reasonlessRescoreResult.identity.rescored = true;
+    assert.notDeepEqual(validateJsonSchema(resultSchema, reasonlessRescoreResult as JsonValue), []);
 
     const markdown = renderComparisonMarkdown(result);
     assert.match(markdown, /Field matched\/total: 13\/13/u);
@@ -464,6 +473,30 @@ test("allows explicit truth rescoring but rejects provider-input identity change
       }),
       (error: unknown) =>
         error instanceof ComparisonError && error.code === "comparison_bundle_identity_mismatch",
+    );
+  });
+});
+
+test("rejects unknown comparison modes without relaxing bundle identity", async () => {
+  await withBundle(async ({ bundle, attempts, temporary }) => {
+    const attemptDirectory = await runDocument(bundle, attempts, COMPLETE_DOCUMENT);
+    const scoringBundle = path.join(temporary, "unknown-mode-scoring-bundle");
+    await cp(bundle, scoringBundle, { recursive: true });
+    await rewriteTruth(scoringBundle, (truth) => {
+      truth.totalAmount = 999;
+    });
+
+    await assert.rejects(
+      compareAttempt({
+        bundleDirectory: scoringBundle,
+        attemptDirectory,
+        mode: "rescroe" as never,
+        rescoreReason: "synthetic-truth-fix",
+      }),
+      (error: unknown) =>
+        error instanceof ComparisonError &&
+        error.code === "comparison_configuration_invalid" &&
+        error.message === "comparison mode is invalid",
     );
   });
 });
