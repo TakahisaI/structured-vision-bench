@@ -26,7 +26,12 @@ import {
   type SanitizerRequirementSettings,
 } from "../src/runner/identity.js";
 import { runBundle } from "../src/runner/run.js";
-import type { ApprovalGate, ApprovalRequest, ApprovalSettings } from "../src/runner/types.js";
+import type {
+  ApprovalGate,
+  ApprovalRequest,
+  ApprovalResponse,
+  ApprovalSettings,
+} from "../src/runner/types.js";
 
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
 const FAKE_COMMAND_PROVIDER = path.resolve("test/fixtures/fake-command-provider.mjs");
@@ -68,6 +73,24 @@ test("validates command provider configuration at the public factory boundary", 
       error.code === "provider_invalid" &&
       !error.message.includes("getter"),
   );
+  for (const envAllowlist of [
+    ["svbench_command_request_directory"],
+    ["Svbench_Command_Operation"],
+    ["PATH", "Path"],
+  ]) {
+    assert.throws(
+      () =>
+        createCommandProvider({
+          executable: process.execPath,
+          argv: [FAKE_COMMAND_PROVIDER, "success"],
+          envAllowlist,
+          providerId: "synthetic-command",
+          route: "local-command",
+          implementationVersion: "synthetic-v1",
+        }),
+      (error: unknown) => error instanceof RunnerError && error.code === "provider_invalid",
+    );
+  }
 });
 
 test("uses the snapshotted command configuration after source mutation", async () => {
@@ -203,27 +226,129 @@ test("binds command responses to phase, input identity, requirement, and approva
   }
 });
 
-test("requires the private adapter to reattest current transport before input access", async () => {
+test("requires both adapter transport attestations before input access", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
   const bundle = path.join(temporary, "bundle");
   try {
     await cp(FIXTURE, bundle, { recursive: true });
+    const requirement = syntheticRequirement();
+    const mismatches = [
+      { mode: "transport-mismatch", expectedCode: "approval_response_invalid" },
+      { mode: "inline-transport-mismatch", expectedCode: "provider_failed" },
+      { mode: "inline-working-file", expectedCode: "provider_failed" },
+    ];
+    for (const [index, mismatch] of mismatches.entries()) {
+      const attempts = path.join(temporary, `attempts-${index}`);
+      await assert.rejects(
+        runBundle({
+          bundleDirectory: bundle,
+          attemptRoot: attempts,
+          provider: commandProvider(mismatch.mode),
+          phase: PHASE,
+          approval: approvalSettings(requirement),
+          sanitizerRequirement: requirement,
+        }),
+        (error: unknown) =>
+          error instanceof RunnerError && error.code === mismatch.expectedCode,
+      );
+      assert.deepEqual(await readdir(attempts), []);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("isolates every transport reattestation from materialized request files", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const requirement = syntheticRequirement();
+    const approval = approvalSettings(requirement);
+    for (const [index, mode] of [
+      "transport-sibling-read",
+      "transport-sibling-write",
+    ].entries()) {
+      const result = await runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: path.join(temporary, `attempts-${index}`),
+        provider: commandProvider(mode),
+        phase: PHASE,
+        approval,
+        sanitizerRequirement: requirement,
+      });
+      await readAttempt(result.attemptDirectory);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("reattests and releases approved input to the same adapter process", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  const marker = path.join(temporary, "synthetic-handshake-marker");
+  const previousMarker = process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER = marker;
+    const requirement = syntheticRequirement();
+    const result = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: path.join(temporary, "attempts"),
+      provider: commandProvider("success", {
+        envAllowlist: ["SYNTHETIC_COMMAND_HANDSHAKE_MARKER"],
+      }),
+      phase: PHASE,
+      approval: approvalSettings(requirement),
+      sanitizerRequirement: requirement,
+    });
+    await readAttempt(result.attemptDirectory);
+    const lines = (await readFile(marker, "utf8")).trim().split("\n");
+    assert.equal(lines.length, 2);
+    const reattestPid = lines[0]?.match(/^reattest:(\d+)$/u)?.[1];
+    const invokePid = lines[1]?.match(/^invoke:(\d+)$/u)?.[1];
+    assert.notEqual(reattestPid, undefined);
+    assert.equal(invokePid, reattestPid);
+  } finally {
+    if (previousMarker === undefined) {
+      delete process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER;
+    } else {
+      process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER = previousMarker;
+    }
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("settles request materialization before cleanup when inline reattestation exits", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  const isolatedTemporaryRoot = path.join(temporary, "command-tmp");
+  const previousTmpdir = process.env.TMPDIR;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    await mkdir(isolatedTemporaryRoot, { mode: 0o700 });
+    process.env.TMPDIR = isolatedTemporaryRoot;
+    assert.equal(os.tmpdir(), isolatedTemporaryRoot);
     const requirement = syntheticRequirement();
     const attempts = path.join(temporary, "attempts");
     await assert.rejects(
       runBundle({
         bundleDirectory: bundle,
         attemptRoot: attempts,
-        provider: commandProvider("transport-mismatch"),
+        provider: commandProvider("inline-exit-after-attestation"),
         phase: PHASE,
         approval: approvalSettings(requirement),
         sanitizerRequirement: requirement,
       }),
       (error: unknown) =>
-        error instanceof RunnerError && error.code === "approval_response_invalid",
+        error instanceof RunnerError && error.code === "provider_failed",
     );
     assert.deepEqual(await readdir(attempts), []);
+    assert.deepEqual(await readdir(isolatedTemporaryRoot), []);
   } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmpdir;
     await rm(temporary, { recursive: true, force: true });
   }
 });
@@ -530,6 +655,20 @@ test("does not spawn the command process before approval or Phase B requirements
       (error: unknown) => error instanceof RunnerError && error.code === "sanitizer_required",
     );
     await assert.rejects(readFile(marker), /ENOENT/u);
+
+    const provider = commandProvider("success", {
+      envAllowlist: ["SYNTHETIC_COMMAND_MARKER"],
+    });
+    for (const flags of [
+      { sanitizerRequired: true, policyRequired: false },
+      { sanitizerRequired: false, policyRequired: true },
+    ]) {
+      await assert.rejects(
+        provider.prepareTransport!(directApprovalResponse(requirement, flags)),
+        /command provider transport preparation failed/u,
+      );
+      await assert.rejects(readFile(marker), /ENOENT/u);
+    }
   } finally {
     if (previousMarker === undefined) delete process.env.SYNTHETIC_COMMAND_MARKER;
     else process.env.SYNTHETIC_COMMAND_MARKER = previousMarker;
@@ -702,6 +841,36 @@ function approvalResponse(request: ApprovalRequest) {
     sanitizerRequirementReason: request.sanitizerRequirement.sanitizerRequirementReason,
     checkedAt: "2026-01-01T00:00:00Z",
     expiresAt: "2099-01-01T00:00:00Z",
+  };
+}
+
+function directApprovalResponse(
+  requirement: SanitizerRequirementSettings,
+  overrides: Partial<ApprovalResponse> = {},
+): ApprovalResponse {
+  const settings = approvalSettings(requirement);
+  return {
+    responseVersion: 1,
+    approved: true,
+    gateId: settings.expectedGateId!,
+    protocolVersion: 1,
+    snapshotDigest: settings.snapshotDigest!,
+    runtimeBindingDigest: settings.runtimeBindingDigest!,
+    runtimeBindingIdentity: settings.runtimeBindingIdentity!,
+    approvedScopeDigest: settings.approvedScopeDigest!,
+    approvedScopeIdentity: settings.approvedScopeIdentity!,
+    phase: settings.phase!,
+    requirementVerifierId: requirement.decision.requirementVerifierId,
+    requirementVerifierVersion: requirement.decision.requirementVerifierVersion,
+    consumerSourceCommit: requirement.decision.consumerSourceCommit,
+    requirementDecisionDigest: requirement.decision.requirementDecisionDigest,
+    sanitizerRequirementVersion: requirement.decision.sanitizerRequirementVersion,
+    sanitizerRequired: requirement.decision.sanitizerRequired,
+    policyRequired: requirement.decision.policyRequired,
+    sanitizerRequirementReason: requirement.decision.sanitizerRequirementReason,
+    checkedAt: "2026-01-01T00:00:00Z",
+    expiresAt: "2099-01-01T00:00:00Z",
+    ...overrides,
   };
 }
 

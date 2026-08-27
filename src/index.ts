@@ -13,6 +13,7 @@ export {
 } from "./provider/command.js";
 export type {
   CommandProviderInputReference,
+  CommandProviderInvokeRequestV1,
   CommandProviderOptions,
   CommandProviderRequestManifestV1,
   CommandProviderResponseV1,

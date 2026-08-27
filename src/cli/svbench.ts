@@ -288,16 +288,25 @@ function parseProvider(input: {
   }
   const argv = input.argv ?? [];
   const envAllowlist = input.envAllowlist ?? [];
+  const normalizedEnvironmentNames = new Set<string>();
+  const environmentInvalid = envAllowlist.some((value) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(value)) return true;
+    const normalized = value.toUpperCase();
+    if (
+      normalized === COMMAND_PROVIDER_REQUEST_DIRECTORY_ENV ||
+      normalized === COMMAND_PROVIDER_OPERATION_ENV ||
+      normalizedEnvironmentNames.has(normalized)
+    ) {
+      return true;
+    }
+    normalizedEnvironmentNames.add(normalized);
+    return false;
+  });
   if (
     argv.length > 64 ||
     argv.some((value) => value.length > 240) ||
     envAllowlist.length > 64 ||
-    envAllowlist.some(
-      (value) =>
-        !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(value) ||
-        value === COMMAND_PROVIDER_REQUEST_DIRECTORY_ENV ||
-        value === COMMAND_PROVIDER_OPERATION_ENV,
-    )
+    environmentInvalid
   ) {
     throw new Error();
   }

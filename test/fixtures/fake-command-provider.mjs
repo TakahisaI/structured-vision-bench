@@ -6,14 +6,15 @@ import path from "node:path";
 const mode = process.argv[2] ?? "success";
 const operation = process.env.SVBENCH_COMMAND_OPERATION;
 if (operation !== "prepare-transport" && operation !== "invoke") fail();
-const requestDirectory = process.env.SVBENCH_COMMAND_REQUEST_DIRECTORY;
+let requestDirectory = process.env.SVBENCH_COMMAND_REQUEST_DIRECTORY;
+const stdinLines = readLines(process.stdin)[Symbol.asyncIterator]();
 if (process.env.SYNTHETIC_COMMAND_MARKER !== undefined) {
   await appendFile(process.env.SYNTHETIC_COMMAND_MARKER, `${operation}\n`, "utf8");
 }
 
 if (operation === "prepare-transport") {
   if (requestDirectory !== undefined || (await readdir(".")).length !== 0) fail();
-  const transportRequest = JSON.parse(await readStdin());
+  const transportRequest = JSON.parse(await readStdinLine());
   if (
     transportRequest.requestVersion !== 1 ||
     transportRequest.operation !== "prepareTransport"
@@ -21,11 +22,56 @@ if (operation === "prepare-transport") {
     fail();
   }
   const transportResponse = transportRequest.approval;
+  await probeTransportIsolation();
   if (mode === "transport-mismatch") {
     transportResponse.runtimeBindingDigest = "0".repeat(64);
   }
   process.stdout.write(`${JSON.stringify(transportResponse)}\n`);
   process.exit(0);
+}
+if (requestDirectory === undefined) {
+  if ((await readdir(".")).length !== 0) fail();
+  const transportRequest = JSON.parse(await readStdinLine());
+  if (
+    transportRequest.requestVersion !== 1 ||
+    transportRequest.operation !== "prepareTransport"
+  ) {
+    fail();
+  }
+  const transportResponse = transportRequest.approval;
+  await probeTransportIsolation();
+  if (mode === "inline-transport-mismatch") {
+    transportResponse.runtimeBindingDigest = "0".repeat(64);
+  }
+  if (mode === "inline-working-file") {
+    await writeFile("synthetic-unexpected", "synthetic working data\n", "utf8");
+  }
+  if (process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER !== undefined) {
+    await appendFile(
+      process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER,
+      `reattest:${process.pid}\n`,
+      "utf8",
+    );
+  }
+  await writeStdoutLine(transportResponse);
+  if (mode === "inline-exit-after-attestation") process.exit(0);
+  const invokeRequest = JSON.parse(await readStdinLine());
+  if (
+    invokeRequest.requestVersion !== 1 ||
+    invokeRequest.operation !== "invoke" ||
+    typeof invokeRequest.requestDirectory !== "string" ||
+    !path.isAbsolute(invokeRequest.requestDirectory)
+  ) {
+    fail();
+  }
+  requestDirectory = invokeRequest.requestDirectory;
+  if (process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER !== undefined) {
+    await appendFile(
+      process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER,
+      `invoke:${process.pid}\n`,
+      "utf8",
+    );
+  }
 }
 if (requestDirectory === undefined || !path.isAbsolute(requestDirectory)) fail();
 const expectedFiles = [
@@ -185,8 +231,53 @@ function fail() {
   process.exit(9);
 }
 
-async function readStdin() {
-  const chunks = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
-  return Buffer.concat(chunks).toString("utf8");
+async function readStdinLine() {
+  const next = await stdinLines.next();
+  if (next.done) fail();
+  return next.value;
+}
+
+async function* readLines(stream) {
+  let pending = "";
+  for await (const chunk of stream) {
+    pending += Buffer.from(chunk).toString("utf8");
+    for (;;) {
+      const newline = pending.indexOf("\n");
+      if (newline === -1) break;
+      yield pending.slice(0, newline);
+      pending = pending.slice(newline + 1);
+    }
+  }
+  if (pending.length !== 0) fail();
+}
+
+async function probeTransportIsolation() {
+  if (mode === "transport-sibling-read") {
+    try {
+      await readFile(path.join("..", "request", "system.txt"));
+      fail();
+    } catch (error) {
+      if (error?.code !== "ENOENT") fail();
+    }
+  }
+  if (mode === "transport-sibling-write") {
+    try {
+      await writeFile(
+        path.join("..", "request", "instruction.txt"),
+        "synthetic transport tamper\n",
+        "utf8",
+      );
+    } catch (error) {
+      if (error?.code !== "ENOENT") fail();
+    }
+  }
+}
+
+async function writeStdoutLine(value) {
+  await new Promise((resolve, reject) => {
+    process.stdout.write(`${JSON.stringify(value)}\n`, (error) => {
+      if (error === undefined || error === null) resolve();
+      else reject(error);
+    });
+  });
 }

@@ -130,6 +130,12 @@ export type CommandProviderTransportRequestV1 = {
   approval: ApprovalResponse;
 };
 
+export type CommandProviderInvokeRequestV1 = {
+  requestVersion: 1;
+  operation: "invoke";
+  requestDirectory: string;
+};
+
 type ValidatedCommandProviderOptions = Readonly<{
   executable: string;
   argv: string[];
@@ -156,6 +162,8 @@ export function createCommandProvider(options: CommandProviderOptions): Provider
         const snapshot = snapshotApprovalResponse(approval);
         if (
           !snapshot.approved ||
+          snapshot.sanitizerRequired ||
+          snapshot.policyRequired ||
           (snapshot.expiresAt !== undefined &&
             snapshot.expiresAt !== null &&
             Date.parse(snapshot.expiresAt) <= Date.now())
@@ -211,19 +219,29 @@ function validateOptions(options: CommandProviderOptions): ValidatedCommandProvi
     for (let index = 0; index < envAllowlistLength; index += 1) {
       envAllowlist.push(sourceEnvAllowlist[index]);
     }
+    const normalizedEnvironmentNames = new Set<string>();
+    const environmentInvalid = envAllowlist.some((name) => {
+      if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(name)) {
+        return true;
+      }
+      const normalized = name.toUpperCase();
+      if (
+        normalized === COMMAND_PROVIDER_REQUEST_DIRECTORY_ENV ||
+        normalized === COMMAND_PROVIDER_OPERATION_ENV ||
+        normalizedEnvironmentNames.has(normalized)
+      ) {
+        return true;
+      }
+      normalizedEnvironmentNames.add(normalized);
+      return false;
+    });
     if (
       typeof executable !== "string" ||
       executable.length === 0 ||
       executable.length > 240 ||
       !path.isAbsolute(executable) ||
       argv.some((argument) => typeof argument !== "string" || argument.length > 240) ||
-      envAllowlist.some(
-        (name) =>
-          typeof name !== "string" ||
-          !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(name) ||
-          name === COMMAND_PROVIDER_REQUEST_DIRECTORY_ENV ||
-          name === COMMAND_PROVIDER_OPERATION_ENV,
-      ) ||
+      environmentInvalid ||
       !Number.isSafeInteger(outputLimitBytes) ||
       outputLimitBytes < 1 ||
       outputLimitBytes > MAX_COMMAND_PROVIDER_OUTPUT_LIMIT_BYTES ||
@@ -259,7 +277,8 @@ async function invokeCommandProvider(
   let schemaBytes: Buffer | undefined;
   let systemBytes: Buffer | undefined;
   let instructionBytes: Buffer | undefined;
-  let temporaryRoot: string | undefined;
+  let requestRoot: string | undefined;
+  let workingRoot: string | undefined;
   try {
     imageBytes = await readInputBytes(request.image.readBytes, signal);
     schemaBytes = await readInputBytes(request.schemaInput.readBytes, signal);
@@ -272,51 +291,53 @@ async function invokeCommandProvider(
       instruction: instructionBytes,
     };
     validateInputBytes(inputBytes, request, context);
-
-    temporaryRoot = await mkdtemp(path.join(tmpdir(), "svbench-command-provider-"));
-    await chmod(temporaryRoot, DIRECTORY_MODE);
-    await assertPrivateDirectory(temporaryRoot);
-    const requestDirectory = path.join(temporaryRoot, "request");
-    const workingDirectory = path.join(temporaryRoot, "work");
-    await mkdir(requestDirectory, { mode: DIRECTORY_MODE });
-    await mkdir(workingDirectory, { mode: DIRECTORY_MODE });
-    await assertPrivateDirectory(requestDirectory);
-    await assertPrivateDirectory(workingDirectory);
+    const environment = snapshotAllowedEnvironment(options);
     const manifest = createRequestManifest(options, request, context);
     const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`, "utf8");
     if (manifestBytes.byteLength > MAX_REQUEST_MANIFEST_BYTES) throw new Error();
-    await writePrivateFile(path.join(requestDirectory, INPUT_FILES.image), inputBytes.image);
-    await writePrivateFile(path.join(requestDirectory, INPUT_FILES.schema), inputBytes.schema);
-    await writePrivateFile(path.join(requestDirectory, INPUT_FILES.system), inputBytes.system);
-    await writePrivateFile(
-      path.join(requestDirectory, INPUT_FILES.instruction),
-      inputBytes.instruction,
-    );
-    await writePrivateFile(
-      path.join(requestDirectory, REQUEST_FILE),
-      manifestBytes,
-    );
-    await assertRequestDirectory(requestDirectory);
-    if ((await readdir(workingDirectory)).length !== 0) throw new Error();
-    const environment = snapshotAllowedEnvironment(options);
-    if (context.approval !== null) {
-      await prepareCommandTransport(
-        options,
-        context.approval,
-        signal,
-        workingDirectory,
-        environment,
+    const materializeRequest = async (): Promise<string> => {
+      if (requestRoot !== undefined) throw new Error();
+      requestRoot = await mkdtemp(path.join(tmpdir(), "svbench-command-request-"));
+      await chmod(requestRoot, DIRECTORY_MODE);
+      await assertPrivateDirectory(requestRoot);
+      const requestDirectory = path.join(requestRoot, "request");
+      await mkdir(requestDirectory, { mode: DIRECTORY_MODE });
+      await assertPrivateDirectory(requestDirectory);
+      await writePrivateFile(path.join(requestDirectory, INPUT_FILES.image), inputBytes.image);
+      await writePrivateFile(path.join(requestDirectory, INPUT_FILES.schema), inputBytes.schema);
+      await writePrivateFile(path.join(requestDirectory, INPUT_FILES.system), inputBytes.system);
+      await writePrivateFile(
+        path.join(requestDirectory, INPUT_FILES.instruction),
+        inputBytes.instruction,
       );
-      if ((await readdir(workingDirectory)).length !== 0) throw new Error();
-    }
-    const responseBytes = await runCommand(
-      options,
-      requestDirectory,
-      workingDirectory,
-      environment,
-      context.approval,
-      signal,
-    );
+      await writePrivateFile(path.join(requestDirectory, REQUEST_FILE), manifestBytes);
+      await assertRequestDirectory(requestDirectory);
+      return requestDirectory;
+    };
+
+    workingRoot = await mkdtemp(path.join(tmpdir(), "svbench-command-work-"));
+    await chmod(workingRoot, DIRECTORY_MODE);
+    await assertPrivateDirectory(workingRoot);
+    const workingDirectory = workingRoot;
+    if ((await readdir(workingDirectory)).length !== 0) throw new Error();
+    const responseBytes =
+      context.approval === null
+        ? await runCommand(
+            options,
+            await materializeRequest(),
+            workingDirectory,
+            environment,
+            null,
+            signal,
+          )
+        : await runApprovedCommand(
+            options,
+            workingDirectory,
+            environment,
+            context.approval,
+            materializeRequest,
+            signal,
+          );
     const response = parseResponse(responseBytes, options, context);
     return {
       rawDocument: response.document,
@@ -331,9 +352,7 @@ async function invokeCommandProvider(
     schemaBytes?.fill(0);
     systemBytes?.fill(0);
     instructionBytes?.fill(0);
-    if (temporaryRoot !== undefined) {
-      await rm(temporaryRoot, { recursive: true, force: true });
-    }
+    await removeTemporaryRoots([requestRoot, workingRoot]);
   }
 }
 
@@ -581,11 +600,42 @@ async function runCommand(
   );
 }
 
+async function runApprovedCommand(
+  options: ValidatedCommandProviderOptions,
+  workingDirectory: string,
+  allowedEnvironment: ReadonlyArray<readonly [string, string]>,
+  approval: ApprovalResponse,
+  materializeRequest: () => Promise<string>,
+  signal: AbortSignal | undefined,
+): Promise<Buffer> {
+  assertActive(signal);
+  assertApprovalActive(approval);
+  const transportRequest: CommandProviderTransportRequestV1 = {
+    requestVersion: 1,
+    operation: "prepareTransport",
+    approval,
+  };
+  const transportRequestBytes = Buffer.from(`${JSON.stringify(transportRequest)}\n`, "utf8");
+  if (transportRequestBytes.byteLength > MAX_REQUEST_MANIFEST_BYTES) throw new Error();
+  try {
+    return await runApprovedChildProcess(
+      options,
+      workingDirectory,
+      createChildEnvironment(allowedEnvironment, "invoke"),
+      transportRequestBytes,
+      approval,
+      materializeRequest,
+      signal,
+    );
+  } finally {
+    transportRequestBytes.fill(0);
+  }
+}
+
 async function prepareCommandTransport(
   options: ValidatedCommandProviderOptions,
   approval: ApprovalResponse,
   signal?: AbortSignal,
-  existingWorkingDirectory?: string,
   existingEnvironment?: ReadonlyArray<readonly [string, string]>,
 ): Promise<ApprovalResponse> {
   let temporaryRoot: string | undefined;
@@ -593,15 +643,12 @@ async function prepareCommandTransport(
   try {
     assertActive(signal);
     assertApprovalActive(approval);
-    let workingDirectory = existingWorkingDirectory;
-    if (workingDirectory === undefined) {
-      temporaryRoot = await mkdtemp(path.join(tmpdir(), "svbench-command-transport-"));
-      await chmod(temporaryRoot, DIRECTORY_MODE);
-      await assertPrivateDirectory(temporaryRoot);
-      workingDirectory = path.join(temporaryRoot, "work");
-      await mkdir(workingDirectory, { mode: DIRECTORY_MODE });
-      await assertPrivateDirectory(workingDirectory);
-    }
+    temporaryRoot = await mkdtemp(path.join(tmpdir(), "svbench-command-transport-"));
+    await chmod(temporaryRoot, DIRECTORY_MODE);
+    await assertPrivateDirectory(temporaryRoot);
+    const workingDirectory = path.join(temporaryRoot, "work");
+    await mkdir(workingDirectory, { mode: DIRECTORY_MODE });
+    await assertPrivateDirectory(workingDirectory);
     if ((await readdir(workingDirectory)).length !== 0) throw new Error();
     const allowedEnvironment = existingEnvironment ?? snapshotAllowedEnvironment(options);
     const request: CommandProviderTransportRequestV1 = {
@@ -635,6 +682,19 @@ async function prepareCommandTransport(
   }
 }
 
+async function removeTemporaryRoots(roots: Array<string | undefined>): Promise<void> {
+  let failed = false;
+  for (const root of roots) {
+    if (root === undefined) continue;
+    try {
+      await rm(root, { recursive: true, force: true });
+    } catch {
+      failed = true;
+    }
+  }
+  if (failed) throw new Error();
+}
+
 function snapshotAllowedEnvironment(
   options: ValidatedCommandProviderOptions,
 ): ReadonlyArray<readonly [string, string]> {
@@ -658,6 +718,198 @@ function createChildEnvironment(
     environment[COMMAND_PROVIDER_REQUEST_DIRECTORY_ENV] = requestDirectory;
   }
   return environment;
+}
+
+async function runApprovedChildProcess(
+  options: ValidatedCommandProviderOptions,
+  workingDirectory: string,
+  environment: NodeJS.ProcessEnv,
+  transportRequestBytes: Buffer,
+  approval: ApprovalResponse,
+  materializeRequest: () => Promise<string>,
+  signal: AbortSignal | undefined,
+): Promise<Buffer> {
+  assertActive(signal);
+  let child;
+  try {
+    child = spawn(options.executable, options.argv, {
+      cwd: workingDirectory,
+      env: environment,
+      detached: process.platform !== "win32",
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch {
+    throw new Error();
+  }
+
+  let outputBytes = 0;
+  let failed = false;
+  let termination: Promise<void> | undefined;
+  let rejectFailure!: (error: Error) => void;
+  const failure = new Promise<never>((_resolve, reject) => {
+    rejectFailure = reject;
+  });
+  void failure.catch(() => undefined);
+  const terminate = (): void => {
+    if (failed) return;
+    failed = true;
+    termination = terminateProcessTree(child).finally(() => {
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+    });
+    rejectFailure(new Error());
+  };
+  const addOutputBytes = (count: number): void => {
+    outputBytes += count;
+    if (outputBytes > options.outputLimitBytes) {
+      terminate();
+      throw new Error();
+    }
+  };
+  const close = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve) => {
+      child.once("close", (code, childSignal) => resolve({ code, signal: childSignal }));
+    },
+  );
+  const prematureClose = async (): Promise<never> => {
+    await close;
+    throw new Error();
+  };
+  const abort = (): void => terminate();
+  signal?.addEventListener("abort", abort, { once: true });
+  child.once("error", terminate);
+  child.stdin.once("error", terminate);
+  child.stderr.on("data", (chunk: Buffer) => {
+    try {
+      addOutputBytes(chunk.length);
+    } catch {
+      // addOutputBytes already failed and terminated the child.
+    }
+  });
+
+  try {
+    const stdout = child.stdout[Symbol.asyncIterator]();
+    await Promise.race([
+      writeChildInput(child.stdin, transportRequestBytes, false),
+      failure,
+      prematureClose(),
+    ]);
+    const attestationBytes = await Promise.race([
+      readStrictLine(stdout, addOutputBytes),
+      failure,
+      prematureClose(),
+    ]);
+    const parsed = parseJson(
+      decodeUtf8Strict(attestationBytes, "command provider transport response"),
+      "command provider transport response",
+    );
+    const response = snapshotApprovalResponse(parsed);
+    if (!approvalEqual(response, approval)) throw new Error();
+    assertApprovalActive(response);
+    if ((await readdir(workingDirectory)).length !== 0) throw new Error();
+
+    const materialization = materializeRequest();
+    let requestDirectory: string;
+    try {
+      requestDirectory = await Promise.race([
+        materialization,
+        failure,
+        prematureClose(),
+      ]);
+    } catch {
+      await materialization.catch(() => undefined);
+      throw new Error();
+    }
+    assertActive(signal);
+    assertApprovalActive(response);
+    const invokeRequest: CommandProviderInvokeRequestV1 = {
+      requestVersion: 1,
+      operation: "invoke",
+      requestDirectory,
+    };
+    const invokeRequestBytes = Buffer.from(`${JSON.stringify(invokeRequest)}\n`, "utf8");
+    try {
+      if (invokeRequestBytes.byteLength > MAX_REQUEST_MANIFEST_BYTES) throw new Error();
+      await Promise.race([
+        writeChildInput(child.stdin, invokeRequestBytes, true),
+        failure,
+        prematureClose(),
+      ]);
+    } finally {
+      invokeRequestBytes.fill(0);
+    }
+
+    const responseBytes = await Promise.race([
+      readRemaining(stdout, addOutputBytes),
+      failure,
+    ]);
+    const status = await close;
+    await termination;
+    if (failed || status.code !== 0 || status.signal !== null) throw new Error();
+    return responseBytes;
+  } catch {
+    terminate();
+    await termination;
+    await close;
+    throw new Error();
+  } finally {
+    signal?.removeEventListener("abort", abort);
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
+  }
+}
+
+async function writeChildInput(
+  input: NodeJS.WritableStream,
+  bytes: Buffer,
+  end: boolean,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const callback = (error?: Error | null): void => {
+      if (error === undefined || error === null) resolve();
+      else reject(error);
+    };
+    if (end) input.end(bytes, callback);
+    else input.write(bytes, callback);
+  });
+}
+
+async function readStrictLine(
+  stdout: AsyncIterator<Buffer | string>,
+  addOutputBytes: (count: number) => void,
+): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for (;;) {
+    const next = await stdout.next();
+    if (next.done) throw new Error();
+    const chunk = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
+    addOutputBytes(chunk.length);
+    const newline = chunk.indexOf(0x0a);
+    if (newline === -1) {
+      chunks.push(Buffer.from(chunk));
+      continue;
+    }
+    if (newline !== chunk.length - 1) throw new Error();
+    chunks.push(Buffer.from(chunk.subarray(0, newline)));
+    return Buffer.concat(chunks);
+  }
+}
+
+async function readRemaining(
+  stdout: AsyncIterator<Buffer | string>,
+  addOutputBytes: (count: number) => void,
+): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for (;;) {
+    const next = await stdout.next();
+    if (next.done) return Buffer.concat(chunks);
+    const chunk = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
+    addOutputBytes(chunk.length);
+    chunks.push(Buffer.from(chunk));
+  }
 }
 
 async function runChildProcess(

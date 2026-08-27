@@ -73,11 +73,11 @@ A provider accepts the prepared image, instructions, schema, and requested execu
 returns a structured document plus metadata that the upstream protocol actually exposes. Missing
 metadata remains unknown. The public implementation ships a deterministic mock provider and the
 Phase A shell-free command provider. The command provider stages the four exact verified inputs plus
-a versioned local manifest in a fresh private directory, requires the consumer-owned adapter to
-reattest approved transport before input access, invokes it, and strictly binds its response to
-phase, requested settings, provider identity, case-input identity, sanitizer requirement, and
-approval. See [`docs/command-provider-v1.md`](command-provider-v1.md). Real app-server adapters
-remain later work.
+a versioned local manifest in a fresh private directory only after the consumer-owned adapter
+reattests approved transport, then releases the request path to that same live process and strictly
+binds its response to phase, requested settings, provider identity, case-input identity, sanitizer
+requirement, and approval. See [`docs/command-provider-v1.md`](command-provider-v1.md). Real
+app-server adapters remain later work.
 
 Two distinct invocation surfaces must not be conflated:
 

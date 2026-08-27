@@ -252,6 +252,18 @@ test("rejects invalid command provider CLI configuration before runner execution
       ],
       [
         ...commandProviderArguments(),
+        "--provider-env",
+        "svbench_command_request_directory",
+      ],
+      [
+        ...commandProviderArguments(),
+        "--provider-env",
+        "PATH",
+        "--provider-env",
+        "Path",
+      ],
+      [
+        ...commandProviderArguments(),
         "--provider-timeout-ms",
         String(MAX_TIMEOUT_MS + 1),
       ],

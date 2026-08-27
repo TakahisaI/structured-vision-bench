@@ -83,14 +83,20 @@ the earlier gate result. Provider, approval, and sanitizer timeout values are al
 maximum timer delay of 2,147,483,647 milliseconds.
 
 The Phase A command provider follows the same shell-free configuration boundary and accepts only
-policy-not-required runs. For approved runs, the private adapter reattests its current transport
-binding without extraction inputs at the runner hook and again after local staging immediately
-before extraction. It then copies the four exact
+policy-not-required runs and rejects required sanitizer or policy flags before starting a child.
+For approved runs, the private adapter reattests its current transport binding without extraction
+inputs at the runner hook and again after callback hashing inside the extraction process. The runner
+validates that inline response before creating the five-file request directory, then releases its
+path to the same live process over stdin. The adapter must keep the attested binding valid through
+transport. The provider then copies the four exact
 verified provider inputs plus one bounded manifest into a fresh mode-0700 directory using mode-0600
 files. The schema remains byte-exact and is reparsed before spawn. The request directory contains no truth,
 comparison, prior-attempt, policy, credential, or original corpus path. The child receives an
-allowlist-only environment plus reserved operation and request-directory variables and uses a separate fresh
-empty directory as `cwd`; relative arguments therefore cannot resolve bundle-controlled inputs.
+allowlist-only environment plus a reserved operation variable and uses a separate fresh empty
+directory as `cwd`; relative arguments therefore cannot resolve bundle-controlled inputs. For an
+approved run the request path is absent from the spawn environment and is sent only after inline
+reattestation; an unapproved run receives it in the reserved request-directory variable.
+Allowlist names are unique case-insensitively and cannot use any case variant of a reserved name.
 Stdout and stderr have a shared configured bound and are never echoed. Response phase/provider/case-input/requirement/approval
 identities and requested settings are exact-match checked. Cancellation or overflow kills the child
 process group, timeouts await command cleanup, callback-returned binary buffers and private input

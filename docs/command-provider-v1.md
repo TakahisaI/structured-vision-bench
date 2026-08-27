@@ -41,11 +41,21 @@ variable is absent. The child must rederive its current account, session, endpoi
 runtime, and scope binding and write the exact current approval response to stdout. Echoing the
 request without that private rederivation is not a conforming adapter.
 
-The runner-facing `prepareTransport()` hook performs this check. Because creation of the local
-five-file request directory occurs later, the provider repeats the same private check after local
-staging and immediately before starting extraction, using one snapshot of the allowlisted
-environment for that check and the extraction child. A mismatch, expiration, process failure, or
-unexpected file in the empty working directory prevents extraction.
+The runner-facing `prepareTransport()` hook performs this check. The provider later reads and hashes
+the revocable callbacks into its own memory and starts the extraction adapter in a fresh empty
+working directory without a request-directory variable. It sends the same `prepareTransport`
+object as the first stdin line. The adapter rederives its current binding and returns the exact
+approval as one stdout line, but remains alive. Only after the runner validates that line does it
+create and materialize the five-file request directory. It then sends a second stdin line containing
+`requestVersion: 1`, `operation: "invoke"`, and the absolute `requestDirectory`. That same adapter
+process performs extraction. It must hold or revalidate the attested account, session, endpoint,
+persistence, runtime, and scope binding through the extraction transport and fail if the binding
+changes. The inline check and extraction use one snapshot of the allowlisted environment. A
+mismatch, expiration, process failure, unexpected file in the empty working directory, or process
+exit before request release prevents request materialization and extraction.
+
+Both checks reject `sanitizerRequired: true` or `policyRequired: true` before starting a child.
+Those runs require Phase B and never start a Phase A command process.
 
 ## Private request directory
 
@@ -67,12 +77,16 @@ provider reparses it with the strict JSON contract and requires it to equal the 
 schema. The other three files likewise contain the exact verified provider inputs. Their fixed
 relative names are protocol names and disclose no confidential corpus filename or path.
 
-The extraction process is spawned with `shell: false`, the configured argument vector, and a separate fresh,
-empty, mode-0700 sibling directory as `cwd`. The absolute request-directory path is supplied only in
-the reserved `SVBENCH_COMMAND_REQUEST_DIRECTORY` environment variable;
-`SVBENCH_COMMAND_OPERATION` is `invoke`. The child receives no other inherited environment except
+The extraction process is spawned with `shell: false`, the configured argument vector, and a
+separate fresh, empty, mode-0700 directory as `cwd`; the request root is not its sibling. For an
+approved run, `SVBENCH_COMMAND_OPERATION` is `invoke`, the request-directory variable is absent,
+and the absolute path is released only in the second stdin line after inline reattestation. For a
+run without approval, the process starts after materialization and receives the path in
+`SVBENCH_COMMAND_REQUEST_DIRECTORY`. The child receives no other inherited environment except
 explicitly allowlisted names, and the reserved names cannot be
-allowlisted or overridden. The executable must be absolute. A script or other path-valued argument
+allowlisted or overridden. Environment allowlist names must also be unique under ASCII
+case-folding, and mixed-case forms of either reserved name are rejected on every platform. The
+executable must be absolute. A script or other path-valued argument
 must also be absolute because relative arguments resolve inside the empty working directory, never
 against bundle-controlled input files or a shared temporary directory.
 
@@ -136,9 +150,8 @@ field, identity mismatch, invalid metadata, or cleanup failure. No formal attemp
 The child process group is terminated on cancellation or byte-limit failure, including descendants
 that inherit its output pipes. The runner waits for command-provider process settlement and private
 cleanup before returning a timeout. The provider zeroes callback-returned binary input buffers and its
-private input copies, and recursively removes
-only its fresh private root containing the request and working directories. Public errors are fixed
-and bounded; child stderr, response text,
+private input copies, and recursively removes only its separate fresh request and working roots.
+Public errors are fixed and bounded; child stderr, response text,
 temporary paths, executable, arguments, and environment values are not returned or persisted.
 
 ## CI and fixtures
