@@ -32,7 +32,7 @@ export type PreparedSanitizerPolicy = {
   policyBindingDigest: string;
 };
 
-const MAX_SANITIZER_POLICY_BYTES = 4 * 1024 * 1024;
+export const MAX_SANITIZER_POLICY_BYTES = 4 * 1024 * 1024;
 
 export function createSanitizerPolicyEnvelope(input: SanitizerPolicyEnvelopeInput): Buffer {
   if (!Number.isSafeInteger(input.policyVersion) || input.policyVersion < 1) {

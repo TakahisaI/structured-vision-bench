@@ -8,11 +8,12 @@ teams that must keep real documents, truth data, prompts, provider credentials, 
 adapters outside a public repository.
 
 > **Status:** bundle v1 validation, the deterministic single-case mock runner, the Phase A command
-> provider, comparison reports, and single-run approval protocol v1 are available. Codex app-server support, suites/resume, and
-> repeat policy remain tracked in Issues [#3](https://github.com/TakahisaI/structured-vision-bench/issues/3),
+> provider, comparison reports, single-run approval protocol v1, and the private command sanitizer
+> protocol are available. Codex app-server support, suites/resume, and repeat policy remain tracked
+> in Issues [#3](https://github.com/TakahisaI/structured-vision-bench/issues/3),
 > [#5](https://github.com/TakahisaI/structured-vision-bench/issues/5), and
-> [#6](https://github.com/TakahisaI/structured-vision-bench/issues/6). The sanitizer command protocol
-> remains Issue #8; suite/resume approval integration remains Phase B of Issue #9.
+> [#17](https://github.com/TakahisaI/structured-vision-bench/issues/17). App-server sanitizer
+> integration remains Issue #18.
 
 ## What belongs here
 
@@ -20,6 +21,7 @@ adapters outside a public repository.
 - Safe local validation of bundle manifests and referenced files.
 - Synthetic fixtures that contain no real person, transaction, document, or model response.
 - Provider interfaces, a shell-free local command adapter, and test doubles.
+- A target-bound, shell-free private sanitizer command protocol for required single runs.
 - Single-case `svbench run --provider mock` execution with consumer-attested sanitizer requirements,
   an optional or required private approval command, atomic formal attempts, and sanitizer output
   when the consumer requires it.
@@ -93,8 +95,16 @@ adapter also revalidates its current runtime/scope binding immediately before tr
 [`docs/approval-v1.md`](docs/approval-v1.md) for the exact CLI, wire protocol, identity binding, and
 fail-closed behavior.
 
+For a consumer-required sanitizer, add `--sanitizer required` plus the absolute command, expected
+sanitizer and policy identities, policy file, current case-input identity, binding digest, and
+consumer requirement identity options. The exact policy bytes are checked before provider access;
+the raw provider document and normalized policy envelope then cross the private process boundary on
+stdin only. See [`docs/sanitizer-v1.md`](docs/sanitizer-v1.md) for the protocol and complete CLI
+contract.
+
 The Phase A command provider invokes a consumer-owned adapter from a private five-file request
-directory. It is limited to policy-not-required single runs until Issue #8 integration is complete.
+directory. It remains limited to policy-not-required single runs; its target-bound sanitizer
+integration is tracked separately in Issue #18.
 Its local manifest and strict response contract are documented in
 [`docs/command-provider-v1.md`](docs/command-provider-v1.md). Local provenance and approval data are
 adapter-only context and must not be forwarded to a hosted model. Approved adapters reattest their
