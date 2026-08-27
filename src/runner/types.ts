@@ -60,6 +60,7 @@ export type ProviderOutput = JsonValue | string | Uint8Array;
 
 export type ProviderResponse = {
   rawDocument: ProviderOutput;
+  approval?: ApprovalResponse;
   respondedModel?: string | null;
   effectiveEffort?: string | null;
   usage?: ProviderUsage;
@@ -69,6 +70,12 @@ export type ProviderResponse = {
 export interface Provider {
   readonly id: string;
   readonly route: string;
+  readonly implementationVersion?: string | null;
+  readonly protocolVersion?: string | null;
+  prepareTransport?(
+    approval: ApprovalResponse,
+    signal?: AbortSignal,
+  ): Promise<ApprovalResponse>;
   invoke(
     request: ProviderModelRequest,
     context: ProviderAdapterContext,
@@ -77,25 +84,67 @@ export interface Provider {
 }
 
 export type ApprovalRequest = {
-  gateId: string;
-  protocolVersion: number;
-  providerId: string;
-  providerRoute: string;
+  requestVersion: 1;
+  provider: {
+    id: string;
+    route: string;
+    implementationVersion: string | null;
+    protocolVersion: string | null;
+  };
   requested: RequestedExecutionSettings;
-  harnessVersion: string;
-  snapshotDigest: string;
-  runtimeBindingDigest: string;
-  runtimeBindingIdentity: string | null;
+  harness: {
+    version: string;
+    commit: string | null;
+  };
+  documentKind: string;
+  phase: string;
+  provenance: {
+    promptVersion: string;
+    preprocessVersion: string;
+    sourceCommit: string | null;
+  };
+  sanitizerRequirement: {
+    sanitizerRequirementVersion: 1;
+    sanitizerRequired: boolean;
+    policyRequired: boolean;
+    sanitizerRequirementReason: string;
+  };
+  expected: {
+    gateId: string;
+    protocolVersion: 1;
+    snapshotDigest: string;
+    runtimeBindingDigest: string;
+    runtimeBindingIdentity: string;
+    approvedScopeDigest: string;
+    approvedScopeIdentity: string;
+    requirementVerifierId: string;
+    requirementVerifierVersion: string;
+    consumerSourceCommit: string | null;
+    requirementDecisionDigest: string;
+  };
 };
 
 export type ApprovalResponse = {
   responseVersion: 1;
   approved: boolean;
   gateId: string;
-  protocolVersion: number;
+  protocolVersion: 1;
   snapshotDigest: string;
   runtimeBindingDigest: string;
-  runtimeBindingIdentity?: string | null;
+  runtimeBindingIdentity: string;
+  approvedScopeDigest: string;
+  approvedScopeIdentity: string;
+  phase: string;
+  requirementVerifierId: string;
+  requirementVerifierVersion: string;
+  consumerSourceCommit: string | null;
+  requirementDecisionDigest: string;
+  sanitizerRequirementVersion: 1;
+  sanitizerRequired: boolean;
+  policyRequired: boolean;
+  sanitizerRequirementReason: string;
+  checkedAt?: string | null;
+  expiresAt?: string | null;
   reasonCode?: string;
 };
 
@@ -117,6 +166,17 @@ export type ApprovalSettings = {
   snapshotDigest?: string;
   runtimeBindingDigest?: string;
   runtimeBindingIdentity?: string;
+  approvedScopeDigest?: string;
+  approvedScopeIdentity?: string;
+  phase?: string;
+  expectedRequirementVerifierId?: string;
+  expectedRequirementVerifierVersion?: string;
+  expectedConsumerSourceCommit?: string | null;
+  expectedRequirementDecisionDigest?: string;
+  expectedSanitizerRequirementVersion?: 1;
+  expectedSanitizerRequired?: boolean;
+  expectedPolicyRequired?: boolean;
+  expectedSanitizerRequirementReason?: string;
   timeoutMs?: number;
 };
 

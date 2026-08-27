@@ -1,6 +1,7 @@
 import { isJsonObject, type JsonValue } from "../bundle/json.js";
 import { validateJsonSchema } from "../bundle/schema-validator.js";
 import type {
+  ApprovalResponse,
   Provider,
   ProviderAdapterContext,
   ProviderModelRequest,
@@ -25,6 +26,11 @@ export function createMockProvider(options: MockProviderOptions = {}): Provider 
   return {
     id: providerId,
     route,
+    implementationVersion: "mock-v1",
+    protocolVersion: "mock-v1",
+    async prepareTransport(approval): Promise<ApprovalResponse> {
+      return approval;
+    },
     async invoke(request, context): Promise<ProviderResponse> {
       await options.onRequest?.(request, context);
       await options.onInvoke?.(request, context);

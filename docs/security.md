@@ -44,7 +44,7 @@ Bundle paths use normalized forward-slash relative paths. The validator rejects:
 
 Actual bundle reads use no-follow descriptors and recheck the canonical bundle root; hashing and
 strict text validation consume the same opened bytes. Provider inputs are copied into a private
-per-run staging directory after approval, with 0700 directories and 0600 files. Each provider input
+per-attempt-invocation staging directory after approval, with 0700 directories and 0600 files. Each provider input
 is bounded to 16 MiB before it is snapshotted;
 larger inputs fail with a stable runner error. Provider read callbacks are invalidated whenever
 provider execution settles (including timeout), and cleanup disposes the captured snapshots, so a
@@ -54,7 +54,33 @@ When sanitization is required, the runner validates the sanitizer ID, protocol v
 `sanitize` method before provider invocation or input access. It binds the method and freezes one
 implementation/settings snapshot for policy preflight, run identity, invocation, response identity,
 and manifest creation. A missing or hostile callable accessor fails with a fixed configuration error.
-Approval gate callability is validated and snapshotted before approval invocation as well.
+Approval gate callability is validated, bound, and snapshotted before approval invocation as well.
+Command gates require an absolute executable and use an argument vector with `shell: false`. Every
+invocation runs in a fresh private mode-0700 directory below the OS temporary directory and receives
+no inherited environment except names in an explicit allowlist. Path-valued arguments must be
+absolute; relative paths resolve only inside the fresh empty directory and fail closed. Stdin carries
+one request; strict JSON stdout and discarded stderr share a bounded byte budget. Timeouts abort and
+terminate the child. The private directory is removed after exit. The adapter creates no protocol
+file and never persists its command, arguments, environment names/values, response diagnostics, or
+private identities beyond the allowlisted attempt fields.
+
+Approval executes after bundle manifest/path/schema preflight and requirement-decision rederivation,
+but before complete provider-input verification, staging, provider process invocation, or image read.
+The request excludes image, schema, prompts, truth, comparison, prior attempts, policy, bundle root,
+case-input identity, and attempt identities. Every expected gate, snapshot, runtime, scope, phase,
+verifier, source, digest, and four-field decision value is compared. Missing required approval,
+denial, expiration, timeout, process failure, malformed or extra response data, and any mismatch fail
+closed with no provider access or formal attempt. A provider-carried approval attestation cannot
+replace this runner gate and, when present, must match its successful response exactly. The full
+boundary is in [`docs/approval-v1.md`](approval-v1.md).
+
+An applied gate also requires the private provider adapter to implement `prepareTransport()`. That
+hook rederives current account/session/endpoint/persistence/runtime/scope state after staging and
+immediately before provider invocation. Its attestation must exactly match the gate result. Approval
+expiry is checked after this hook, immediately before invocation, and inside every provider-input
+callback. Thus a receiver-state change or an adapter that delays image access past expiry cannot use
+the earlier gate result. Provider, approval, and sanitizer timeout values are all bounded to Node's
+maximum timer delay of 2,147,483,647 milliseconds.
 
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through

@@ -78,6 +78,8 @@ export type RunIdentityInput = {
   bundleManifestDigest?: string | null;
   providerId: string;
   providerRoute: string;
+  providerImplementationVersion?: string | null;
+  providerProtocolVersion?: string | null;
   requestedModel?: string | null;
   requestedEffort?: string | null;
   maxTokens?: number | null;
@@ -86,6 +88,9 @@ export type RunIdentityInput = {
   approvalGateId?: string | null;
   approvalProtocolVersion?: number | null;
   approvalSnapshotDigest?: string | null;
+  approvalPhase?: string | null;
+  approvalScopeDigest?: string | null;
+  approvalScopeIdentity?: string | null;
   approvalRequired?: boolean;
   sanitizerBindingDigest?: string | null;
   sanitizerId?: string | null;
@@ -159,13 +164,13 @@ export function computeAttemptIdentity(input: AttemptIdentityInput): AttemptIden
 export function computeSanitizerRequirementDigest(input: SanitizerRequirementDigestInput): string {
   return sha256([
     Buffer.from("svbench-sanitizer-requirement-v1", "ascii"),
-    lengthPrefixedUtf8(String(input.sanitizerRequirementVersion)),
     lengthPrefixedUtf8(input.requirementVerifierId),
     lengthPrefixedUtf8(input.requirementVerifierVersion),
-    Buffer.from(input.sanitizerRequired ? "1" : "0", "ascii"),
-    Buffer.from(input.policyRequired ? "1" : "0", "ascii"),
-    lengthPrefixedUtf8(input.sanitizerRequirementReason),
     optionalUtf8(input.consumerSourceCommit),
+    lengthPrefixedUtf8(String(input.sanitizerRequirementVersion)),
+    lengthPrefixedUtf8(input.sanitizerRequired ? "true" : "false"),
+    lengthPrefixedUtf8(input.policyRequired ? "true" : "false"),
+    lengthPrefixedUtf8(input.sanitizerRequirementReason),
   ]);
 }
 
@@ -197,6 +202,8 @@ export function computeRunIdentity(input: RunIdentityInput): string {
     optionalAscii(input.bundleManifestDigest),
     lengthPrefixedUtf8(input.providerId),
     lengthPrefixedUtf8(input.providerRoute),
+    optionalUtf8(input.providerImplementationVersion),
+    optionalUtf8(input.providerProtocolVersion),
     optionalUtf8(input.requestedModel),
     optionalUtf8(input.requestedEffort),
     optionalNumber(input.maxTokens),
@@ -205,6 +212,9 @@ export function computeRunIdentity(input: RunIdentityInput): string {
     optionalUtf8(input.approvalGateId),
     optionalNumber(input.approvalProtocolVersion),
     optionalAscii(input.approvalSnapshotDigest),
+    optionalUtf8(input.approvalPhase),
+    optionalAscii(input.approvalScopeDigest),
+    optionalUtf8(input.approvalScopeIdentity),
     optionalAscii(input.sanitizerBindingDigest),
     optionalBoolean(input.approvalRequired),
     optionalUtf8(input.sanitizerId),
