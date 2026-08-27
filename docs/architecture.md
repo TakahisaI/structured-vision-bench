@@ -77,7 +77,10 @@ a versioned local manifest in a fresh private directory only after the consumer-
 reattests approved transport, then releases the request path to that same live process and strictly
 binds its response to phase, requested settings, provider identity, case-input identity, sanitizer
 requirement, and approval. See [`docs/command-provider-v1.md`](command-provider-v1.md). Real
-app-server adapters remain later work.
+app-server adapters remain later work. The v1 local adapter and its descendants are one trusted
+invocation boundary: the direct child must remain live through extraction and must not delegate the
+control pipe, request path, or request descriptors. Portable termination is limited to the initially
+spawned process group; detached or daemonized descendants are non-conforming.
 
 Two distinct invocation surfaces must not be conflated:
 

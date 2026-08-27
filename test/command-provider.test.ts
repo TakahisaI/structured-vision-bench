@@ -281,6 +281,58 @@ test("stops direct input access when approval expires during a callback", async 
   }
 });
 
+test("aborts a pending direct input callback and disposes its late buffer", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  const marker = path.join(temporary, "synthetic-operation-marker");
+  const previousMarker = process.env.SYNTHETIC_COMMAND_MARKER;
+  let resolveCallback!: (value: Buffer) => void;
+  let callbackStartedResolve!: () => void;
+  const callbackStarted = new Promise<void>((resolve) => {
+    callbackStartedResolve = resolve;
+  });
+  const lateBuffer = Buffer.from("synthetic late input", "utf8");
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    process.env.SYNTHETIC_COMMAND_MARKER = marker;
+    const requirement = syntheticRequirement();
+    const direct = await directInvocation(
+      bundle,
+      path.join(temporary, "staging"),
+      requirement,
+      () => undefined,
+    );
+    direct.request.image.readBytes = () =>
+      new Promise<Buffer>((resolve) => {
+        resolveCallback = resolve;
+        callbackStartedResolve();
+      });
+    const controller = new AbortController();
+    try {
+      const invocation = commandProvider("success", {
+        envAllowlist: ["SYNTHETIC_COMMAND_MARKER"],
+      }).invoke(direct.request, direct.context, controller.signal);
+      await callbackStarted;
+      controller.abort();
+      await settlesWithin(
+        assert.rejects(invocation, /command provider failed/u),
+        250,
+      );
+      resolveCallback(lateBuffer);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.ok(lateBuffer.every((byte) => byte === 0));
+      await assert.rejects(readFile(marker), /ENOENT/u);
+    } finally {
+      await direct.cleanup();
+    }
+  } finally {
+    lateBuffer.fill(0);
+    if (previousMarker === undefined) delete process.env.SYNTHETIC_COMMAND_MARKER;
+    else process.env.SYNTHETIC_COMMAND_MARKER = previousMarker;
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("uses one approval snapshot when direct invoke callbacks mutate the source", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
   const bundle = path.join(temporary, "bundle");
@@ -661,6 +713,68 @@ test("settles request materialization before cleanup when inline reattestation e
   }
 });
 
+test(
+  "detects attesting child exit before path release despite inherited stdio",
+  { skip: process.platform === "win32" },
+  async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  const isolatedTemporaryRoot = path.join(temporary, "command-tmp");
+  const observedMarker = path.join(temporary, "synthetic-request-observed");
+  const handshakeMarker = path.join(temporary, "synthetic-handshake-marker");
+  const previousTmpdir = process.env.TMPDIR;
+  const previousObservedMarker =
+    process.env.SYNTHETIC_COMMAND_REQUEST_OBSERVED_MARKER;
+  const previousHandshakeMarker = process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    await mkdir(isolatedTemporaryRoot, { mode: 0o700 });
+    process.env.TMPDIR = isolatedTemporaryRoot;
+    process.env.SYNTHETIC_COMMAND_REQUEST_OBSERVED_MARKER = observedMarker;
+    process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER = handshakeMarker;
+    assert.equal(os.tmpdir(), isolatedTemporaryRoot);
+    const requirement = syntheticRequirement();
+    const attempts = path.join(temporary, "attempts");
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: attempts,
+        provider: commandProvider("inline-exit-with-inherited-descendant", {
+          envAllowlist: [
+            "SYNTHETIC_COMMAND_HANDSHAKE_MARKER",
+            "SYNTHETIC_COMMAND_REQUEST_OBSERVED_MARKER",
+          ],
+        }),
+        phase: PHASE,
+        approval: approvalSettings(requirement),
+        sanitizerRequirement: requirement,
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "provider_failed",
+    );
+    assert.equal(await readFile(observedMarker, "utf8"), "synthetic helper ready\n");
+    assert.match(await readFile(handshakeMarker, "utf8"), /^reattest:\d+\n$/u);
+    assert.deepEqual(await readdir(attempts), []);
+    assert.deepEqual(await readdir(isolatedTemporaryRoot), []);
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmpdir;
+    if (previousObservedMarker === undefined) {
+      delete process.env.SYNTHETIC_COMMAND_REQUEST_OBSERVED_MARKER;
+    } else {
+      process.env.SYNTHETIC_COMMAND_REQUEST_OBSERVED_MARKER =
+        previousObservedMarker;
+    }
+    if (previousHandshakeMarker === undefined) {
+      delete process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER;
+    } else {
+      process.env.SYNTHETIC_COMMAND_HANDSHAKE_MARKER = previousHandshakeMarker;
+    }
+    await rm(temporary, { recursive: true, force: true });
+  }
+  },
+);
+
 test("rechecks approval expiry after local staging and before adapter spawn", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
   const bundle = path.join(temporary, "bundle");
@@ -813,6 +927,62 @@ test("kills descendant processes and finishes private cleanup before timeout ret
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test(
+  "limits portable termination to the spawned process group",
+  { skip: process.platform === "win32" },
+  async () => {
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+    const bundle = path.join(temporary, "bundle");
+    const descendantMarker = path.join(temporary, "synthetic-detached-pid");
+    const previousMarker = process.env.SYNTHETIC_COMMAND_DESCENDANT_MARKER;
+    let descendantPid: number | undefined;
+    try {
+      await cp(FIXTURE, bundle, { recursive: true });
+      process.env.SYNTHETIC_COMMAND_DESCENDANT_MARKER = descendantMarker;
+      const attempts = path.join(temporary, "attempts");
+      await assert.rejects(
+        runBundle({
+          bundleDirectory: bundle,
+          attemptRoot: attempts,
+          provider: commandProvider("detached-descendant-hang", {
+            envAllowlist: ["SYNTHETIC_COMMAND_DESCENDANT_MARKER"],
+          }),
+          phase: PHASE,
+          providerTimeoutMs: 500,
+          sanitizerRequirement: syntheticRequirement(),
+        }),
+        (error: unknown) =>
+          error instanceof RunnerError && error.code === "provider_timeout",
+      );
+      descendantPid = Number((await readFile(descendantMarker, "utf8")).trim());
+      assert.equal(Number.isSafeInteger(descendantPid) && descendantPid > 0, true);
+      assert.doesNotThrow(() => process.kill(descendantPid!, 0));
+      assert.deepEqual(await readdir(attempts), []);
+    } finally {
+      if (descendantPid === undefined) {
+        try {
+          descendantPid = Number((await readFile(descendantMarker, "utf8")).trim());
+        } catch {
+          // The synthetic adapter may have failed before starting its descendant.
+        }
+      }
+      if (descendantPid !== undefined) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {
+          // The exact synthetic detached process may already have exited.
+        }
+      }
+      if (previousMarker === undefined) {
+        delete process.env.SYNTHETIC_COMMAND_DESCENDANT_MARKER;
+      } else {
+        process.env.SYNTHETIC_COMMAND_DESCENDANT_MARKER = previousMarker;
+      }
+      await rm(temporary, { recursive: true, force: true });
+    }
+  },
+);
 
 test("zeroes callback-returned binary buffers after taking private copies", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
@@ -1076,6 +1246,23 @@ function commandProvider(
     implementationVersion: "synthetic-v1",
     ...overrides,
   });
+}
+
+async function settlesWithin(promise: Promise<void>, milliseconds: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("synthetic operation did not settle")),
+          milliseconds,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function directInvocation(

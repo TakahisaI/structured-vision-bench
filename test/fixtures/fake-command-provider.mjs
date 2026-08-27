@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { writeSync } from "node:fs";
 import { appendFile, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -53,6 +54,36 @@ if (requestDirectory === undefined) {
       "utf8",
     );
   }
+  if (mode === "inline-exit-with-inherited-descendant") {
+    const observedMarker = process.env.SYNTHETIC_COMMAND_REQUEST_OBSERVED_MARKER;
+    if (observedMarker === undefined) fail();
+    spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import { appendFile } from "node:fs/promises";
+const marker = process.argv[1];
+await appendFile(marker, "synthetic helper ready\\n", "utf8");
+setInterval(() => undefined, 1000);`,
+        observedMarker,
+      ],
+      { stdio: ["ignore", "inherit", "inherit"] },
+    );
+    let helperReady = false;
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      try {
+        await stat(observedMarker);
+        helperReady = true;
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+    }
+    if (!helperReady) fail();
+    writeSync(process.stdout.fd, `${JSON.stringify(transportResponse)}\n`);
+    process.exit(0);
+  }
   await writeStdoutLine(transportResponse);
   if (mode === "inline-exit-after-attestation") process.exit(0);
   const invokeRequest = JSON.parse(await readStdinLine());
@@ -96,6 +127,23 @@ if (mode === "descendant-hang") {
       "utf8",
     );
   }
+  setInterval(() => undefined, 1000);
+  await new Promise(() => undefined);
+}
+if (mode === "detached-descendant-hang") {
+  const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    detached: process.platform !== "win32",
+    stdio: "ignore",
+  });
+  descendant.unref();
+  if (process.env.SYNTHETIC_COMMAND_DESCENDANT_MARKER !== undefined) {
+    await writeFile(
+      process.env.SYNTHETIC_COMMAND_DESCENDANT_MARKER,
+      `${descendant.pid}\n`,
+      "utf8",
+    );
+  }
+  setInterval(() => undefined, 1000);
   await new Promise(() => undefined);
 }
 

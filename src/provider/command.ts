@@ -315,23 +315,37 @@ async function invokeCommandProvider(
     );
     const manifestBytes = Buffer.from(`${JSON.stringify(manifest)}\n`, "utf8");
     if (manifestBytes.byteLength > MAX_REQUEST_MANIFEST_BYTES) throw new Error();
-    const materializeRequest = async (): Promise<string> => {
+    const materializeRequest = async (
+      assertReleaseActive: () => void = () => undefined,
+    ): Promise<string> => {
+      assertReleaseActive();
       if (requestRoot !== undefined) throw new Error();
       requestRoot = await mkdtemp(path.join(tmpdir(), "svbench-command-request-"));
+      assertReleaseActive();
       await chmod(requestRoot, DIRECTORY_MODE);
+      assertReleaseActive();
       await assertPrivateDirectory(requestRoot);
+      assertReleaseActive();
       const requestDirectory = path.join(requestRoot, "request");
       await mkdir(requestDirectory, { mode: DIRECTORY_MODE });
+      assertReleaseActive();
       await assertPrivateDirectory(requestDirectory);
+      assertReleaseActive();
       await writePrivateFile(path.join(requestDirectory, INPUT_FILES.image), inputBytes.image);
+      assertReleaseActive();
       await writePrivateFile(path.join(requestDirectory, INPUT_FILES.schema), inputBytes.schema);
+      assertReleaseActive();
       await writePrivateFile(path.join(requestDirectory, INPUT_FILES.system), inputBytes.system);
+      assertReleaseActive();
       await writePrivateFile(
         path.join(requestDirectory, INPUT_FILES.instruction),
         inputBytes.instruction,
       );
+      assertReleaseActive();
       await writePrivateFile(path.join(requestDirectory, REQUEST_FILE), manifestBytes);
+      assertReleaseActive();
       await assertRequestDirectory(requestDirectory);
+      assertReleaseActive();
       return requestDirectory;
     };
 
@@ -389,7 +403,12 @@ async function readInputBytes(
   signal: AbortSignal | undefined,
 ): Promise<Buffer> {
   assertInputAccessActive(approval, signal);
-  const value = await reader();
+  const value = await invokeInputCallback(
+    reader,
+    approval,
+    signal,
+    zeroReturnedBuffer,
+  );
   if (!Buffer.isBuffer(value)) throw new Error();
   try {
     assertInputAccessActive(approval, signal);
@@ -406,7 +425,7 @@ async function readInputText(
   signal: AbortSignal | undefined,
 ): Promise<Buffer> {
   assertInputAccessActive(approval, signal);
-  const value = await reader();
+  const value = await invokeInputCallback(reader, approval, signal);
   assertInputAccessActive(approval, signal);
   if (typeof value !== "string") throw new Error();
   const bytes = Buffer.from(value, "utf8");
@@ -415,6 +434,59 @@ async function readInputText(
     throw new Error();
   }
   return bytes;
+}
+
+function invokeInputCallback<T>(
+  reader: () => Promise<T>,
+  approval: ApprovalResponse | null,
+  signal: AbortSignal | undefined,
+  disposeLateValue?: (value: T) => void,
+): Promise<T> {
+  assertInputAccessActive(approval, signal);
+  const pending = Promise.resolve().then(() => {
+    assertInputAccessActive(approval, signal);
+    return reader();
+  });
+  if (signal === undefined) return pending;
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const removeAbortListener = (): void => {
+      signal.removeEventListener("abort", abort);
+    };
+    const abort = (): void => {
+      if (settled) return;
+      settled = true;
+      removeAbortListener();
+      reject(new Error());
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    void pending.then(
+      (value) => {
+        if (settled) {
+          try {
+            disposeLateValue?.(value);
+          } catch {
+            // Late callback disposal is best effort after the public call has settled.
+          }
+          return;
+        }
+        settled = true;
+        removeAbortListener();
+        resolve(value);
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        removeAbortListener();
+        reject(error);
+      },
+    );
+    if (signal.aborted) abort();
+  });
+}
+
+function zeroReturnedBuffer(value: Buffer): void {
+  if (Buffer.isBuffer(value)) Buffer.prototype.fill.call(value, 0);
 }
 
 function assertInputAccessActive(
@@ -828,7 +900,7 @@ async function runApprovedCommand(
   workingDirectory: string,
   allowedEnvironment: ReadonlyArray<readonly [string, string]>,
   approval: ApprovalResponse,
-  materializeRequest: () => Promise<string>,
+  materializeRequest: (assertReleaseActive?: () => void) => Promise<string>,
   signal: AbortSignal | undefined,
 ): Promise<Buffer> {
   assertActive(signal);
@@ -949,7 +1021,7 @@ async function runApprovedChildProcess(
   environment: NodeJS.ProcessEnv,
   transportRequestBytes: Buffer,
   approval: ApprovalResponse,
-  materializeRequest: () => Promise<string>,
+  materializeRequest: (assertReleaseActive?: () => void) => Promise<string>,
   signal: AbortSignal | undefined,
 ): Promise<Buffer> {
   assertActive(signal);
@@ -968,6 +1040,8 @@ async function runApprovedChildProcess(
 
   let outputBytes = 0;
   let failed = false;
+  let exited = false;
+  let requestReleased = false;
   let termination: Promise<void> | undefined;
   let rejectFailure!: (error: Error) => void;
   const failure = new Promise<never>((_resolve, reject) => {
@@ -996,9 +1070,25 @@ async function runApprovedChildProcess(
       child.once("close", (code, childSignal) => resolve({ code, signal: childSignal }));
     },
   );
+  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve) => {
+      child.once("exit", (code, childSignal) => {
+        exited = true;
+        if (!requestReleased) terminate();
+        resolve({ code, signal: childSignal });
+      });
+    },
+  );
   const prematureClose = async (): Promise<never> => {
     await close;
     throw new Error();
+  };
+  const prematureExit = async (): Promise<never> => {
+    await exit;
+    throw new Error();
+  };
+  const assertChildRunning = (): void => {
+    if (exited || child.exitCode !== null || child.signalCode !== null) throw new Error();
   };
   const abort = (): void => terminate();
   signal?.addEventListener("abort", abort, { once: true });
@@ -1017,11 +1107,13 @@ async function runApprovedChildProcess(
     await Promise.race([
       writeChildInput(child.stdin, transportRequestBytes, false),
       failure,
+      prematureExit(),
       prematureClose(),
     ]);
     const attestationBytes = await Promise.race([
       readStrictLine(stdout, addOutputBytes),
       failure,
+      prematureExit(),
       prematureClose(),
     ]);
     const parsed = parseJson(
@@ -1031,20 +1123,47 @@ async function runApprovedChildProcess(
     const response = snapshotApprovalResponse(parsed);
     if (!approvalEqual(response, approval)) throw new Error();
     assertApprovalActive(response);
-    if ((await readdir(workingDirectory)).length !== 0) throw new Error();
+    if (
+      (
+        await Promise.race([
+          readdir(workingDirectory),
+          failure,
+          prematureExit(),
+          prematureClose(),
+        ])
+      ).length !== 0
+    ) {
+      throw new Error();
+    }
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        setImmediate(() => setImmediate(resolve));
+      }),
+      failure,
+      prematureExit(),
+      prematureClose(),
+    ]);
+    assertChildRunning();
 
-    const materialization = materializeRequest();
+    const assertReleaseActive = (): void => {
+      assertChildRunning();
+      assertActive(signal);
+      assertApprovalActive(response);
+    };
+    const materialization = materializeRequest(assertReleaseActive);
     let requestDirectory: string;
     try {
       requestDirectory = await Promise.race([
         materialization,
         failure,
+        prematureExit(),
         prematureClose(),
       ]);
     } catch {
       await materialization.catch(() => undefined);
       throw new Error();
     }
+    assertChildRunning();
     assertActive(signal);
     assertApprovalActive(response);
     const invokeRequest: CommandProviderInvokeRequestV1 = {
@@ -1058,8 +1177,11 @@ async function runApprovedChildProcess(
       await Promise.race([
         writeChildInput(child.stdin, invokeRequestBytes, true),
         failure,
+        prematureExit(),
         prematureClose(),
       ]);
+      assertChildRunning();
+      requestReleased = true;
     } finally {
       invokeRequestBytes.fill(0);
     }

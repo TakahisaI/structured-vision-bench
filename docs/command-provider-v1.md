@@ -51,8 +51,22 @@ create and materialize the five-file request directory. It then sends a second s
 process performs extraction. It must hold or revalidate the attested account, session, endpoint,
 persistence, runtime, and scope binding through the extraction transport and fail if the binding
 changes. The inline check and extraction use one snapshot of the allowlisted environment. A
-mismatch, expiration, process failure, unexpected file in the empty working directory, or process
-exit before request release prevents request materialization and extraction.
+mismatch, expiration, process failure, or unexpected file in the empty working directory prevents
+request release and extraction.
+
+The provider tracks direct-child `exit` separately from stdio `close`. If exit is observed before
+materialization begins, no request root is created. If exit is observed while materialization is in
+flight, every remaining step fails its liveness guard, the provider waits for already-started
+filesystem work to settle, does not begin a new path write, and removes its private roots before
+returning failure. Exit is also raced with the second stdin write. Because child liveness and a
+multi-syscall path materialization cannot be made atomic in portable Node.js, this contract does not
+claim that a private file can never exist transiently across an unobserved exit race.
+
+The consumer-owned adapter and its descendants are one trusted local invocation boundary. A
+conforming direct child remains alive from inline attestation through response completion and does
+not let descendants scan the temporary root, inherit or intercept control stdin, receive the
+request path or open request descriptors, or continue extraction after the direct child exits.
+Those behaviors require an OS sandbox or a future non-path protocol and are outside v1.
 
 Both checks reject `sanitizerRequired: true` or `policyRequired: true` before starting a child.
 Those runs require Phase B and never start a Phase A command process.
@@ -65,7 +79,10 @@ and approval. The sanitizer decision digest is recomputed while taking the snaps
 snapshot is used for Phase A admission, callback reads, digest checks, approval binding, the
 manifest, inline handshake, and final response validation; later source-object mutation has no
 effect. Approval activity is rechecked immediately before and after each callback read; expiry
-during one callback zeroes any returned binary buffer and prevents every later callback.
+during one callback zeroes any returned binary buffer and prevents every later callback. Each
+callback Promise is also raced against the invocation AbortSignal, so cancellation settles the
+public invocation without waiting for a non-cooperative callback. A binary buffer returned after
+cancellation is zeroed asynchronously, and a late callback rejection is observed and discarded.
 
 ## Private request directory
 
@@ -162,10 +179,14 @@ input digest mismatch, private-directory or file-mode failure, process error, no
 timeout, oversized stdout or stderr, invalid UTF-8/JSON, duplicate JSON member, unknown response
 field, identity mismatch, invalid metadata, or cleanup failure. No formal attempt is published.
 
-The child process group is terminated on cancellation or byte-limit failure, including descendants
-that inherit its output pipes. The runner waits for command-provider process settlement and private
-cleanup before returning a timeout. The provider zeroes callback-returned binary input buffers and its
-private input copies, and recursively removes only its separate fresh request and working roots.
+The initially spawned child process group is terminated on cancellation or byte-limit failure. The
+runner waits for command-provider process settlement and private cleanup before returning a timeout.
+A conforming adapter must not detach, daemonize, or move descendants into another process group or
+session, and must not transfer request data or open request descriptors to such a descendant.
+Portable Node.js process-group termination cannot contain a deliberately detached descendant; such
+an adapter is outside this protocol and cleanup guarantee. The provider zeroes callback-returned
+binary input buffers and its private input copies, and recursively removes only its separate fresh
+request and working roots.
 Public errors are fixed and bounded; child stderr, response text,
 temporary paths, executable, arguments, and environment values are not returned or persisted.
 
