@@ -9,6 +9,34 @@ import { readAttempt } from "../src/runner/attempt.js";
 
 const CLI = path.join(".tmp", "build", "src", "cli", "svbench.js");
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
+const FAKE_APPROVAL_GATE = path.resolve("test/fixtures/fake-approval-gate.mjs");
+
+function approvalArguments(mode = "request-boundary"): string[] {
+  return [
+    "--approval",
+    "required",
+    "--approval-command",
+    process.execPath,
+    "--approval-arg",
+    FAKE_APPROVAL_GATE,
+    "--approval-arg",
+    mode,
+    "--approval-gate-id",
+    "synthetic-cli-gate",
+    "--approval-snapshot-digest",
+    "a".repeat(64),
+    "--approval-runtime-identity",
+    "synthetic-runtime",
+    "--approval-runtime-digest",
+    "b".repeat(64),
+    "--approval-scope-identity",
+    "synthetic-scope",
+    "--approval-scope-digest",
+    "c".repeat(64),
+    "--approval-phase",
+    "development",
+  ];
+}
 
 test("runs a synthetic mock bundle through the public CLI", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
@@ -91,6 +119,85 @@ test("prints the attempt key in the human success summary", async () => {
       result.stdout,
       /^run complete: synthetic-invoice-basic \(key human-001, attempt [a-f0-9]{64}, run [a-f0-9]{64}\)\n$/u,
     );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("runs a required command approval gate from the public CLI", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
+  const attempts = path.join(temporary, "attempts");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "run",
+        "--bundle",
+        FIXTURE,
+        "--provider",
+        "mock",
+        "--attempt-root",
+        attempts,
+        ...approvalArguments(),
+        "--json",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const summary = JSON.parse(result.stdout) as { attemptId: string };
+    const attempt = await readAttempt(path.join(attempts, summary.attemptId));
+    assert.equal(attempt.manifest.approval.required, true);
+    assert.equal(attempt.manifest.approval.applied, true);
+    assert.equal(attempt.manifest.approval.gateId, "synthetic-cli-gate");
+    assert.equal(attempt.manifest.approval.approvedScopeIdentity, "synthetic-scope");
+    assert.equal(attempt.manifest.approval.phase, "development");
+    assert.equal(attempt.manifest.approval.requirementVerifierId, "svbench-cli");
+    assert.equal(JSON.stringify(attempt.manifest).includes(FAKE_APPROVAL_GATE), false);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects incomplete command approval CLI arguments before runner execution", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
+  try {
+    const invalidApprovalArguments = [
+      ["--approval", "required"],
+      ["--approval-command", process.execPath],
+      approvalArguments().map((value) =>
+        value === "a".repeat(64) ? "synthetic-invalid-digest" : value,
+      ),
+      [...approvalArguments(), "--approval-env", "SYNTHETIC/INVALID"],
+      [...approvalArguments(), "--approval-output-limit", String(16 * 1024 * 1024 + 1)],
+    ];
+    for (const [index, approvalArgs] of invalidApprovalArguments.entries()) {
+      const attempts = path.join(temporary, `attempts-${index}`);
+      const result = spawnSync(
+        process.execPath,
+        [
+          CLI,
+          "run",
+          "--bundle",
+          FIXTURE,
+          "--provider",
+          "mock",
+          "--attempt-root",
+          attempts,
+          ...approvalArgs,
+          "--json",
+        ],
+        { encoding: "utf8" },
+      );
+      assert.equal(result.status, 2);
+      assert.equal(result.stderr, "");
+      assert.equal(
+        (JSON.parse(result.stdout) as { error: { code: string } }).error.code,
+        "invalid_arguments",
+      );
+      await assert.rejects(readdir(attempts), /ENOENT/u);
+    }
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

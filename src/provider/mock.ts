@@ -25,6 +25,8 @@ export function createMockProvider(options: MockProviderOptions = {}): Provider 
   return {
     id: providerId,
     route,
+    implementationVersion: "mock-v1",
+    protocolVersion: "mock-v1",
     async invoke(request, context): Promise<ProviderResponse> {
       await options.onRequest?.(request, context);
       await options.onInvoke?.(request, context);

@@ -36,6 +36,7 @@ import {
   readAttempt,
   writeAttemptFiles,
 } from "../src/runner/attempt.js";
+import { createCommandApprovalGate } from "../src/runner/approval.js";
 import { RunnerError } from "../src/runner/errors.js";
 import {
   BundleValidationError,
@@ -49,6 +50,9 @@ import {
 } from "../src/runner/sanitizer.js";
 import type {
   ApprovalGate,
+  ApprovalRequest,
+  ApprovalResponse,
+  ApprovalSettings,
   Provider,
   ProviderModelRequest,
   RunBundleOptions,
@@ -56,6 +60,10 @@ import type {
 
 const IMAGE_SHA256 = "dda43d98857bc0977a1bdc67e8005428c3af95ca73cddda69c9e8737eee03cc9";
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
+const FAKE_APPROVAL_GATE = path.resolve("test/fixtures/fake-approval-gate.mjs");
+const SYNTHETIC_APPROVAL_RUNTIME_IDENTITY = "synthetic-runtime";
+const SYNTHETIC_APPROVAL_SCOPE_IDENTITY = "synthetic-scope";
+const SYNTHETIC_APPROVAL_PHASE = "development";
 
 type TestRunOptions = Omit<RunBundleOptions, "sanitizerRequirement"> & {
   sanitizerRequirement?: SanitizerRequirementSettings;
@@ -85,6 +93,78 @@ function runBundle(options: TestRunOptions) {
     sanitizerRequirement:
       options.sanitizerRequirement ?? syntheticRequirement(options.sanitizer?.required === true),
   });
+}
+
+function syntheticApprovalSettings(
+  gate: ApprovalGate,
+  overrides: Partial<ApprovalSettings> = {},
+): ApprovalSettings {
+  const requirement = syntheticRequirement(false).decision;
+  return {
+    required: true,
+    gate,
+    expectedGateId: gate.id,
+    expectedProtocolVersion: 1,
+    snapshotDigest: "a".repeat(64),
+    runtimeBindingDigest: "b".repeat(64),
+    runtimeBindingIdentity: SYNTHETIC_APPROVAL_RUNTIME_IDENTITY,
+    approvedScopeDigest: "c".repeat(64),
+    approvedScopeIdentity: SYNTHETIC_APPROVAL_SCOPE_IDENTITY,
+    phase: SYNTHETIC_APPROVAL_PHASE,
+    expectedRequirementVerifierId: requirement.requirementVerifierId,
+    expectedRequirementVerifierVersion: requirement.requirementVerifierVersion,
+    expectedConsumerSourceCommit: requirement.consumerSourceCommit,
+    expectedRequirementDecisionDigest: requirement.requirementDecisionDigest,
+    expectedSanitizerRequirementVersion: requirement.sanitizerRequirementVersion,
+    expectedSanitizerRequired: requirement.sanitizerRequired,
+    expectedPolicyRequired: requirement.policyRequired,
+    expectedSanitizerRequirementReason: requirement.sanitizerRequirementReason,
+    ...overrides,
+  };
+}
+
+function syntheticApprovalResponse(
+  request: ApprovalRequest,
+  approved = true,
+  overrides: Partial<ApprovalResponse> = {},
+): ApprovalResponse {
+  return {
+    responseVersion: 1,
+    approved,
+    gateId: request.expected.gateId,
+    protocolVersion: request.expected.protocolVersion,
+    snapshotDigest: request.expected.snapshotDigest,
+    runtimeBindingDigest: request.expected.runtimeBindingDigest,
+    runtimeBindingIdentity: request.expected.runtimeBindingIdentity,
+    approvedScopeDigest: request.expected.approvedScopeDigest,
+    approvedScopeIdentity: request.expected.approvedScopeIdentity,
+    phase: request.phase,
+    requirementVerifierId: request.expected.requirementVerifierId,
+    requirementVerifierVersion: request.expected.requirementVerifierVersion,
+    consumerSourceCommit: request.expected.consumerSourceCommit,
+    requirementDecisionDigest: request.expected.requirementDecisionDigest,
+    sanitizerRequirementVersion: request.sanitizerRequirement.sanitizerRequirementVersion,
+    sanitizerRequired: request.sanitizerRequirement.sanitizerRequired,
+    policyRequired: request.sanitizerRequirement.policyRequired,
+    sanitizerRequirementReason: request.sanitizerRequirement.sanitizerRequirementReason,
+    ...overrides,
+  };
+}
+
+function syntheticCommandApprovalSettings(
+  mode: string,
+  overrides: Partial<ApprovalSettings> = {},
+): ApprovalSettings {
+  const placeholderGate: ApprovalGate = {
+    id: "synthetic-command-gate",
+    protocolVersion: 1,
+    approve: async (request) => syntheticApprovalResponse(request),
+  };
+  const settings = syntheticApprovalSettings(placeholderGate, overrides);
+  delete settings.gate;
+  settings.executable = overrides.executable ?? process.execPath;
+  settings.argv = overrides.argv ?? [FAKE_APPROVAL_GATE, mode];
+  return settings;
 }
 
 const CASE_INPUT = {
@@ -140,6 +220,40 @@ test("policyBindingDigest uses the v1 fixed vector", () => {
       policyDigest: "bc57d67ac57d3947717e8a4858356af81969a2d5a2e533e4722be3fc4ca18569",
     }),
     "315fe3576fc69fda19be1d4e0338214f3c39a6a75506073a035cb6d6249a20cf",
+  );
+});
+
+test("requirementDecisionDigest uses the Phase A v1 fixed vector", () => {
+  assert.equal(
+    syntheticRequirement(false).decision.requirementDecisionDigest,
+    "71c79fafcab6a2ab08c14e1c0791458757d25a040f22ce5a57c02ce08c0989e9",
+  );
+});
+
+test("validates the public command approval factory at runtime", () => {
+  assert.throws(
+    () =>
+      createCommandApprovalGate({
+        executable: process.execPath,
+        argv: "synthetic-invalid-argv" as never,
+        envAllowlist: [],
+        outputLimitBytes: 64 * 1024,
+        gateId: "synthetic-gate",
+      }),
+    (error: unknown) =>
+      error instanceof RunnerError && error.code === "approval_configuration_invalid",
+  );
+  assert.throws(
+    () =>
+      createCommandApprovalGate({
+        executable: process.execPath,
+        argv: [],
+        envAllowlist: ["SYNTHETIC=VALUE"],
+        outputLimitBytes: 64 * 1024,
+        gateId: "synthetic-gate",
+      }),
+    (error: unknown) =>
+      error instanceof RunnerError && error.code === "approval_configuration_invalid",
   );
 });
 
@@ -1248,18 +1362,11 @@ test("does not read or stage image content before approval completes", async () 
   const gate: ApprovalGate = {
     id: "swap-gate",
     protocolVersion: 1,
-    approve: async () => {
+    approve: async (request) => {
       await rename(image, movedImage);
       await writeFile(outsideImage, Buffer.from("synthetic outside image", "utf8"));
       await symlink(outsideImage, image);
-      return {
-        responseVersion: 1,
-        approved: true,
-        gateId: "swap-gate",
-        protocolVersion: 1,
-        snapshotDigest,
-        runtimeBindingDigest,
-      };
+      return syntheticApprovalResponse(request);
     },
   };
   const provider: Provider = {
@@ -1286,14 +1393,10 @@ test("does not read or stage image content before approval completes", async () 
         bundleDirectory: bundle,
         attemptRoot: attempts,
         provider,
-        approval: {
-          required: true,
-          gate,
-          expectedGateId: "swap-gate",
-          expectedProtocolVersion: 1,
+        approval: syntheticApprovalSettings(gate, {
           snapshotDigest,
           runtimeBindingDigest,
-        },
+        }),
       }),
       (error: unknown) =>
         typeof error === "object" &&
@@ -1373,15 +1476,9 @@ test("does not invoke or let a rejected approval gate reach the provider", async
       assert.equal("attemptKey" in request, false);
       assert.equal("attemptId" in request, false);
       assert.equal("runId" in request, false);
-      return {
-        responseVersion: 1,
-        approved: false,
-        gateId: "fake-gate",
-        protocolVersion: 1,
-        snapshotDigest,
-        runtimeBindingDigest,
+      return syntheticApprovalResponse(request, false, {
         reasonCode: "synthetic_denied",
-      };
+      });
     },
   };
   try {
@@ -1399,14 +1496,10 @@ test("does not invoke or let a rejected approval gate reach the provider", async
         bundleDirectory: bundle,
         attemptRoot: attempts,
         provider,
-        approval: {
-          required: true,
-          gate,
-          expectedGateId: "fake-gate",
-          expectedProtocolVersion: 1,
+        approval: syntheticApprovalSettings(gate, {
           snapshotDigest,
           runtimeBindingDigest,
-        },
+        }),
       }),
       (error: unknown) =>
         typeof error === "object" &&
@@ -1425,44 +1518,29 @@ test("does not invoke or let a rejected approval gate reach the provider", async
   }
 });
 
-test("rejects an optional approval gate before invoking it", async () => {
+test("runs an explicitly configured optional approval gate", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
   const bundle = path.join(temporary, "bundle");
   let approvalCalls = 0;
   try {
     await cp(FIXTURE, bundle, { recursive: true });
-    await assert.rejects(
-      runBundle({
-        bundleDirectory: bundle,
-        attemptRoot: path.join(temporary, "attempts"),
-        provider: createMockProvider(),
-        approval: {
-          required: false,
-          gate: {
-            id: "synthetic-gate",
-            protocolVersion: 1,
-            approve: async () => {
-              approvalCalls += 1;
-              return {
-                responseVersion: 1,
-                approved: true,
-                gateId: "synthetic-gate",
-                protocolVersion: 1,
-                snapshotDigest: "a".repeat(64),
-                runtimeBindingDigest: "b".repeat(64),
-              };
-            },
-          },
-          expectedGateId: "synthetic-gate",
-          expectedProtocolVersion: 1,
-          snapshotDigest: "a".repeat(64),
-          runtimeBindingDigest: "b".repeat(64),
-        },
-      }),
-      (error: unknown) =>
-        error instanceof RunnerError && error.code === "approval_configuration_invalid",
-    );
-    assert.equal(approvalCalls, 0);
+    const gate: ApprovalGate = {
+      id: "synthetic-gate",
+      protocolVersion: 1,
+      approve: async (request) => {
+        approvalCalls += 1;
+        return syntheticApprovalResponse(request);
+      },
+    };
+    const result = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: path.join(temporary, "attempts"),
+      provider: createMockProvider(),
+      approval: syntheticApprovalSettings(gate, { required: false }),
+    });
+    assert.equal(approvalCalls, 1);
+    assert.equal((await readAttempt(result.attemptDirectory)).manifest.approval.required, false);
+    assert.equal((await readAttempt(result.attemptDirectory)).manifest.approval.applied, true);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -1484,24 +1562,62 @@ test("rejects a non-callable approval gate before provider invocation", async ()
             providerCalls += 1;
           },
         }),
-        approval: {
-          required: true,
-          gate: {
+        approval: syntheticApprovalSettings(
+          {
             id: "synthetic-gate",
             protocolVersion: 1,
             approve: "synthetic-not-callable",
           } as unknown as ApprovalGate,
-          expectedGateId: "synthetic-gate",
-          expectedProtocolVersion: 1,
-          snapshotDigest: "a".repeat(64),
-          runtimeBindingDigest: "b".repeat(64),
-        },
+        ),
       }),
       (error: unknown) =>
         error instanceof RunnerError && error.code === "approval_configuration_invalid",
     );
     assert.equal(providerCalls, 0);
     await assert.rejects(readdir(attempts), /ENOENT/u);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects missing or ambiguous required approval implementations before provider access", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  let providerCalls = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const provider = createMockProvider({
+      onInvoke: () => {
+        providerCalls += 1;
+      },
+    });
+    const gate: ApprovalGate = {
+      id: "ambiguous-gate",
+      protocolVersion: 1,
+      approve: async (request) => syntheticApprovalResponse(request),
+    };
+    const cases: ApprovalSettings[] = [
+      { required: true },
+      syntheticApprovalSettings(gate, {
+        executable: process.execPath,
+        argv: [FAKE_APPROVAL_GATE, "approve"],
+      }),
+    ];
+    for (const [index, approval] of cases.entries()) {
+      await assert.rejects(
+        runBundle({
+          bundleDirectory: bundle,
+          attemptRoot: path.join(temporary, `attempts-${index}`),
+          provider,
+          approval,
+        }),
+        (error: unknown) =>
+          error instanceof RunnerError &&
+          (error.code === "approval_required" ||
+            error.code === "approval_configuration_invalid"),
+      );
+    }
+    assert.equal(providerCalls, 0);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -2237,7 +2353,7 @@ test("rejects extra attempt files and invalid timestamps", async () => {
   }
 });
 
-test("binds approval snapshot metadata into the run identity", async () => {
+test("rejects tampering with approval and provider run identity metadata", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
   const bundle = path.join(temporary, "bundle");
   const attempts = path.join(temporary, "attempts");
@@ -2246,14 +2362,7 @@ test("binds approval snapshot metadata into the run identity", async () => {
   const gate: ApprovalGate = {
     id: "identity-gate",
     protocolVersion: 1,
-    approve: async () => ({
-      responseVersion: 1,
-      approved: true,
-      gateId: "identity-gate",
-      protocolVersion: 1,
-      snapshotDigest,
-      runtimeBindingDigest,
-    }),
+    approve: async (request) => syntheticApprovalResponse(request),
   };
   try {
     await cp(FIXTURE, bundle, { recursive: true });
@@ -2261,29 +2370,60 @@ test("binds approval snapshot metadata into the run identity", async () => {
       bundleDirectory: bundle,
       attemptRoot: attempts,
       provider: createMockProvider(),
-      approval: {
-        required: true,
-        gate,
-        expectedGateId: "identity-gate",
-        expectedProtocolVersion: 1,
+      approval: syntheticApprovalSettings(gate, {
         snapshotDigest,
         runtimeBindingDigest,
-      },
+      }),
     });
     const manifestPath = path.join(result.attemptDirectory, "attempt.json");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
-      approval: { snapshotDigest: string };
+    const original = await readFile(manifestPath, "utf8");
+    type IdentityManifest = {
+      approval: {
+        snapshotDigest: string;
+        runtimeBindingDigest: string;
+        runtimeBindingIdentity: string;
+        approvedScopeDigest: string;
+        approvedScopeIdentity: string;
+        phase: string;
+        requirementDecisionDigest: string;
+        consumerSourceCommit: string | null;
+        sanitizerRequired: boolean;
+        sanitizerRequirementReason: string;
+      };
+      run: {
+        implementationVersion: string | null;
+        protocolVersion: string | null;
+      };
     };
-    manifest.approval.snapshotDigest = "e".repeat(64);
-    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-    await assert.rejects(
-      readAttempt(result.attemptDirectory),
-      (error: unknown) =>
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        error.code === "attempt_identity_mismatch",
-    );
+    const mutations: Array<(manifest: IdentityManifest) => void> = [
+      (manifest) => { manifest.approval.snapshotDigest = "e".repeat(64); },
+      (manifest) => { manifest.approval.runtimeBindingDigest = "e".repeat(64); },
+      (manifest) => { manifest.approval.runtimeBindingIdentity = "changed-runtime"; },
+      (manifest) => { manifest.approval.approvedScopeDigest = "e".repeat(64); },
+      (manifest) => { manifest.approval.approvedScopeIdentity = "changed-scope"; },
+      (manifest) => { manifest.approval.phase = "changed-phase"; },
+      (manifest) => { manifest.approval.requirementDecisionDigest = "e".repeat(64); },
+      (manifest) => { manifest.approval.consumerSourceCommit = "changed-source"; },
+      (manifest) => { manifest.approval.sanitizerRequired = true; },
+      (manifest) => { manifest.approval.sanitizerRequirementReason = "changed-reason"; },
+      (manifest) => { manifest.run.implementationVersion = "changed-implementation"; },
+      (manifest) => { manifest.run.protocolVersion = "changed-protocol"; },
+    ];
+    for (const mutate of mutations) {
+      const manifest = JSON.parse(original) as IdentityManifest;
+      mutate(manifest);
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+      await assert.rejects(
+        readAttempt(result.attemptDirectory),
+        (error: unknown) =>
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          error.code === "attempt_identity_mismatch",
+      );
+    }
+    await writeFile(manifestPath, original, "utf8");
+    await readAttempt(result.attemptDirectory);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -2402,18 +2542,23 @@ test("records a matching approval result before invoking the provider", async ()
     id: "fake-gate",
     protocolVersion: 1,
     approve: async (request) => {
-      assert.equal(request.gateId, "fake-gate");
-      assert.equal(request.snapshotDigest, snapshotDigest);
-      assert.equal(request.runtimeBindingDigest, runtimeBindingDigest);
+      assert.equal(request.requestVersion, 1);
+      assert.equal(request.expected.gateId, "fake-gate");
+      assert.equal(request.expected.snapshotDigest, snapshotDigest);
+      assert.equal(request.expected.runtimeBindingDigest, runtimeBindingDigest);
+      assert.equal(request.phase, SYNTHETIC_APPROVAL_PHASE);
+      assert.equal(request.documentKind, "synthetic_invoice");
       assert.equal("caseId" in request, false);
-      return {
-        responseVersion: 1,
-        approved: true,
-        gateId: "fake-gate",
-        protocolVersion: 1,
-        snapshotDigest,
-        runtimeBindingDigest,
-      };
+      assert.equal("image" in request, false);
+      assert.equal("schema" in request, false);
+      assert.equal("system" in request, false);
+      assert.equal("instruction" in request, false);
+      assert.equal("truth" in request, false);
+      assert.equal("comparison" in request, false);
+      assert.equal("caseInputIdentity" in request, false);
+      assert.equal("policy" in request, false);
+      assert.equal("attemptKey" in request, false);
+      return syntheticApprovalResponse(request);
     },
   };
   try {
@@ -2427,14 +2572,10 @@ test("records a matching approval result before invoking the provider", async ()
       bundleDirectory: bundle,
       attemptRoot: attempts,
       provider,
-      approval: {
-        required: true,
-        gate,
-        expectedGateId: "fake-gate",
-        expectedProtocolVersion: 1,
+      approval: syntheticApprovalSettings(gate, {
         snapshotDigest,
         runtimeBindingDigest,
-      },
+      }),
     });
     const attempt = await readAttempt(result.attemptDirectory);
     assert.equal(providerCalls, 1);
@@ -2442,6 +2583,448 @@ test("records a matching approval result before invoking the provider", async ()
     assert.equal(attempt.manifest.approval.applied, true);
     assert.equal(attempt.manifest.approval.snapshotDigest, snapshotDigest);
     assert.equal(attempt.manifest.approval.runtimeBindingDigest, runtimeBindingDigest);
+    assert.equal(
+      attempt.manifest.approval.approvedScopeIdentity,
+      SYNTHETIC_APPROVAL_SCOPE_IDENTITY,
+    );
+    assert.equal(attempt.manifest.approval.phase, SYNTHETIC_APPROVAL_PHASE);
+    assert.equal(
+      attempt.manifest.approval.requirementDecisionDigest,
+      syntheticRequirement(false).decision.requirementDecisionDigest,
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("uses the provider identity and method snapshot approved by the gate", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  let originalCalls = 0;
+  let replacementCalls = 0;
+  const base = createMockProvider({
+    onInvoke: () => {
+      originalCalls += 1;
+    },
+  });
+  const provider: {
+    id: string;
+    route: string;
+    implementationVersion: string | null;
+    protocolVersion: string | null;
+    invoke: Provider["invoke"];
+  } = {
+    id: base.id,
+    route: base.route,
+    implementationVersion: base.implementationVersion ?? null,
+    protocolVersion: base.protocolVersion ?? null,
+    invoke: base.invoke.bind(base),
+  };
+  const gate: ApprovalGate = {
+    id: "provider-snapshot-gate",
+    protocolVersion: 1,
+    approve: async (request) => {
+      assert.equal(request.provider.implementationVersion, "mock-v1");
+      assert.equal(request.provider.protocolVersion, "mock-v1");
+      provider.id = "changed-provider";
+      provider.implementationVersion = "changed-version";
+      provider.protocolVersion = "changed-protocol";
+      provider.invoke = async () => {
+        replacementCalls += 1;
+        return { rawDocument: null };
+      };
+      return syntheticApprovalResponse(request);
+    },
+  };
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const result = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: path.join(temporary, "attempts"),
+      provider,
+      approval: syntheticApprovalSettings(gate),
+    });
+    const attempt = await readAttempt(result.attemptDirectory);
+    assert.equal(originalCalls, 1);
+    assert.equal(replacementCalls, 0);
+    assert.equal(attempt.manifest.run.providerId, "mock");
+    assert.equal(attempt.manifest.run.implementationVersion, "mock-v1");
+    assert.equal(attempt.manifest.run.protocolVersion, "mock-v1");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects every mismatched approval identity field before provider access", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  let providerCalls = 0;
+  const mutations: Array<[keyof ApprovalResponse, unknown]> = [
+    ["responseVersion", 2],
+    ["gateId", "changed-gate"],
+    ["protocolVersion", 2],
+    ["snapshotDigest", "e".repeat(64)],
+    ["runtimeBindingDigest", "e".repeat(64)],
+    ["runtimeBindingIdentity", "changed-runtime"],
+    ["approvedScopeDigest", "e".repeat(64)],
+    ["approvedScopeIdentity", "changed-scope"],
+    ["phase", "changed-phase"],
+    ["requirementVerifierId", "changed-verifier"],
+    ["requirementVerifierVersion", "changed-version"],
+    ["consumerSourceCommit", "changed-source"],
+    ["requirementDecisionDigest", "e".repeat(64)],
+    ["sanitizerRequirementVersion", 2],
+    ["sanitizerRequired", true],
+    ["policyRequired", true],
+    ["sanitizerRequirementReason", "changed-reason"],
+  ];
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    for (const [index, [field, value]] of mutations.entries()) {
+      const gate: ApprovalGate = {
+        id: "identity-matrix-gate",
+        protocolVersion: 1,
+        approve: async (request) => {
+          const response = syntheticApprovalResponse(request);
+          (response as unknown as Record<string, unknown>)[field] = value;
+          return response;
+        },
+      };
+      await assert.rejects(
+        runBundle({
+          bundleDirectory: bundle,
+          attemptRoot: path.join(temporary, `attempts-${index}`),
+          provider: createMockProvider({
+            onInvoke: () => {
+              providerCalls += 1;
+            },
+          }),
+          approval: syntheticApprovalSettings(gate),
+        }),
+        (error: unknown) =>
+          error instanceof RunnerError && error.code === "approval_response_invalid",
+      );
+    }
+
+    const getterGate: ApprovalGate = {
+      id: "getter-gate",
+      protocolVersion: 1,
+      approve: async (request) => {
+        const response = syntheticApprovalResponse(request);
+        Object.defineProperty(response, "approved", {
+          get: () => {
+            throw new Error("synthetic getter failure");
+          },
+        });
+        return response;
+      },
+    };
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: path.join(temporary, "attempts-getter"),
+        provider: createMockProvider({
+          onInvoke: () => {
+            providerCalls += 1;
+          },
+        }),
+        approval: syntheticApprovalSettings(getterGate),
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "approval_response_invalid",
+    );
+    assert.equal(providerCalls, 0);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("runs a command approval gate with a safe request and allowlisted environment", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  const previousAllowed = process.env.SYNTHETIC_ALLOWED_MARKER;
+  const previousBlocked = process.env.SYNTHETIC_BLOCKED_MARKER;
+  process.env.SYNTHETIC_ALLOWED_MARKER = "synthetic-allowed";
+  process.env.SYNTHETIC_BLOCKED_MARKER = "synthetic-blocked";
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    for (const [index, settings] of [
+      syntheticCommandApprovalSettings("request-boundary"),
+      syntheticCommandApprovalSettings("env", {
+        envAllowlist: ["SYNTHETIC_ALLOWED_MARKER"],
+      }),
+      syntheticCommandApprovalSettings("literal-arg", {
+        argv: [FAKE_APPROVAL_GATE, "literal-arg", "$(synthetic-not-executed)"],
+      }),
+    ].entries()) {
+      const result = await runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: attempts,
+        attemptKey: `command-${index}`,
+        provider: createMockProvider(),
+        approval: settings,
+      });
+      const attempt = await readAttempt(result.attemptDirectory);
+      assert.equal(attempt.manifest.approval.applied, true);
+      assert.equal(attempt.manifest.approval.gateId, "synthetic-command-gate");
+      assert.equal(attempt.manifest.approval.phase, SYNTHETIC_APPROVAL_PHASE);
+      assert.equal(attempt.manifest.approval.checkedAt === null, false);
+      assert.equal(attempt.manifest.approval.expiresAt === null, false);
+      assert.equal(JSON.stringify(attempt.manifest).includes(FAKE_APPROVAL_GATE), false);
+      assert.equal(JSON.stringify(attempt.manifest).includes("SYNTHETIC_ALLOWED_MARKER"), false);
+    }
+  } finally {
+    if (previousAllowed === undefined) delete process.env.SYNTHETIC_ALLOWED_MARKER;
+    else process.env.SYNTHETIC_ALLOWED_MARKER = previousAllowed;
+    if (previousBlocked === undefined) delete process.env.SYNTHETIC_BLOCKED_MARKER;
+    else process.env.SYNTHETIC_BLOCKED_MARKER = previousBlocked;
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("denies out-of-scope document kinds and phases before provider access", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const baseBundle = path.join(temporary, "bundle");
+  const changedBundle = path.join(temporary, "changed-bundle");
+  let providerCalls = 0;
+  try {
+    await cp(FIXTURE, baseBundle, { recursive: true });
+    await cp(FIXTURE, changedBundle, { recursive: true });
+    const manifestPath = path.join(changedBundle, "bundle.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      metadata: { documentKind: string };
+    };
+    manifest.metadata.documentKind = "synthetic_purchase_slip";
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    const provider = createMockProvider({
+      onInvoke: () => {
+        providerCalls += 1;
+      },
+    });
+    const scopeCases: Array<[string, Partial<ApprovalSettings>]> = [
+      [baseBundle, { phase: "frozen-holdout" }],
+      [changedBundle, {}],
+    ];
+    for (const [index, [bundleDirectory, overrides]] of scopeCases.entries()) {
+      await assert.rejects(
+        runBundle({
+          bundleDirectory,
+          attemptRoot: path.join(temporary, `scope-attempts-${index}`),
+          provider,
+          approval: syntheticCommandApprovalSettings("scope", overrides),
+        }),
+        (error: unknown) =>
+          error instanceof RunnerError && error.code === "approval_denied",
+      );
+    }
+    assert.equal(providerCalls, 0);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("reexecutes approval for each caller-keyed attempt of the same run", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  let gateCalls = 0;
+  const gate: ApprovalGate = {
+    id: "repeat-gate",
+    protocolVersion: 1,
+    approve: async (request) => {
+      gateCalls += 1;
+      return syntheticApprovalResponse(request);
+    },
+  };
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const results = [];
+    for (const attemptKey of ["repeat-1", "repeat-2"]) {
+      results.push(
+        await runBundle({
+          bundleDirectory: bundle,
+          attemptRoot: attempts,
+          attemptKey,
+          provider: createMockProvider(),
+          approval: syntheticApprovalSettings(gate),
+        }),
+      );
+    }
+    assert.equal(gateCalls, 2);
+    assert.equal(results[0]?.runId, results[1]?.runId);
+    assert.notEqual(results[0]?.attemptId, results[1]?.attemptId);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("validates an adapter-provided approval attestation against the runner gate", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  let gateResponse: ApprovalResponse | undefined;
+  const gate: ApprovalGate = {
+    id: "adapter-attestation-gate",
+    protocolVersion: 1,
+    approve: async (request) => {
+      gateResponse = syntheticApprovalResponse(request);
+      return gateResponse;
+    },
+  };
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    for (const mismatch of [false, true]) {
+      const base = createMockProvider();
+      const provider: Provider = {
+        ...base,
+        invoke: async (request, context, signal) => {
+          const response = await base.invoke(request, context, signal);
+          assert.ok(gateResponse);
+          return {
+            ...response,
+            approval: mismatch
+              ? { ...gateResponse, approvedScopeDigest: "f".repeat(64) }
+              : gateResponse,
+          };
+        },
+      };
+      const attemptRoot = path.join(temporary, `adapter-attempts-${mismatch}`);
+      const operation = runBundle({
+        bundleDirectory: bundle,
+        attemptRoot,
+        provider,
+        approval: syntheticApprovalSettings(gate),
+      });
+      if (mismatch) {
+        await assert.rejects(
+          operation,
+          (error: unknown) =>
+            error instanceof RunnerError && error.code === "approval_response_invalid",
+        );
+        assert.deepEqual(await readdir(attemptRoot), []);
+      } else {
+        const result = await operation;
+        assert.equal((await readAttempt(result.attemptDirectory)).manifest.approval.applied, true);
+      }
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("fails closed on command approval denial, timeout, output, and identity failures", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  let providerCalls = 0;
+  let imageReads = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const provider = createMockProvider({
+      onInvoke: () => {
+        providerCalls += 1;
+      },
+      onImageRead: () => {
+        imageReads += 1;
+      },
+    });
+    const failures = [
+      ["deny", "approval_denied", {}],
+      ["expired", "approval_denied", {}],
+      ["malformed", "approval_response_invalid", {}],
+      ["nonzero", "approval_response_invalid", {}],
+      ["huge", "approval_response_invalid", { outputLimitBytes: 1_024 }],
+      ["unexpected", "approval_response_invalid", {}],
+      ["mismatch-scope", "approval_response_invalid", {}],
+      ["mutate-requirement", "approval_response_invalid", {}],
+      ["hang", "approval_timeout", { timeoutMs: 20 }],
+    ] as const;
+    for (const [index, [mode, code, overrides]] of failures.entries()) {
+      const attemptRoot = path.join(temporary, `failed-attempts-${index}`);
+      await assert.rejects(
+        runBundle({
+          bundleDirectory: bundle,
+          attemptRoot,
+          provider,
+          approval: syntheticCommandApprovalSettings(mode, overrides),
+        }),
+        (error: unknown) => error instanceof RunnerError && error.code === code,
+      );
+      await assert.rejects(readdir(attemptRoot), /ENOENT/u);
+    }
+    assert.equal(providerCalls, 0);
+    assert.equal(imageReads, 0);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects inconsistent approval attestation settings before provider access", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  let providerCalls = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const settings = syntheticCommandApprovalSettings("approve");
+    settings.expectedSanitizerRequirementReason = "synthetic_mismatched_reason";
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: attempts,
+        provider: createMockProvider({
+          onInvoke: () => {
+            providerCalls += 1;
+          },
+        }),
+        approval: settings,
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "approval_configuration_invalid",
+    );
+    assert.equal(providerCalls, 0);
+    await assert.rejects(readdir(attempts), /ENOENT/u);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("binds phase, runtime, scope, and provider versions into the run identity", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const variants: Array<Partial<ApprovalSettings>> = [
+      {},
+      { phase: "frozen-holdout" },
+      { runtimeBindingIdentity: "synthetic-runtime-v2" },
+      { runtimeBindingDigest: "d".repeat(64) },
+      { approvedScopeIdentity: "synthetic-scope-v2" },
+      { approvedScopeDigest: "e".repeat(64) },
+    ];
+    const runIds: string[] = [];
+    for (const [index, overrides] of variants.entries()) {
+      const result = await runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: attempts,
+        attemptKey: `binding-${index}`,
+        provider: createMockProvider(),
+        approval: syntheticCommandApprovalSettings("approve", overrides),
+      });
+      runIds.push(result.runId);
+    }
+    const providerVersionResult = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      attemptKey: "provider-version",
+      provider: {
+        ...createMockProvider(),
+        implementationVersion: "mock-v2",
+      },
+      approval: syntheticCommandApprovalSettings("approve"),
+    });
+    runIds.push(providerVersionResult.runId);
+    assert.equal(new Set(runIds).size, runIds.length);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

@@ -163,6 +163,8 @@
       "required": [
         "providerId",
         "route",
+        "implementationVersion",
+        "protocolVersion",
         "requested",
         "responded"
       ],
@@ -173,6 +175,20 @@
         },
         "route": {
           "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "implementationVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "protocolVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
           "pattern": "^[A-Za-z0-9._-]{1,64}$"
         },
         "requested": {
@@ -518,7 +534,21 @@
         "protocolVersion",
         "snapshotDigest",
         "runtimeBindingDigest",
-        "runtimeBindingIdentity"
+        "runtimeBindingIdentity",
+        "approvedScopeDigest",
+        "approvedScopeIdentity",
+        "phase",
+        "requirementVerifierId",
+        "requirementVerifierVersion",
+        "consumerSourceCommit",
+        "requirementDecisionDigest",
+        "sanitizerRequirementVersion",
+        "sanitizerRequired",
+        "policyRequired",
+        "sanitizerRequirementReason",
+        "checkedAt",
+        "expiresAt",
+        "reasonCode"
       ],
       "properties": {
         "required": {
@@ -574,8 +604,234 @@
             "null"
           ],
           "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "approvedScopeDigest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "approvedScopeIdentity": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "phase": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "requirementVerifierId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "requirementVerifierVersion": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "consumerSourceCommit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "requirementDecisionDigest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sanitizerRequirementVersion": {
+          "anyOf": [
+            {
+              "const": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sanitizerRequired": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "policyRequired": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sanitizerRequirementReason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "checkedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "expiresAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "reasonCode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
         }
-      }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "required": {
+              "const": false
+            },
+            "applied": {
+              "const": false
+            },
+            "gateId": {
+              "type": "null"
+            },
+            "protocolVersion": {
+              "type": "null"
+            },
+            "snapshotDigest": {
+              "type": "null"
+            },
+            "runtimeBindingDigest": {
+              "type": "null"
+            },
+            "runtimeBindingIdentity": {
+              "type": "null"
+            },
+            "approvedScopeDigest": {
+              "type": "null"
+            },
+            "approvedScopeIdentity": {
+              "type": "null"
+            },
+            "phase": {
+              "type": "null"
+            },
+            "requirementVerifierId": {
+              "type": "null"
+            },
+            "requirementVerifierVersion": {
+              "type": "null"
+            },
+            "consumerSourceCommit": {
+              "type": "null"
+            },
+            "requirementDecisionDigest": {
+              "type": "null"
+            },
+            "sanitizerRequirementVersion": {
+              "type": "null"
+            },
+            "sanitizerRequired": {
+              "type": "null"
+            },
+            "policyRequired": {
+              "type": "null"
+            },
+            "sanitizerRequirementReason": {
+              "type": "null"
+            },
+            "checkedAt": {
+              "type": "null"
+            },
+            "expiresAt": {
+              "type": "null"
+            },
+            "reasonCode": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "applied": {
+              "const": true
+            },
+            "gateId": {
+              "type": "string"
+            },
+            "protocolVersion": {
+              "const": 1
+            },
+            "snapshotDigest": {
+              "$ref": "#/$defs/digest"
+            },
+            "runtimeBindingDigest": {
+              "$ref": "#/$defs/digest"
+            },
+            "runtimeBindingIdentity": {
+              "type": "string"
+            },
+            "approvedScopeDigest": {
+              "$ref": "#/$defs/digest"
+            },
+            "approvedScopeIdentity": {
+              "type": "string"
+            },
+            "phase": {
+              "type": "string"
+            },
+            "requirementVerifierId": {
+              "type": "string"
+            },
+            "requirementVerifierVersion": {
+              "type": "string"
+            },
+            "requirementDecisionDigest": {
+              "$ref": "#/$defs/digest"
+            },
+            "sanitizerRequirementVersion": {
+              "const": 1
+            },
+            "sanitizerRequired": {
+              "type": "boolean"
+            },
+            "policyRequired": {
+              "type": "boolean"
+            },
+            "sanitizerRequirementReason": {
+              "type": "string"
+            }
+          }
+        }
+      ]
     },
     "sanitizer": {
       "type": "object",

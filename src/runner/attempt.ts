@@ -113,6 +113,8 @@ export type AttemptManifest = {
   run: {
     providerId: string;
     route: string;
+    implementationVersion: string | null;
+    protocolVersion: string | null;
     requested: RequestedExecutionSettings;
     responded: {
       model: string | null;
@@ -129,6 +131,20 @@ export type AttemptManifest = {
     snapshotDigest: string | null;
     runtimeBindingDigest: string | null;
     runtimeBindingIdentity: string | null;
+    approvedScopeDigest: string | null;
+    approvedScopeIdentity: string | null;
+    phase: string | null;
+    requirementVerifierId: string | null;
+    requirementVerifierVersion: string | null;
+    consumerSourceCommit: string | null;
+    requirementDecisionDigest: string | null;
+    sanitizerRequirementVersion: 1 | null;
+    sanitizerRequired: boolean | null;
+    policyRequired: boolean | null;
+    sanitizerRequirementReason: string | null;
+    checkedAt: string | null;
+    expiresAt: string | null;
+    reasonCode: string | null;
   };
   sanitizerRequirement: SanitizerRequirementDecisionV1;
   sanitizer?: {
@@ -917,11 +933,20 @@ function parseAttemptManifest(
     invalid();
   }
   const run = requiredObject(manifest.run);
-  assertKeys(run, ["providerId", "route", "requested", "responded"]);
+  assertKeys(run, [
+    "providerId",
+    "route",
+    "implementationVersion",
+    "protocolVersion",
+    "requested",
+    "responded",
+  ]);
   parseResponded(run.responded);
   const providerId = requiredString(run.providerId);
   const route = requiredString(run.route);
   if (!isSafeLabel(providerId) || !isSafeLabel(route)) invalid();
+  const providerImplementationVersion = nullableSafeLabel(run.implementationVersion);
+  const providerProtocolVersion = nullableSafeLabel(run.protocolVersion);
   const requested = parseRequested(run.requested);
   const approval = requiredObject(manifest.approval);
   assertKeys(approval, [
@@ -932,9 +957,22 @@ function parseAttemptManifest(
     "snapshotDigest",
     "runtimeBindingDigest",
     "runtimeBindingIdentity",
+    "approvedScopeDigest",
+    "approvedScopeIdentity",
+    "phase",
+    "requirementVerifierId",
+    "requirementVerifierVersion",
+    "consumerSourceCommit",
+    "requirementDecisionDigest",
+    "sanitizerRequirementVersion",
+    "sanitizerRequired",
+    "policyRequired",
+    "sanitizerRequirementReason",
+    "checkedAt",
+    "expiresAt",
+    "reasonCode",
   ]);
-  const approvalMetadata = parseApprovalMetadata(approval);
-  const approvalBinding = parseAppliedBinding(approval);
+  const approvalMetadata = parseApprovalMetadata(approval, sanitizerRequirement);
   const sanitizerBindingDigest = sanitizer === undefined ? null : nullableDigest(sanitizer.policyBindingDigest);
   parseStages(manifest.stages, sanitizerRequirement.sanitizerRequired);
   if (
@@ -943,14 +981,19 @@ function parseAttemptManifest(
       bundleManifestDigest,
       providerId,
       providerRoute: route,
+      providerImplementationVersion,
+      providerProtocolVersion,
       requestedModel: requested.model,
       requestedEffort: requested.effort,
       maxTokens: requested.maxTokens,
-      approvalBindingDigest: approvalBinding.digest,
-      approvalBindingIdentity: approvalBinding.identity,
+      approvalBindingDigest: approvalMetadata.runtimeBindingDigest,
+      approvalBindingIdentity: approvalMetadata.runtimeBindingIdentity,
       approvalGateId: approvalMetadata.gateId,
       approvalProtocolVersion: approvalMetadata.protocolVersion,
       approvalSnapshotDigest: approvalMetadata.snapshotDigest,
+      approvalPhase: approvalMetadata.phase,
+      approvalScopeDigest: approvalMetadata.approvedScopeDigest,
+      approvalScopeIdentity: approvalMetadata.approvedScopeIdentity,
       approvalRequired: approvalMetadata.required,
       sanitizerBindingDigest,
       sanitizerId: sanitizer === undefined ? null : nullableSafeLabel(sanitizer.id),
@@ -1181,20 +1224,6 @@ function parseRequested(value: JsonValue | undefined): RequestedExecutionSetting
   return { model, effort, maxTokens };
 }
 
-function parseAppliedBinding(approval: Record<string, JsonValue>): {
-  digest: string | null;
-  identity: string | null;
-} {
-  const applied = approval.applied;
-  if (typeof applied !== "boolean") invalid();
-  const binding = nullableDigest(approval.runtimeBindingDigest);
-  const identity = nullableSafeLabel(approval.runtimeBindingIdentity);
-  if (!applied && (binding !== null || identity !== null)) {
-    throw new RunnerError("attempt_identity_mismatch", "attempt approval binding is invalid");
-  }
-  return { digest: binding, identity };
-}
-
 function parseProvenance(value: JsonValue | undefined): void {
   const provenance = requiredObject(value);
   assertKeys(provenance, ["harnessVersion", "harnessCommit", "promptVersion", "preprocessVersion", "sourceCommit"]);
@@ -1228,7 +1257,10 @@ function parseUsage(value: JsonValue | undefined): void {
   }
 }
 
-function parseApprovalMetadata(approval: Record<string, JsonValue>): {
+function parseApprovalMetadata(
+  approval: Record<string, JsonValue>,
+  requirement: SanitizerRequirementDecisionV1,
+): {
   required: boolean;
   applied: boolean;
   gateId: string | null;
@@ -1236,6 +1268,9 @@ function parseApprovalMetadata(approval: Record<string, JsonValue>): {
   snapshotDigest: string | null;
   runtimeBindingDigest: string | null;
   runtimeBindingIdentity: string | null;
+  approvedScopeDigest: string | null;
+  approvedScopeIdentity: string | null;
+  phase: string | null;
 } {
   const required = approval.required;
   const applied = approval.applied;
@@ -1243,28 +1278,68 @@ function parseApprovalMetadata(approval: Record<string, JsonValue>): {
   if (required && !applied) {
     throw new RunnerError("attempt_identity_mismatch", "attempt approval binding is incomplete");
   }
-  if (!required && applied) invalid();
   const gateId = nullableSafeLabel(approval.gateId);
   const protocolVersion = approval.protocolVersion;
   if (protocolVersion !== null && protocolVersion !== 1) invalid();
   const snapshotDigest = nullableDigest(approval.snapshotDigest);
   const runtimeBindingDigest = nullableDigest(approval.runtimeBindingDigest);
   const runtimeBindingIdentity = nullableSafeLabel(approval.runtimeBindingIdentity);
+  const approvedScopeDigest = nullableDigest(approval.approvedScopeDigest);
+  const approvedScopeIdentity = nullableSafeLabel(approval.approvedScopeIdentity);
+  const phase = nullableSafeLabel(approval.phase);
+  const requirementVerifierId = nullableSafeLabel(approval.requirementVerifierId);
+  const requirementVerifierVersion = nullableSafeLabel(approval.requirementVerifierVersion);
+  const consumerSourceCommit = nullableSafeLabel(approval.consumerSourceCommit);
+  const requirementDecisionDigest = nullableDigest(approval.requirementDecisionDigest);
+  const sanitizerRequirementVersion = approval.sanitizerRequirementVersion;
+  const sanitizerRequired = approval.sanitizerRequired;
+  const policyRequired = approval.policyRequired;
+  const sanitizerRequirementReason = nullableSafeLabel(approval.sanitizerRequirementReason);
+  const checkedAt = nullableDateTime(approval.checkedAt);
+  const expiresAt = nullableDateTime(approval.expiresAt);
+  const reasonCode = nullableSafeLabel(approval.reasonCode);
   if (applied) {
     if (
       gateId === null ||
       protocolVersion !== 1 ||
       snapshotDigest === null ||
-      runtimeBindingDigest === null
+      runtimeBindingDigest === null ||
+      runtimeBindingIdentity === null ||
+      approvedScopeDigest === null ||
+      approvedScopeIdentity === null ||
+      phase === null ||
+      requirementVerifierId !== requirement.requirementVerifierId ||
+      requirementVerifierVersion !== requirement.requirementVerifierVersion ||
+      consumerSourceCommit !== requirement.consumerSourceCommit ||
+      requirementDecisionDigest !== requirement.requirementDecisionDigest ||
+      sanitizerRequirementVersion !== requirement.sanitizerRequirementVersion ||
+      sanitizerRequired !== requirement.sanitizerRequired ||
+      policyRequired !== requirement.policyRequired ||
+      sanitizerRequirementReason !== requirement.sanitizerRequirementReason
     ) {
-      invalid();
+      throw new RunnerError("attempt_identity_mismatch", "attempt approval binding is invalid");
     }
   } else if (
+    required ||
     gateId !== null ||
     protocolVersion !== null ||
     snapshotDigest !== null ||
     runtimeBindingDigest !== null ||
-    runtimeBindingIdentity !== null
+    runtimeBindingIdentity !== null ||
+    approvedScopeDigest !== null ||
+    approvedScopeIdentity !== null ||
+    phase !== null ||
+    requirementVerifierId !== null ||
+    requirementVerifierVersion !== null ||
+    consumerSourceCommit !== null ||
+    requirementDecisionDigest !== null ||
+    sanitizerRequirementVersion !== null ||
+    sanitizerRequired !== null ||
+    policyRequired !== null ||
+    sanitizerRequirementReason !== null ||
+    checkedAt !== null ||
+    expiresAt !== null ||
+    reasonCode !== null
   ) {
     throw new RunnerError("attempt_identity_mismatch", "attempt approval binding is invalid");
   }
@@ -1276,6 +1351,9 @@ function parseApprovalMetadata(approval: Record<string, JsonValue>): {
     snapshotDigest,
     runtimeBindingDigest,
     runtimeBindingIdentity,
+    approvedScopeDigest,
+    approvedScopeIdentity,
+    phase,
   };
 }
 
@@ -1394,6 +1472,12 @@ function nullableProtocolVersion(value: JsonValue | undefined): 1 | null {
   if (value === null) return null;
   if (value === 1) return 1;
   invalid();
+}
+
+function nullableDateTime(value: JsonValue | undefined): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || !isDateTime(value)) invalid();
+  return value;
 }
 
 function isDateTime(value: string): boolean {

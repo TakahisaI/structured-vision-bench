@@ -44,7 +44,7 @@ Bundle paths use normalized forward-slash relative paths. The validator rejects:
 
 Actual bundle reads use no-follow descriptors and recheck the canonical bundle root; hashing and
 strict text validation consume the same opened bytes. Provider inputs are copied into a private
-per-run staging directory after approval, with 0700 directories and 0600 files. Each provider input
+per-attempt-invocation staging directory after approval, with 0700 directories and 0600 files. Each provider input
 is bounded to 16 MiB before it is snapshotted;
 larger inputs fail with a stable runner error. Provider read callbacks are invalidated whenever
 provider execution settles (including timeout), and cleanup disposes the captured snapshots, so a
@@ -54,7 +54,23 @@ When sanitization is required, the runner validates the sanitizer ID, protocol v
 `sanitize` method before provider invocation or input access. It binds the method and freezes one
 implementation/settings snapshot for policy preflight, run identity, invocation, response identity,
 and manifest creation. A missing or hostile callable accessor fails with a fixed configuration error.
-Approval gate callability is validated and snapshotted before approval invocation as well.
+Approval gate callability is validated, bound, and snapshotted before approval invocation as well.
+Command gates use an executable and argument vector with `shell: false`, run from the OS temporary
+directory, and receive no inherited environment except names in an explicit allowlist. Stdin carries
+one request; strict JSON stdout and discarded stderr share a bounded byte budget. Timeouts abort and
+terminate the child. The adapter creates no protocol temporary file and never persists its command,
+arguments, environment names/values, response diagnostics, or private identities beyond the
+allowlisted attempt fields.
+
+Approval executes after bundle manifest/path/schema preflight and requirement-decision rederivation,
+but before complete provider-input verification, staging, provider process invocation, or image read.
+The request excludes image, schema, prompts, truth, comparison, prior attempts, policy, bundle root,
+case-input identity, and attempt identities. Every expected gate, snapshot, runtime, scope, phase,
+verifier, source, digest, and four-field decision value is compared. Missing required approval,
+denial, expiration, timeout, process failure, malformed or extra response data, and any mismatch fail
+closed with no provider access or formal attempt. A provider-carried approval attestation cannot
+replace this runner gate and, when present, must match its successful response exactly. The full
+boundary is in [`docs/approval-v1.md`](approval-v1.md).
 
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through

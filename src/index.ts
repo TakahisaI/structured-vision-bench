@@ -4,6 +4,7 @@ export * from "./bundle/validate-bundle.js";
 export * from "./comparison/compare.js";
 export * from "./provider/mock.js";
 export * from "./runner/attempt.js";
+export * from "./runner/approval.js";
 export * from "./runner/errors.js";
 export * from "./runner/identity.js";
 export * from "./runner/run.js";

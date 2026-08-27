@@ -23,6 +23,7 @@ Its run-facing settings are separate and never enter a bundle:
 
 - provider route, requested model, effort, and token limit;
 - repeat and retry policy;
+- approval command, phase, snapshot, runtime binding, and approved-scope expectations;
 - sanitizer command;
 - consumer-owned sanitizer requirement verifier and attestation.
 
@@ -47,6 +48,20 @@ staging, case/run/attempt identity, consumer requirement attestation, approval a
 binding checks, cancellation/timeout signaling, exclusive attempt claiming, final-manifest
 publication, and machine-readable attempt metadata. It does not own application-specific validation.
 A provider, approval, sanitizer, parse, policy, or schema failure creates no formal attempt.
+
+### Approval gate
+
+Approval v1 is a consumer-owned pre-transport decision boundary. After public bundle preflight and
+consumer requirement rederivation, the runner invokes either a validated in-process gate or a
+shell-free local command. The request contains only bounded run provenance and expected opaque
+snapshot/runtime/scope identities. It excludes provider inputs, truth, comparison, policy, case and
+attempt identities, and paths. The public harness compares identities but does not interpret private
+account, endpoint, persistence, retention, or scope policy. See
+[`docs/approval-v1.md`](approval-v1.md).
+
+The successful gate response is bound into `runId` and the attempt manifest. A provider-carried copy
+may be checked against that response but cannot replace the runner gate or self-authorize transport.
+Suite and resume propagation is intentionally deferred to Phase B of Issue #9 after Issue #5.
 
 ### Provider
 
@@ -116,8 +131,9 @@ confidential storage and is passed to a local checkout of the public harness.
 2. The validator rejects malformed, incomplete, changed, or escaping inputs and preflights the output schema.
 3. The consumer verifier derives the sanitizer requirement from document kind; the runner attests every
    decision field and digest.
-4. Approval and sanitizer implementations are runtime-validated into bound immutable snapshots, and
-   their policy/runtime bindings are checked before the relevant boundary is crossed.
+4. Approval and sanitizer implementations are runtime-validated into bound immutable snapshots. The
+   approval gate rederives its private decision and its snapshot/runtime/scope identities are checked
+   before provider invocation or provider-input access.
 5. After approval, the runner stages verified provider inputs outside the bundle (bounded to 16 MiB
    per provider input), derives a caller-keyed attempt ID from the stable run ID, and claims the
    attempt directory before provider work.

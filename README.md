@@ -7,11 +7,12 @@ unsafe paths, and provides a public home for model-runner and comparison tooling
 teams that must keep real documents, truth data, prompts, provider credentials, and production
 adapters outside a public repository.
 
-> **Status:** bundle v1 validation and the deterministic single-case mock runner are available.
-> Codex app-server support, comparison reports, repeat runs, and private command adapters remain
-> tracked in Issues [#3](https://github.com/TakahisaI/structured-vision-bench/issues/3) through
-> [#6](https://github.com/TakahisaI/structured-vision-bench/issues/6). Approval and sanitizer
-> process protocols are tracked separately in Issues #8 and #9.
+> **Status:** bundle v1 validation, the deterministic single-case mock runner, comparison reports,
+> and single-run approval protocol v1 are available. Codex app-server support, suites/resume, and
+> repeat policy remain tracked in Issues [#3](https://github.com/TakahisaI/structured-vision-bench/issues/3),
+> [#5](https://github.com/TakahisaI/structured-vision-bench/issues/5), and
+> [#6](https://github.com/TakahisaI/structured-vision-bench/issues/6). The sanitizer command protocol
+> remains Issue #8; suite/resume approval integration remains Phase B of Issue #9.
 
 ## What belongs here
 
@@ -20,8 +21,10 @@ adapters outside a public repository.
 - Synthetic fixtures that contain no real person, transaction, document, or model response.
 - Provider interfaces and test doubles.
 - Single-case `svbench run --provider mock` execution with consumer-attested sanitizer requirements,
-  atomic formal attempts, and sanitizer output when the consumer requires it.
-- Comparison, reporting, repeat, and resume logic implemented by later issues.
+  an optional or required private approval command, atomic formal attempts, and sanitizer output
+  when the consumer requires it.
+- Value-free single-case comparison and explicit rescoring.
+- Suite reporting, repeat, and resume logic implemented by later issues.
 
 ## What does not belong here
 
@@ -81,6 +84,12 @@ contract. CI and public fixtures use the mock provider only; no real model or lo
 The mock provider is deterministic and schema-valid for the validator's supported synthesis subset,
 including local `$ref` with supported sibling constraints and simple `allOf` intersections; it is not
 a general-purpose JSON Schema instance generator.
+
+For a consumer-owned gate, add `--approval required` plus the command, expected gate/snapshot,
+runtime-binding, approved-scope, and phase options. The command is spawned without a shell and with
+only explicitly allowlisted environment variables. See
+[`docs/approval-v1.md`](docs/approval-v1.md) for the exact CLI, wire protocol, identity binding, and
+fail-closed behavior.
 
 Compare a finalized attempt with its exact execution bundle:
 

@@ -6,10 +6,11 @@ Issue #2 adds a provider-neutral single-case runner. It consumes one already val
 writes one successful attempt outside the bundle. It does not own a production prompt, business
 schema, preprocessing, provider credentials, comparison logic, repeat policy, or resume policy.
 
-The sanitizer and approval process protocols are separate work items (#8 and #9). This milestone
-does implement the consumer-owned sanitizer-requirement attestation boundary: a consumer verifier
-must derive and approve the decision before the provider runs. It does not implement a real command,
-login, or hosted-model adapter.
+The command sanitizer protocol remains a separate work item (#8). Approval protocol v1 Phase A is
+implemented for this single-run lifecycle: a consumer verifier must derive the requirement decision,
+and a configured private gate must approve the expected snapshot, runtime binding, and scope before
+the provider runs. Suite/resume approval integration remains Phase B of #9 after #5. This repository
+does not implement a real login or hosted-model adapter.
 
 ## CLI
 
@@ -24,6 +25,7 @@ svbench run \
   [--max-tokens <n>] \
   [--attempt-key <label>] \
   [--attempt-root <directory>] \
+  [--approval required|optional --approval-command <executable> <approval identity options>] \
   [--json]
 ```
 
@@ -32,6 +34,10 @@ svbench run \
 run creates a child directory named by the derived attempt identity. The CLI prints the case,
 attempt-key, attempt, and run identities, never the model document, input contents, local absolute
 paths, or provider diagnostics.
+
+Command approval options and their exact request/response boundary are specified in
+[`docs/approval-v1.md`](approval-v1.md). Incomplete CLI approval options are invalid arguments and do
+not enter the runner.
 
 Exit status is `0` for a finalized attempt, `1` for a classified bundle/provider/approval/sanitizer
 failure, and `2` for invalid CLI arguments or an unexpected internal failure. In JSON mode the
@@ -60,18 +66,24 @@ summary is written to stdout; human mode writes failures to stderr.
    implementation and freezes one snapshot used by run identity, policy preflight, invocation,
    response checks, and the attempt manifest. Missing, non-callable, or
    accessor-throwing implementations fail before provider invocation or provider input access. The
-   approval gate's `approve` method is validated and snapshotted at its corresponding preflight. The
+   approval gate's `approve` method is validated, bound, and snapshotted at its corresponding
+   preflight. A command gate is spawned without a shell and with only explicitly allowlisted
+   environment variables. The
    runner then hashes the exact policy envelope bytes, parses it with strict UTF-8 and JSON rules,
    recomputes its target identity, and
    computes the policy binding. A missing, malformed, swapped, or mismatched policy fails before
    provider invocation.
 5. **Approval.** A required approval gate must be present and match its expected gate ID, protocol
-   version, snapshot digest, runtime binding identity, and runtime binding digest. The gate request
-   contains run settings and safe provenance only; it contains no image, prompt, schema, truth,
-   comparison, or case identity.
+   version, snapshot digest, runtime binding identity/digest, approved-scope identity/digest, phase,
+   and complete consumer requirement attestation. A configured optional gate is held to the same
+   checks. The gate request contains run settings and safe provenance only; it contains no image,
+   prompt, schema, truth, comparison, prior attempt, policy, case identity, or attempt identity.
+   Denial, expiration, timeout, process failure, malformed output, and every identity mismatch fail
+   before provider invocation or image access. See [`docs/approval-v1.md`](approval-v1.md).
 6. **Complete verification and staging.** After approval, the runner revalidates the complete bundle,
    verifies all declared digests and truth projection, and copies image/system/instruction bytes into a
-   private per-run staging directory. It then claims `<attempt-root>/<attempt-id>` with a non-recursive
+   private per-attempt-invocation staging directory. It then claims
+   `<attempt-root>/<attempt-id>` with a non-recursive
    exclusive directory create. An existing entry is `attempt_exists`; only the process that wins this
    claim may build or clean up the unpublished attempt. The claim contains a private nonce marker
    until the final manifest publication. The provider receives callbacks over staged inputs, never a
@@ -155,8 +167,9 @@ rather than trusted from its declared digest. The manifest stores the policy bin
 
 ### Run identity
 
-`runId` is a separate identity. It includes the case identity, bundle manifest digest, provider ID
-and stable route label, requested model/effort/max tokens, the complete approval metadata, the
+`runId` is a separate identity. It includes the case identity, bundle manifest digest, provider ID,
+stable route label, provider implementation/protocol versions, requested model/effort/max tokens,
+the complete approval metadata, the
 sanitizer identity/binding metadata, and the complete consumer sanitizer-requirement decision. All
 optional tuple members use an explicit presence tag, so absent and null/empty values cannot collide.
 Changing a requested execution or security setting produces a different run ID without changing
@@ -193,8 +206,9 @@ attestation contains:
 - a bounded `sanitizerRequirementReason` code;
 - `requirementVerifierId` and `requirementVerifierVersion`;
 - optional bounded `consumerSourceCommit`;
-- `requirementDecisionDigest`, computed over the version, verifier identity, flags, reason, and
-  source-commit presence/value.
+- `requirementDecisionDigest`, computed over the ordered version, verifier identity, flags, reason,
+  and source-commit presence/value tuple defined in
+  [`docs/approval-v1.md`](approval-v1.md#consumer-requirement-decision-digest).
 
 The runner rejects a missing, malformed, stale, or downgraded decision before provider invocation.
 The attempt schema is a discriminator: a not-required decision omits `sanitizer` and the
@@ -233,8 +247,10 @@ It records:
 - the complete case input identity;
 - the consumer-owned sanitizer requirement decision and its decision digest;
 - harness version/commit and bundle prompt/preprocess/source metadata;
-- provider ID/stable route, requested settings, and only provider metadata actually returned;
-- approval status, gate/protocol/snapshot/runtime binding metadata;
+- provider ID/stable route, implementation/protocol versions, requested settings, and only provider
+  metadata actually returned;
+- approval status, gate/protocol/snapshot/runtime/scope/phase metadata and the complete mirrored
+  consumer requirement attestation;
 - when sanitizer is required, sanitizer status/version, policy digests, policy binding identity/
   binding digest, and bounded value-free findings;
 - passed stage records for approval, provider, parse, and schema validation, plus policy-target
@@ -275,6 +291,7 @@ The implementation is split into these public modules:
 - `src/runner/types.ts` — provider, approval, sanitizer, and run option types;
 - `src/runner/identity.ts` — case, policy, run, and attempt identity helpers;
 - `src/runner/attempt.ts` — attempt writer/reader and exact document digest;
+- `src/runner/approval.ts` — shell-free bounded command approval adapter;
 - `src/runner/sanitizer.ts` — policy envelope preflight and test helper;
 - `src/provider/mock.ts` — deterministic synthetic provider double;
 - `src/runner/load-bundle.ts` — runner-facing re-export of verified staging.
@@ -291,10 +308,12 @@ policy.
 Attempt v1 was changed before package publication while the package remains private at version
 `0.0.0`. Artifacts written by the earlier Issue #2 development shape—where `attemptId` equaled
 `runId` and the manifest had no attempt identity fields—are intentionally incompatible with this
-reader. There is no migration or legacy-reader path in this repository. Development users retaining
-those artifacts must read them with the matching earlier revision or use a fresh attempt root. The
-current schema remains v1 because no earlier attempt contract was released as a stable external
-artifact.
+reader. Phase A approval development also adds provider implementation/protocol versions, expanded
+approval metadata, and the corrected ordered requirement-decision digest tuple; artifacts from the
+preceding development shape are likewise incompatible. There is no migration or legacy-reader path
+in this repository. Development users retaining those artifacts must read them with the matching
+earlier revision or use a fresh attempt root. The current schema remains v1 because no earlier
+attempt contract was released as a stable external artifact.
 
 ## CI and data boundary
 
