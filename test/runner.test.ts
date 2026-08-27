@@ -60,6 +60,7 @@ import type {
   Provider,
   ProviderModelRequest,
   RunBundleOptions,
+  SanitizerFinding,
 } from "../src/runner/types.js";
 
 const IMAGE_SHA256 = "dda43d98857bc0977a1bdc67e8005428c3af95ca73cddda69c9e8737eee03cc9";
@@ -1856,6 +1857,112 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
       attempt.manifest.sanitizer?.policyBindingDigest,
       repeatedAttempt.manifest.sanitizer?.policyBindingDigest,
     );
+    const validResponse = {
+      sanitizedDocument: {
+        documentKind: "synthetic_invoice",
+        invoiceNumber: "SYNTHETIC-001",
+        issuedAt: "2026-01-01",
+        currency: "JPY",
+        lines: [],
+        totalAmount: 0,
+      },
+      sanitizerId: "fake-sanitizer",
+      protocolVersion: 1 as const,
+      policyVersion: 1,
+      policyDigest,
+      caseInputIdentityVersion: 1 as const,
+      caseInputIdentityDigest: identity.digest,
+      policyTargetIdentityDigest: identity.digest,
+      policyBindingDigest,
+    };
+    const missingField = { ...validResponse } as Partial<typeof validResponse>;
+    delete missingField.policyDigest;
+    const invalidResponses = [
+      { ...validResponse, syntheticUnknown: true },
+      missingField,
+      {
+        ...validResponse,
+        findings: [
+          {
+            code: "synthetic-invalid-path",
+            severity: "warning",
+            classification: "synthetic-redaction",
+            hardGate: false,
+            path: "/invalid~path",
+          },
+        ],
+      },
+    ];
+    for (const [index, invalidResponse] of invalidResponses.entries()) {
+      await assert.rejects(
+        runBundle({
+          bundleDirectory: bundle,
+          attemptRoot: path.join(temporary, `invalid-response-${index}`),
+          provider: createMockProvider(),
+          sanitizerRequirement: syntheticRequirement(true),
+          sanitizer: {
+            ...sanitizerSettings,
+            sanitizer: {
+              id: "fake-sanitizer",
+              protocolVersion: 1,
+              sanitize: async () => invalidResponse as never,
+            },
+          },
+        }),
+        (error: unknown) =>
+          error instanceof RunnerError && error.code === "sanitizer_response_invalid",
+      );
+    }
+    const mutableResponse: typeof validResponse & { findings: SanitizerFinding[] } = {
+      ...validResponse,
+      findings: [
+        {
+          code: "synthetic-stable-finding",
+          severity: "warning" as const,
+          classification: "synthetic-redaction",
+          hardGate: false,
+          path: "/synthetic",
+        },
+      ],
+    };
+    const mutationResult = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: path.join(temporary, "mutation-attempts"),
+      provider: createMockProvider(),
+      sanitizerRequirement: syntheticRequirement(true),
+      sanitizer: {
+        ...sanitizerSettings,
+        sanitizer: {
+          id: "fake-sanitizer",
+          protocolVersion: 1,
+          sanitize: async () => {
+            setImmediate(() => {
+              mutableResponse.sanitizedDocument = { forbiddenRawField: "SYNTHETIC-MUTATED" } as never;
+              mutableResponse.findings.push({
+                code: "synthetic-mutated-finding",
+                severity: "error",
+                classification: "synthetic-redaction",
+                hardGate: true,
+                path: "/mutated",
+              });
+            });
+            return mutableResponse;
+          },
+        },
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const mutationAttempt = await readAttempt(mutationResult.attemptDirectory);
+    assert.equal(JSON.stringify(mutationAttempt).includes("SYNTHETIC-MUTATED"), false);
+    assert.deepEqual(mutationAttempt.manifest.sanitizer?.findings, [
+      {
+        code: "synthetic-stable-finding",
+        severity: "warning",
+        classification: "synthetic-redaction",
+        hardGate: false,
+        path: null,
+      },
+    ]);
     await assert.rejects(
       runBundle({
         bundleDirectory: bundle,
@@ -1886,6 +1993,107 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         !error.message.includes("SYNTHETIC-SECRET-MARKER"),
     );
   } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("zeroes the private sanitizer policy snapshot without mutating caller bytes", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const identity = computeCaseInputIdentity({
+    caseId: "synthetic-invoice-basic",
+    documentKind: "synthetic_invoice",
+    preparedImage: { mediaType: "image/png", sha256: IMAGE_SHA256 },
+  });
+  const policyBytes = createSanitizerPolicyEnvelope({
+    target: identity,
+    policyVersion: 1,
+    policy: { syntheticRule: "remove-extra-fields" },
+  });
+  const policyDigest = createHash("sha256").update(policyBytes).digest("hex");
+  const policyBindingDigest = computePolicyBindingDigest({
+    caseInputIdentityDigest: identity.digest,
+    policyVersion: 1,
+    policyDigest,
+  });
+  const sanitizerSettings = {
+    required: true,
+    sanitizer: {
+      id: "fake-sanitizer",
+      protocolVersion: 1 as const,
+      sanitize: async (request: Parameters<Sanitizer["sanitize"]>[0]) => ({
+        sanitizedDocument: request.document,
+        sanitizerId: "fake-sanitizer",
+        protocolVersion: 1 as const,
+        policyVersion: 1,
+        policyDigest,
+        caseInputIdentityVersion: 1 as const,
+        caseInputIdentityDigest: identity.digest,
+        policyTargetIdentityDigest: identity.digest,
+        policyBindingDigest,
+      }),
+    },
+    policyEnvelopeBytes: policyBytes,
+    expectedSanitizerId: "fake-sanitizer",
+    expectedProtocolVersion: 1 as const,
+    expectedPolicyVersion: 1,
+    expectedPolicyDigest: policyDigest,
+    expectedCaseInputIdentityVersion: 1 as const,
+    expectedCaseInputIdentityDigest: identity.digest,
+    expectedPolicyBindingDigest: policyBindingDigest,
+  };
+  const originalFill = Uint8Array.prototype.fill;
+  let zeroedMatchingCopy = false;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    Uint8Array.prototype.fill = function (value, start, end) {
+      if (
+        value === 0 &&
+        this !== policyBytes &&
+        this.byteLength === policyBytes.byteLength &&
+        this.every((byte, index) => byte === policyBytes[index])
+      ) {
+        zeroedMatchingCopy = true;
+      }
+      return originalFill.call(this, value, start, end);
+    };
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: path.join(temporary, "invalid-config-attempts"),
+        provider: createMockProvider(),
+        sanitizerRequirement: syntheticRequirement(true),
+        sanitizer: { ...sanitizerSettings, timeoutMs: 0 },
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "sanitizer_configuration_invalid",
+    );
+    assert.equal(zeroedMatchingCopy, true);
+
+    zeroedMatchingCopy = false;
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: path.join(temporary, "missing-bundle"),
+        attemptRoot: path.join(temporary, "preflight-attempts"),
+        provider: createMockProvider(),
+        sanitizerRequirement: syntheticRequirement(true),
+        sanitizer: sanitizerSettings,
+      }),
+    );
+    assert.equal(zeroedMatchingCopy, true);
+
+    zeroedMatchingCopy = false;
+    await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: path.join(temporary, "attempts"),
+      provider: createMockProvider(),
+      sanitizerRequirement: syntheticRequirement(true),
+      sanitizer: sanitizerSettings,
+    });
+    assert.equal(zeroedMatchingCopy, true);
+    assert.equal(createHash("sha256").update(policyBytes).digest("hex"), policyDigest);
+  } finally {
+    Uint8Array.prototype.fill = originalFill;
     await rm(temporary, { recursive: true, force: true });
   }
 });
@@ -1956,6 +2164,30 @@ test("requires every expected sanitizer identity before provider invocation", as
       );
       assert.equal(providerCalls, 0, `${field} must be checked before provider invocation`);
     }
+    let invalidPolicyProviderCalls = 0;
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: path.join(temporary, "attempts-invalid-policy-bytes"),
+        provider: createMockProvider({
+          onInvoke: () => {
+            invalidPolicyProviderCalls += 1;
+          },
+        }),
+        sanitizerRequirement: syntheticRequirement(true),
+        sanitizer: {
+          ...complete,
+          policyEnvelopeBytes: "synthetic-not-bytes" as never,
+        },
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "sanitizer_configuration_invalid",
+    );
+    assert.equal(
+      invalidPolicyProviderCalls,
+      0,
+      "policy bytes must be checked before provider invocation",
+    );
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

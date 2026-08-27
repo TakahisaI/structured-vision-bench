@@ -126,24 +126,25 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     options.sanitizer,
     sanitizerImplementation,
   );
-  validateBoundarySettings(approvalSettings, sanitizerSettings, sanitizerImplementation);
-  validateTimeoutSetting(providerTimeoutMs, "run_configuration_invalid");
-  const provider = validateProvider(options.provider);
-  const harnessVersion =
-    normalizeOptionalSetting(options.harnessVersion) ?? DEFAULT_HARNESS_VERSION;
-  const harnessCommit = normalizeOptionalSetting(options.harnessCommit);
-  const startedAt = new Date().toISOString();
-  const attemptRoot = path.resolve(options.attemptRoot);
-
-  const temporaryParent = await mkdtemp(path.join(tmpdir(), "svbench-run-"));
-  const inputStagingDirectory = path.join(temporaryParent, "inputs");
-  let loaded:
-    | Awaited<ReturnType<typeof loadBundleForRunner>>
-    | undefined;
-  let attemptRootHandle: Awaited<ReturnType<typeof open>> | undefined;
-  let attemptClaim: Awaited<ReturnType<typeof claimAttemptDirectory>> | undefined;
-  let attemptRootGuard: { assertStable: () => Promise<void> } | undefined;
   try {
+    validateBoundarySettings(approvalSettings, sanitizerSettings, sanitizerImplementation);
+    validateTimeoutSetting(providerTimeoutMs, "run_configuration_invalid");
+    const provider = validateProvider(options.provider);
+    const harnessVersion =
+      normalizeOptionalSetting(options.harnessVersion) ?? DEFAULT_HARNESS_VERSION;
+    const harnessCommit = normalizeOptionalSetting(options.harnessCommit);
+    const startedAt = new Date().toISOString();
+    const attemptRoot = path.resolve(options.attemptRoot);
+
+    const temporaryParent = await mkdtemp(path.join(tmpdir(), "svbench-run-"));
+    const inputStagingDirectory = path.join(temporaryParent, "inputs");
+    let loaded:
+      | Awaited<ReturnType<typeof loadBundleForRunner>>
+      | undefined;
+    let attemptRootHandle: Awaited<ReturnType<typeof open>> | undefined;
+    let attemptClaim: Awaited<ReturnType<typeof claimAttemptDirectory>> | undefined;
+    let attemptRootGuard: { assertStable: () => Promise<void> } | undefined;
+    try {
     const prepared = await prepareBundleForRunner(
       options.bundleDirectory,
       options.contractSchemaPath,
@@ -167,9 +168,9 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       sanitizerSettings,
       sanitizerImplementation,
     );
-    const preparedPolicy = requirement.policyRequired
-      ? prepareSanitizerPolicy(sanitizerSettings, identity)
-      : undefined;
+      const preparedPolicy: PreparedSanitizerPolicy | undefined = requirement.policyRequired
+        ? prepareSanitizerPolicy(sanitizerSettings, identity)
+        : undefined;
     const approvalPlan = validateApprovalSettings(approvalSettings, requirement);
     if (approvalPlan !== undefined && approvalPlan.phase !== phase) {
       throw new RunnerError(
@@ -359,21 +360,24 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       caseId: loaded.caseId,
       documentSha256: artifact.documentSha256,
     };
-  } finally {
-    if (attemptClaim !== undefined) {
-      await cleanupAttemptClaim(attemptClaim, async () => {
-        if (attemptRootGuard === undefined) return false;
-        try {
-          await assertAttemptRootHandleStable(attemptRootHandle, attemptRoot, attemptRootGuard);
-          return true;
-        } catch {
-          return false;
-        }
-      });
+    } finally {
+      if (attemptClaim !== undefined) {
+        await cleanupAttemptClaim(attemptClaim, async () => {
+          if (attemptRootGuard === undefined) return false;
+          try {
+            await assertAttemptRootHandleStable(attemptRootHandle, attemptRoot, attemptRootGuard);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+      }
+      await loaded?.cleanup().catch(() => undefined);
+      await attemptRootHandle?.close().catch(() => undefined);
+      await rm(temporaryParent, { recursive: true, force: true }).catch(() => undefined);
     }
-    await loaded?.cleanup().catch(() => undefined);
-    await attemptRootHandle?.close().catch(() => undefined);
-    await rm(temporaryParent, { recursive: true, force: true }).catch(() => undefined);
+  } finally {
+    sanitizerSettings?.policyEnvelopeBytes?.fill(0);
   }
 }
 
@@ -439,7 +443,6 @@ function validateBoundarySettings(
   sanitizerImplementation: ValidatedSanitizerImplementation | undefined,
 ): void {
   validateCommandSettings(approval, "approval_configuration_invalid");
-  validateCommandSettings(sanitizer, "sanitizer_configuration_invalid");
   validateTimeoutSetting(approval?.timeoutMs, "approval_configuration_invalid");
   validateTimeoutSetting(sanitizer?.timeoutMs, "sanitizer_configuration_invalid");
   if (approval !== undefined && typeof approval.required !== "boolean") {
@@ -542,12 +545,9 @@ function snapshotSanitizerSettings(
     } else {
       snapshot.sanitizer = sanitizer;
     }
-    if (settings.policyEnvelopeBytes instanceof Uint8Array) {
-      snapshot.policyEnvelopeBytes = Uint8Array.from(settings.policyEnvelopeBytes);
-    }
-    if (Array.isArray(settings.argv)) snapshot.argv = [...settings.argv];
-    if (Array.isArray(settings.envAllowlist)) {
-      snapshot.envAllowlist = [...settings.envAllowlist];
+    if (snapshot.policyEnvelopeBytes !== undefined) {
+      if (!(snapshot.policyEnvelopeBytes instanceof Uint8Array)) throw new Error();
+      snapshot.policyEnvelopeBytes = Uint8Array.from(snapshot.policyEnvelopeBytes);
     }
     return Object.freeze(snapshot);
   } catch {
@@ -1501,12 +1501,13 @@ async function executeSanitizer(
       }),
       provenance: freezeObject({ ...provenance }),
     });
-    response = await withTimeout(
+    const responseValue = await withTimeout(
       () => sanitizer.sanitize(request, controller.signal),
       settings.timeoutMs ?? DEFAULT_SANITIZER_TIMEOUT_MS,
       "sanitizer_timeout",
       () => controller.abort(),
     );
+    response = snapshotSanitizerResponse(responseValue);
   } catch (error) {
     if (isInternalRunnerError(error)) throw error;
     throw internalRunnerError("sanitizer_failed", "sanitizer failed");
@@ -1557,8 +1558,14 @@ function normalizeFindings(findings: SanitizerFinding[] | undefined): SanitizerF
     throw new RunnerError("sanitizer_response_invalid", "sanitizer findings are invalid");
   }
   return findings.map((finding) => {
+    const allowedKeys = new Set(["code", "severity", "classification", "hardGate", "path"]);
     if (
       !isJsonObject(finding) ||
+      Object.keys(finding).some((key) => !allowedKeys.has(key)) ||
+      !Object.hasOwn(finding, "code") ||
+      !Object.hasOwn(finding, "severity") ||
+      !Object.hasOwn(finding, "classification") ||
+      !Object.hasOwn(finding, "hardGate") ||
       typeof finding.code !== "string" ||
       !isSafeLabel(finding.code) ||
       (finding.severity !== "info" &&
@@ -1569,7 +1576,9 @@ function normalizeFindings(findings: SanitizerFinding[] | undefined): SanitizerF
       typeof finding.hardGate !== "boolean" ||
       (finding.path !== undefined &&
         finding.path !== null &&
-        typeof finding.path !== "string")
+        (typeof finding.path !== "string" ||
+          finding.path.length > 1024 ||
+          !/^(?:\/(?:[^~/]|~[01])*)*$/u.test(finding.path)))
     ) {
       throw new RunnerError("sanitizer_response_invalid", "sanitizer findings are invalid");
     }
@@ -1581,6 +1590,74 @@ function normalizeFindings(findings: SanitizerFinding[] | undefined): SanitizerF
       path: null,
     };
   });
+}
+
+function snapshotSanitizerResponse(value: unknown): SanitizerResponse {
+  try {
+    const normalized = normalizeJsonValue(
+      value,
+      "sanitizer response",
+      MAX_DOCUMENT_BYTES + 256 * 1024,
+    );
+    if (!isJsonObject(normalized)) throw new Error();
+    const allowedKeys = new Set([
+      "sanitizedDocument",
+      "sanitizerId",
+      "protocolVersion",
+      "policyVersion",
+      "policyDigest",
+      "caseInputIdentityVersion",
+      "caseInputIdentityDigest",
+      "policyTargetIdentityDigest",
+      "policyBindingDigest",
+      "findings",
+    ]);
+    const requiredKeys = [...allowedKeys].filter((key) => key !== "findings");
+    if (
+      Object.keys(normalized).some((key) => !allowedKeys.has(key)) ||
+      requiredKeys.some((key) => !Object.hasOwn(normalized, key)) ||
+      typeof normalized.sanitizerId !== "string" ||
+      !isSafeLabel(normalized.sanitizerId) ||
+      normalized.protocolVersion !== 1 ||
+      typeof normalized.policyVersion !== "number" ||
+      !Number.isSafeInteger(normalized.policyVersion) ||
+      normalized.policyVersion < 1 ||
+      typeof normalized.policyDigest !== "string" ||
+      !isDigest(normalized.policyDigest) ||
+      normalized.caseInputIdentityVersion !== 1 ||
+      typeof normalized.caseInputIdentityDigest !== "string" ||
+      !isDigest(normalized.caseInputIdentityDigest) ||
+      typeof normalized.policyTargetIdentityDigest !== "string" ||
+      !isDigest(normalized.policyTargetIdentityDigest) ||
+      typeof normalized.policyBindingDigest !== "string" ||
+      !isDigest(normalized.policyBindingDigest)
+    ) {
+      throw new Error();
+    }
+    const findings = normalizeFindings(
+      normalized.findings === undefined
+        ? undefined
+        : (normalized.findings as SanitizerFinding[]),
+    );
+    return freezeObject({
+      sanitizedDocument: normalizeJsonValue(
+        normalized.sanitizedDocument,
+        "sanitizer document",
+        MAX_DOCUMENT_BYTES,
+      ),
+      sanitizerId: normalized.sanitizerId,
+      protocolVersion: 1,
+      policyVersion: normalized.policyVersion,
+      policyDigest: normalized.policyDigest,
+      caseInputIdentityVersion: 1,
+      caseInputIdentityDigest: normalized.caseInputIdentityDigest,
+      policyTargetIdentityDigest: normalized.policyTargetIdentityDigest,
+      policyBindingDigest: normalized.policyBindingDigest,
+      findings,
+    });
+  } catch {
+    throw internalRunnerError("sanitizer_response_invalid", "sanitizer response is invalid");
+  }
 }
 
 function parseProviderOutput(output: ProviderOutput): JsonValue {
