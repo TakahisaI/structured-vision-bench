@@ -82,6 +82,44 @@ callback. Thus a receiver-state change or an adapter that delays image access pa
 the earlier gate result. Provider, approval, and sanitizer timeout values are all bounded to Node's
 maximum timer delay of 2,147,483,647 milliseconds.
 
+The Phase A command provider follows the same shell-free configuration boundary and accepts only
+policy-not-required runs and rejects required sanitizer or policy flags before starting a child.
+For approved runs, the private adapter reattests its current transport binding without extraction
+inputs at the runner hook and again after callback hashing inside the extraction process. The runner
+validates that inline response before creating the five-file request directory, then releases its
+path to the same live process over stdin. The adapter must keep the attested binding valid through
+transport. Direct-child exit is monitored separately from stdio close and raced through
+materialization and path delivery. An observed exit stops remaining staging work, prevents a new
+path write, waits for in-flight filesystem settlement, and forces complete private cleanup and
+failure. Portable Node.js cannot make child liveness atomic with path materialization; the
+consumer-owned adapter boundary therefore includes conforming descendants, which must not scan the
+temporary root or inherit/intercept control stdin, request paths, or request descriptors. The
+provider then copies the four exact
+verified provider inputs plus one bounded manifest into a fresh mode-0700 directory using mode-0600
+files. The schema remains byte-exact and is reparsed before spawn. The request directory contains no truth,
+comparison, prior-attempt, policy, credential, or original corpus path. The child receives an
+allowlist-only environment plus a reserved operation variable and uses a separate fresh empty
+directory as `cwd`; relative arguments therefore cannot resolve bundle-controlled inputs. For an
+approved run the request path is absent from the spawn environment and is sent only after inline
+reattestation; an unapproved run receives it in the reserved request-directory variable.
+Allowlist names are unique case-insensitively and cannot use any case variant of a reserved name.
+The public provider boundary rejects denied and expired approvals before reading any input callback.
+It snapshots the complete provider request and adapter context before any callback, including
+callbacks, parsed schema, requested settings, identities, digests, provenance, phase, approval, and
+the consumer sanitizer-requirement decision. The decision digest is recomputed from that immutable
+snapshot, and later mutation of caller-owned objects cannot change the released request or response
+checks. Approval expiry is checked before and after every callback so expiry during one read stops
+all later input access and zeroes any returned binary buffer. Callback Promises are raced with the
+invocation AbortSignal; abort settles without waiting for a non-cooperative callback, while late
+binary results are zeroed and late rejections are observed.
+Stdout and stderr have a shared configured bound and are never echoed. Response phase/provider/case-input/requirement/approval
+identities and requested settings are exact-match checked. Cancellation or overflow kills the child
+process group, timeouts await command cleanup, callback-returned binary buffers and private input
+copies are zeroed, and cleanup failure is fail-closed. Adapters that detach or daemonize descendants
+outside that group are non-conforming and outside the portable cleanup guarantee; they must not
+transfer request data or descriptors to such descendants. See
+[`docs/command-provider-v1.md`](command-provider-v1.md).
+
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through
 the last pre-publication validation. Before provider work, the attempt-identity destination is claimed

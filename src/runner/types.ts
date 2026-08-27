@@ -1,5 +1,6 @@
 import type {
   CaseInputIdentity,
+  SanitizerRequirementDecisionV1,
   SanitizerRequirementSettings,
 } from "./identity.js";
 import type { JsonValue } from "../bundle/json.js";
@@ -25,16 +26,27 @@ export type ProviderModelRequest = {
     readBytes: () => Promise<Buffer>;
   };
   schema: JsonValue;
+  schemaInput: {
+    mediaType: string;
+    readBytes: () => Promise<Buffer>;
+  };
   system: {
+    mediaType: string;
     readText: () => Promise<string>;
   };
   instruction: {
+    mediaType: string;
     readText: () => Promise<string>;
   };
   requested: RequestedExecutionSettings;
 };
 
 export type ProviderAdapterContext = {
+  phase: string;
+  bundle: {
+    version: 1;
+    manifestDigest: string;
+  };
   caseId: string;
   documentKind: string;
   caseInputIdentity: CaseInputIdentity;
@@ -47,6 +59,8 @@ export type ProviderAdapterContext = {
     preprocessVersion: string;
     sourceCommit: string | null;
   };
+  sanitizerRequirement: SanitizerRequirementDecisionV1;
+  approval: ApprovalResponse | null;
 };
 
 export type ProviderUsage = {
@@ -268,6 +282,7 @@ export type RunBundleOptions = {
   requestedEffort?: string | null;
   maxTokens?: number | null;
   attemptKey?: string;
+  phase?: string;
   harnessVersion?: string;
   harnessCommit?: string | null;
   sanitizerRequirement: SanitizerRequirementSettings;
@@ -278,6 +293,7 @@ export type RunBundleOptions = {
 };
 
 export type RunResult = {
+  phase: string;
   attemptDirectory: string;
   attemptId: string;
   runId: string;

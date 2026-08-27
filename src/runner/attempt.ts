@@ -111,6 +111,7 @@ export type AttemptManifest = {
     sourceCommit: string | null;
   };
   run: {
+    phase: string;
     providerId: string;
     route: string;
     implementationVersion: string | null;
@@ -934,6 +935,7 @@ function parseAttemptManifest(
   }
   const run = requiredObject(manifest.run);
   assertKeys(run, [
+    "phase",
     "providerId",
     "route",
     "implementationVersion",
@@ -942,9 +944,10 @@ function parseAttemptManifest(
     "responded",
   ]);
   parseResponded(run.responded);
+  const phase = requiredString(run.phase);
   const providerId = requiredString(run.providerId);
   const route = requiredString(run.route);
-  if (!isSafeLabel(providerId) || !isSafeLabel(route)) invalid();
+  if (!isSafeLabel(phase) || !isSafeLabel(providerId) || !isSafeLabel(route)) invalid();
   const providerImplementationVersion = nullableSafeLabel(run.implementationVersion);
   const providerProtocolVersion = nullableSafeLabel(run.protocolVersion);
   const requested = parseRequested(run.requested);
@@ -973,12 +976,19 @@ function parseAttemptManifest(
     "reasonCode",
   ]);
   const approvalMetadata = parseApprovalMetadata(approval, sanitizerRequirement);
+  if (approvalMetadata.applied && approvalMetadata.phase !== phase) {
+    throw new RunnerError(
+      "attempt_identity_mismatch",
+      "attempt approval phase is invalid",
+    );
+  }
   const sanitizerBindingDigest = sanitizer === undefined ? null : nullableDigest(sanitizer.policyBindingDigest);
   parseStages(manifest.stages, sanitizerRequirement.sanitizerRequired);
   if (
     computeRunIdentity({
       caseInputIdentityDigest: identity.digest,
       bundleManifestDigest,
+      phase,
       providerId,
       providerRoute: route,
       providerImplementationVersion,

@@ -76,6 +76,7 @@ export type AttemptIdentity = AttemptIdentityInput & {
 export type RunIdentityInput = {
   caseInputIdentityDigest: string;
   bundleManifestDigest?: string | null;
+  phase: string;
   providerId: string;
   providerRoute: string;
   providerImplementationVersion?: string | null;
@@ -200,6 +201,7 @@ export function computeRunIdentity(input: RunIdentityInput): string {
     Buffer.from("svbench-run-v1", "ascii"),
     lengthPrefixedAscii(input.caseInputIdentityDigest),
     optionalAscii(input.bundleManifestDigest),
+    optionalUtf8(input.phase),
     lengthPrefixedUtf8(input.providerId),
     lengthPrefixedUtf8(input.providerRoute),
     optionalUtf8(input.providerImplementationVersion),

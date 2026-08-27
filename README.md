@@ -7,8 +7,8 @@ unsafe paths, and provides a public home for model-runner and comparison tooling
 teams that must keep real documents, truth data, prompts, provider credentials, and production
 adapters outside a public repository.
 
-> **Status:** bundle v1 validation, the deterministic single-case mock runner, comparison reports,
-> and single-run approval protocol v1 are available. Codex app-server support, suites/resume, and
+> **Status:** bundle v1 validation, the deterministic single-case mock runner, the Phase A command
+> provider, comparison reports, and single-run approval protocol v1 are available. Codex app-server support, suites/resume, and
 > repeat policy remain tracked in Issues [#3](https://github.com/TakahisaI/structured-vision-bench/issues/3),
 > [#5](https://github.com/TakahisaI/structured-vision-bench/issues/5), and
 > [#6](https://github.com/TakahisaI/structured-vision-bench/issues/6). The sanitizer command protocol
@@ -19,7 +19,7 @@ adapters outside a public repository.
 - A versioned, provider-neutral benchmark bundle contract.
 - Safe local validation of bundle manifests and referenced files.
 - Synthetic fixtures that contain no real person, transaction, document, or model response.
-- Provider interfaces and test doubles.
+- Provider interfaces, a shell-free local command adapter, and test doubles.
 - Single-case `svbench run --provider mock` execution with consumer-attested sanitizer requirements,
   an optional or required private approval command, atomic formal attempts, and sanitizer output
   when the consumer requires it.
@@ -92,6 +92,13 @@ absolute, and each invocation uses a fresh private working directory. An approve
 adapter also revalidates its current runtime/scope binding immediately before transport. See
 [`docs/approval-v1.md`](docs/approval-v1.md) for the exact CLI, wire protocol, identity binding, and
 fail-closed behavior.
+
+The Phase A command provider invokes a consumer-owned adapter from a private five-file request
+directory. It is limited to policy-not-required single runs until Issue #8 integration is complete.
+Its local manifest and strict response contract are documented in
+[`docs/command-provider-v1.md`](docs/command-provider-v1.md). Local provenance and approval data are
+adapter-only context and must not be forwarded to a hosted model. Approved adapters reattest their
+current private transport binding before extraction inputs are exposed.
 
 Compare a finalized attempt with its exact execution bundle:
 

@@ -51,7 +51,7 @@ The gate receives one JSON object with `requestVersion: 1` and these fields:
   protocol version;
 - `requested`: nullable model and effort labels and nullable positive `maxTokens`;
 - `harness`: harness version and nullable source commit;
-- `documentKind` and the bounded consumer-defined `phase`;
+- `documentKind` and the bounded consumer-defined `phase`, which must equal the run execution phase;
 - allowlisted `provenance`: prompt version, preprocess version, and nullable consumer source commit;
 - the four-field sanitizer requirement decision: version, sanitizer flag, policy flag, and reason;
 - `expected`: gate ID/protocol, snapshot digest, runtime binding identity/digest, approved scope

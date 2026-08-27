@@ -11,6 +11,28 @@ import { MAX_TIMEOUT_MS } from "../src/runner/run.js";
 const CLI = path.join(".tmp", "build", "src", "cli", "svbench.js");
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
 const FAKE_APPROVAL_GATE = path.resolve("test/fixtures/fake-approval-gate.mjs");
+const FAKE_COMMAND_PROVIDER = path.resolve("test/fixtures/fake-command-provider.mjs");
+
+function commandProviderArguments(mode = "success"): string[] {
+  return [
+    "--provider",
+    "command",
+    "--provider-command",
+    process.execPath,
+    "--provider-arg",
+    FAKE_COMMAND_PROVIDER,
+    "--provider-arg",
+    mode,
+    "--provider-id",
+    "synthetic-command",
+    "--provider-route",
+    "local-command",
+    "--provider-version",
+    "synthetic-v1",
+    "--phase",
+    "development",
+  ];
+}
 
 function approvalArguments(mode = "request-boundary"): string[] {
   return [
@@ -70,12 +92,14 @@ test("runs a synthetic mock bundle through the public CLI", async () => {
     assert.equal(result.stderr, "");
     const summary = JSON.parse(result.stdout) as {
       ok: boolean;
+      phase: string;
       caseId: string;
       attemptKey: string;
       attemptId: string;
       runId: string;
     };
     assert.equal(summary.ok, true);
+    assert.equal(summary.phase, "development");
     assert.equal(summary.caseId, "synthetic-invoice-basic");
     assert.equal(summary.attemptKey, "single");
     assert.match(summary.attemptId, /^[a-f0-9]{64}$/u);
@@ -118,7 +142,7 @@ test("prints the attempt key in the human success summary", async () => {
     assert.equal(result.stderr, "");
     assert.match(
       result.stdout,
-      /^run complete: synthetic-invoice-basic \(key human-001, attempt [a-f0-9]{64}, run [a-f0-9]{64}\)\n$/u,
+      /^run complete: synthetic-invoice-basic \(phase development, key human-001, attempt [a-f0-9]{64}, run [a-f0-9]{64}\)\n$/u,
     );
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -156,6 +180,130 @@ test("runs a required command approval gate from the public CLI", async () => {
     assert.equal(attempt.manifest.approval.phase, "development");
     assert.equal(attempt.manifest.approval.requirementVerifierId, "svbench-cli");
     assert.equal(JSON.stringify(attempt.manifest).includes(FAKE_APPROVAL_GATE), false);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("runs the policy-free command provider from the public CLI", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
+  const attempts = path.join(temporary, "attempts");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "run",
+        "--bundle",
+        FIXTURE,
+        ...commandProviderArguments(),
+        "--model",
+        "synthetic-model",
+        "--effort",
+        "medium",
+        "--provider-timeout-ms",
+        "5000",
+        "--attempt-root",
+        attempts,
+        ...approvalArguments(),
+        "--json",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    const summary = JSON.parse(result.stdout) as { attemptId: string };
+    const attempt = await readAttempt(path.join(attempts, summary.attemptId));
+    assert.equal(attempt.manifest.run.phase, "development");
+    assert.equal(attempt.manifest.run.providerId, "synthetic-command");
+    assert.equal(attempt.manifest.run.route, "local-command");
+    assert.equal(attempt.manifest.run.implementationVersion, "synthetic-v1");
+    assert.equal(attempt.manifest.run.protocolVersion, "command-provider-v1");
+    assert.equal(attempt.manifest.approval.applied, true);
+    assert.equal(attempt.manifest.sanitizer, undefined);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects invalid command provider CLI configuration before runner execution", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
+  try {
+    const invalidProviderArguments = [
+      ["--provider", "command"],
+      commandProviderArguments().map((value) =>
+        value === process.execPath ? "./synthetic-provider" : value,
+      ),
+      commandProviderArguments().filter((value) => value !== "synthetic-command"),
+      [
+        ...commandProviderArguments(),
+        "--provider-output-limit",
+        String(16 * 1024 * 1024 + 1),
+      ],
+      [
+        ...commandProviderArguments(),
+        "--provider-env",
+        "SVBENCH_COMMAND_REQUEST_DIRECTORY",
+      ],
+      [
+        ...commandProviderArguments(),
+        "--provider-env",
+        "SVBENCH_COMMAND_OPERATION",
+      ],
+      [
+        ...commandProviderArguments(),
+        "--provider-env",
+        "svbench_command_request_directory",
+      ],
+      [
+        ...commandProviderArguments(),
+        "--provider-env",
+        "PATH",
+        "--provider-env",
+        "Path",
+      ],
+      [
+        ...commandProviderArguments(),
+        "--provider-timeout-ms",
+        String(MAX_TIMEOUT_MS + 1),
+      ],
+      [
+        "--provider",
+        "mock",
+        "--provider-command",
+        process.execPath,
+      ],
+      [
+        ...commandProviderArguments(),
+        ...approvalArguments(),
+        "--phase",
+        "frozen-holdout",
+      ],
+    ];
+    for (const [index, providerArgs] of invalidProviderArguments.entries()) {
+      const attempts = path.join(temporary, `attempts-${index}`);
+      const result = spawnSync(
+        process.execPath,
+        [
+          CLI,
+          "run",
+          "--bundle",
+          FIXTURE,
+          ...providerArgs,
+          "--attempt-root",
+          attempts,
+          "--json",
+        ],
+        { encoding: "utf8" },
+      );
+      assert.equal(result.status, 2);
+      assert.equal(result.stderr, "");
+      assert.equal(
+        (JSON.parse(result.stdout) as { error: { code: string } }).error.code,
+        "invalid_arguments",
+      );
+      await assert.rejects(readdir(attempts), /ENOENT/u);
+    }
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

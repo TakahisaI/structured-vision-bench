@@ -7,29 +7,42 @@ import {
   renderComparisonMarkdown,
 } from "../comparison/compare.js";
 import { createMockProvider } from "../provider/mock.js";
+import {
+  COMMAND_PROVIDER_OPERATION_ENV,
+  COMMAND_PROVIDER_REQUEST_DIRECTORY_ENV,
+  createCommandProvider,
+  MAX_COMMAND_PROVIDER_OUTPUT_LIMIT_BYTES,
+  type CommandProviderOptions,
+} from "../provider/command.js";
 import { RunnerError } from "../runner/errors.js";
 import {
   createSanitizerRequirementDecision,
   type SanitizerRequirementSettings,
 } from "../runner/identity.js";
-import { MAX_TIMEOUT_MS, runBundle } from "../runner/run.js";
+import {
+  DEFAULT_EXECUTION_PHASE,
+  MAX_TIMEOUT_MS,
+  runBundle,
+} from "../runner/run.js";
 import { BundleValidationError } from "../bundle/validate-bundle.js";
-import type { ApprovalSettings } from "../runner/types.js";
+import type { ApprovalSettings, Provider } from "../runner/types.js";
 
 const RUN_USAGE =
-  "usage: svbench run --bundle <bundle-directory> --provider mock [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--approval required|optional --approval-command <executable> <approval identity options>] [--json]";
+  "usage: svbench run --bundle <bundle-directory> --provider mock|command [--phase <label>] [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--provider-command <absolute-executable> <command provider identity options>] [--approval required|optional --approval-command <executable> <approval identity options>] [--json]";
 const COMPARE_USAGE =
   "usage: svbench compare --bundle <bundle-directory> --attempt <attempt-directory> [--rescore --rescore-reason <code>] [--json]";
 const asJson = process.argv.slice(2).includes("--json");
 
 type RunArguments = {
   bundle: string;
-  provider: string;
+  provider: Provider;
+  phase: string;
   model: string | null;
   effort: string | null;
   maxTokens: number | null;
   attemptKey: string | undefined;
   attemptRoot: string;
+  providerTimeoutMs: number | undefined;
   approval: ApprovalSettings | undefined;
 };
 
@@ -103,10 +116,14 @@ async function executeRun(runArguments: RunArguments): Promise<void> {
   const result = await runBundle({
     bundleDirectory: runArguments.bundle,
     attemptRoot: runArguments.attemptRoot,
-    provider: createMockProvider(),
+    provider: runArguments.provider,
+    phase: runArguments.phase,
     requestedModel: runArguments.model,
     requestedEffort: runArguments.effort,
     maxTokens: runArguments.maxTokens,
+    ...(runArguments.providerTimeoutMs === undefined
+      ? {}
+      : { providerTimeoutMs: runArguments.providerTimeoutMs }),
     ...(runArguments.attemptKey === undefined ? {} : { attemptKey: runArguments.attemptKey }),
     sanitizerRequirement: cliSanitizerRequirement(),
     ...(runArguments.approval === undefined ? {} : { approval: runArguments.approval }),
@@ -115,6 +132,7 @@ async function executeRun(runArguments: RunArguments): Promise<void> {
     console.log(
       JSON.stringify({
         ok: true,
+        phase: result.phase,
         caseId: result.caseId,
         attemptKey: result.attemptKey,
         attemptId: result.attemptId,
@@ -123,7 +141,7 @@ async function executeRun(runArguments: RunArguments): Promise<void> {
     );
   } else {
     console.log(
-      `run complete: ${result.caseId} (key ${result.attemptKey}, attempt ${result.attemptId}, run ${result.runId})`,
+      `run complete: ${result.caseId} (phase ${result.phase}, key ${result.attemptKey}, attempt ${result.attemptId}, run ${result.runId})`,
     );
   }
 }
@@ -156,6 +174,15 @@ function parseRunArguments(): RunArguments {
       "max-tokens": { type: "string" },
       "attempt-key": { type: "string" },
       "attempt-root": { type: "string" },
+      phase: { type: "string" },
+      "provider-command": { type: "string" },
+      "provider-arg": { type: "string", multiple: true },
+      "provider-env": { type: "string", multiple: true },
+      "provider-id": { type: "string" },
+      "provider-route": { type: "string" },
+      "provider-version": { type: "string" },
+      "provider-output-limit": { type: "string" },
+      "provider-timeout-ms": { type: "string" },
       approval: { type: "string" },
       "approval-command": { type: "string" },
       "approval-arg": { type: "string", multiple: true },
@@ -178,11 +205,24 @@ function parseRunArguments(): RunArguments {
     positionals.length !== 0 ||
     typeof values.bundle !== "string" ||
     typeof values.provider !== "string" ||
-    values.bundle.length === 0 ||
-    values.provider !== "mock"
+    values.bundle.length === 0
   ) {
     throw new Error();
   }
+  const phase =
+    values.phase === undefined
+      ? DEFAULT_EXECUTION_PHASE
+      : requiredSafeLabel(values.phase);
+  const provider = parseProvider({
+    kind: values.provider,
+    executable: values["provider-command"],
+    argv: values["provider-arg"],
+    envAllowlist: values["provider-env"],
+    providerId: values["provider-id"],
+    route: values["provider-route"],
+    implementationVersion: values["provider-version"],
+    outputLimitBytes: values["provider-output-limit"],
+  });
   const maxTokens = parseMaxTokens(values["max-tokens"]);
   const attemptRoot =
     typeof values["attempt-root"] === "string" && values["attempt-root"].length > 0
@@ -203,16 +243,85 @@ function parseRunArguments(): RunArguments {
     timeoutMs: values["approval-timeout-ms"],
     outputLimitBytes: values["approval-output-limit"],
   });
+  if (approval?.phase !== undefined && approval.phase !== phase) throw new Error();
   return {
     bundle: values.bundle,
-    provider: values.provider,
+    provider,
+    phase,
     model: optionalNonEmptyString(values.model),
     effort: optionalNonEmptyString(values.effort),
     maxTokens,
     attemptKey: parseAttemptKey(values["attempt-key"]),
     attemptRoot,
+    providerTimeoutMs:
+      values["provider-timeout-ms"] === undefined
+        ? undefined
+        : parseTimeoutMs(values["provider-timeout-ms"]),
     approval,
   };
+}
+
+function parseProvider(input: {
+  kind: string;
+  executable: string | undefined;
+  argv: string[] | undefined;
+  envAllowlist: string[] | undefined;
+  providerId: string | undefined;
+  route: string | undefined;
+  implementationVersion: string | undefined;
+  outputLimitBytes: string | undefined;
+}): Provider {
+  const hasCommandConfiguration = Object.entries(input).some(
+    ([key, value]) => key !== "kind" && value !== undefined,
+  );
+  if (input.kind === "mock") {
+    if (hasCommandConfiguration) throw new Error();
+    return createMockProvider();
+  }
+  if (input.kind !== "command" || input.executable === undefined) throw new Error();
+  if (
+    input.executable.length === 0 ||
+    input.executable.length > 240 ||
+    !path.isAbsolute(input.executable)
+  ) {
+    throw new Error();
+  }
+  const argv = input.argv ?? [];
+  const envAllowlist = input.envAllowlist ?? [];
+  const normalizedEnvironmentNames = new Set<string>();
+  const environmentInvalid = envAllowlist.some((value) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(value)) return true;
+    const normalized = value.toUpperCase();
+    if (
+      normalized === COMMAND_PROVIDER_REQUEST_DIRECTORY_ENV ||
+      normalized === COMMAND_PROVIDER_OPERATION_ENV ||
+      normalizedEnvironmentNames.has(normalized)
+    ) {
+      return true;
+    }
+    normalizedEnvironmentNames.add(normalized);
+    return false;
+  });
+  if (
+    argv.length > 64 ||
+    argv.some((value) => value.length > 240) ||
+    envAllowlist.length > 64 ||
+    environmentInvalid
+  ) {
+    throw new Error();
+  }
+  const options: CommandProviderOptions = {
+    executable: input.executable,
+    argv,
+    envAllowlist,
+    providerId: requiredSafeLabel(input.providerId),
+    route: requiredSafeLabel(input.route),
+    implementationVersion: requiredSafeLabel(input.implementationVersion),
+    ...(input.outputLimitBytes === undefined
+      ? {}
+      : { outputLimitBytes: parseProviderOutputLimit(input.outputLimitBytes) }),
+  };
+  return createCommandProvider(options);
 }
 
 function parseCommandApproval(input: {
@@ -330,7 +439,7 @@ function cliSanitizerRequirement(): SanitizerRequirementSettings {
     derive: (_documentKind: string) => ({
       sanitizerRequired: false,
       policyRequired: false,
-      sanitizerRequirementReason: "mock_provider_policy_not_required",
+      sanitizerRequirementReason: "cli_policy_not_required",
       consumerSourceCommit: null,
     }),
   };
@@ -379,6 +488,12 @@ function parsePositiveSafeInteger(value: string): number {
 function parseApprovalOutputLimit(value: string): number {
   const parsed = parsePositiveSafeInteger(value);
   if (parsed > 16 * 1024 * 1024) throw new Error();
+  return parsed;
+}
+
+function parseProviderOutputLimit(value: string): number {
+  const parsed = parsePositiveSafeInteger(value);
+  if (parsed > MAX_COMMAND_PROVIDER_OUTPUT_LIMIT_BYTES) throw new Error();
   return parsed;
 }
 

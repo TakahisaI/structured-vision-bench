@@ -93,7 +93,10 @@ export type LoadedBundleForRunner = {
     image: LoadedBundleInput & {
       readBytes: () => Promise<Buffer>;
     };
-    schema: LoadedBundleInput & { value: JsonValue };
+    schema: LoadedBundleInput & {
+      value: JsonValue;
+      readBytes: () => Promise<Buffer>;
+    };
     system: LoadedBundleInput & { readText: () => Promise<string> };
     instruction: LoadedBundleInput & { readText: () => Promise<string> };
     truth?: LoadedBundleInput & { value: JsonValue };
@@ -259,9 +262,18 @@ export async function loadBundleForRunner(
       validated.root,
     );
     disposers.push(instructionResult.dispose);
+    const schemaResult = await stageProviderFile(
+      schemaReference,
+      stagingDirectory,
+      "schema",
+      false,
+      validated.root,
+    );
+    disposers.push(schemaResult.dispose);
     const image = imageResult.input;
     const system = systemResult.input;
     const instruction = instructionResult.input;
+    const schema = schemaResult.input;
     const truthFile = validated.jsonFiles.get("inputs.truth");
     const truthReference = validated.references.get("inputs.truth");
 
@@ -282,6 +294,7 @@ export async function loadBundleForRunner(
           sha256: schemaReference.sha256,
           mediaType: schemaReference.mediaType,
           value: schemaFile.value,
+          readBytes: schema.readBytes,
         },
         system,
         instruction,
@@ -626,21 +639,21 @@ async function readJsonFile(
 async function stageProviderFile(
   reference: ResolvedReference,
   stagingDirectory: string,
-  basename: "image" | "system" | "instruction",
+  basename: "image" | "schema" | "system" | "instruction",
   text: false,
   root: string,
 ): Promise<StagedProviderFile<LoadedBundleForRunnerInput["image"]>>;
 async function stageProviderFile(
   reference: ResolvedReference,
   stagingDirectory: string,
-  basename: "image" | "system" | "instruction",
+  basename: "image" | "schema" | "system" | "instruction",
   text: true,
   root: string,
 ): Promise<StagedProviderFile<LoadedBundleForRunnerInput["system"]>>;
 async function stageProviderFile(
   reference: ResolvedReference,
   stagingDirectory: string,
-  basename: "image" | "system" | "instruction",
+  basename: "image" | "schema" | "system" | "instruction",
   text: boolean,
   root: string,
 ): Promise<
