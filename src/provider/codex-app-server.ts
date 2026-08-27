@@ -18,7 +18,11 @@ export const CODEX_APP_SERVER_PROTOCOL_VERSION =
 const SAFE_LABEL_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 const MAX_WORKSPACE_PATH_LENGTH = 4096;
 const MAX_FINAL_DOCUMENT_BYTES = 16 * 1024 * 1024;
-const MAX_PROTOCOL_VALUE_BYTES = 48 * 1024 * 1024;
+// A maximum-sized instruction may expand sixfold when JSON escapes control
+// bytes, and the matching user item also contains the base64 image. Keep the
+// per-value bound above that canonical worst case instead of sizing it from
+// the raw provider inputs.
+export const CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES = 128 * 1024 * 1024;
 const MAX_PROTOCOL_EVENTS = 4096;
 const CLIENT_NAME = "structured_vision_bench";
 const CLIENT_TITLE = "structured-vision-bench";
@@ -719,7 +723,7 @@ function validateSafeItem(
   return normalizeJsonValue(
     item,
     "codex app-server item",
-    MAX_PROTOCOL_VALUE_BYTES,
+    CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES,
   );
 }
 
