@@ -65,6 +65,71 @@ test("runs a synthetic mock bundle through the public CLI", async () => {
   }
 });
 
+test("prints the attempt key in the human success summary", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
+  const attempts = path.join(temporary, "attempts");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "run",
+        "--bundle",
+        FIXTURE,
+        "--provider",
+        "mock",
+        "--attempt-key",
+        "human-001",
+        "--attempt-root",
+        attempts,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+    assert.match(
+      result.stdout,
+      /^run complete: synthetic-invoice-basic \(key human-001, attempt [a-f0-9]{64}, run [a-f0-9]{64}\)\n$/u,
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects invalid attempt keys as CLI argument errors", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
+  try {
+    for (const [index, attemptKey] of ["synthetic/key", "a".repeat(65), "合成"].entries()) {
+      const attempts = path.join(temporary, `attempts-${index}`);
+      const result = spawnSync(
+        process.execPath,
+        [
+          CLI,
+          "run",
+          "--bundle",
+          FIXTURE,
+          "--provider",
+          "mock",
+          "--attempt-key",
+          attemptKey,
+          "--attempt-root",
+          attempts,
+          "--json",
+        ],
+        { encoding: "utf8" },
+      );
+      assert.equal(result.status, 2);
+      assert.equal(result.stderr, "");
+      const summary = JSON.parse(result.stdout) as { ok: boolean; error: { code: string } };
+      assert.equal(summary.ok, false);
+      assert.equal(summary.error.code, "invalid_arguments");
+      await assert.rejects(readdir(attempts), /ENOENT/u);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("separates CLI attempt instances by caller key", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
   const bundle = path.join(temporary, "bundle");

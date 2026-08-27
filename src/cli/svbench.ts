@@ -61,7 +61,9 @@ if (runArguments !== undefined) {
         }),
       );
     } else {
-      console.log(`run complete: ${result.caseId} (attempt ${result.attemptId}, run ${result.runId})`);
+      console.log(
+        `run complete: ${result.caseId} (key ${result.attemptKey}, attempt ${result.attemptId}, run ${result.runId})`,
+      );
     }
   } catch (error) {
     if (error instanceof BundleValidationError || error instanceof RunnerError) {
@@ -119,7 +121,7 @@ function parseRunArguments(): RunArguments {
     model: optionalNonEmptyString(values.model),
     effort: optionalNonEmptyString(values.effort),
     maxTokens,
-    attemptKey: optionalNonEmptyString(values["attempt-key"]) ?? undefined,
+    attemptKey: parseAttemptKey(values["attempt-key"]),
     attemptRoot,
   };
 }
@@ -145,6 +147,12 @@ function cliSanitizerRequirement(): SanitizerRequirementSettings {
 function optionalNonEmptyString(value: string | undefined): string | null {
   if (value === undefined) return null;
   if (value.length === 0) throw new Error();
+  return value;
+}
+
+function parseAttemptKey(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[A-Za-z0-9._-]{1,64}$/u.test(value)) throw new Error();
   return value;
 }
 

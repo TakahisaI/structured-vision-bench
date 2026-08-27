@@ -258,9 +258,9 @@ hashes the exact stored document bytes, not a reserialized value.
 The reader recognizes only a directory containing the final `attempt.json` and `document.json` as a
 published attempt. A directory containing only `document.json`, the owner marker, or neither
 manifest is an unpublished claim and is rejected as an attempt. Each external `.claim-<nonce>`
-staging directory belongs to one run and is never part of a formal attempt; there is no shared
-staging-directory lifecycle between runs. The runner uses a no-follow attempt root handle and
-device/inode checks through the last pre-publication validation. The Node-only
+staging directory belongs to one attempt claim and is never part of a formal attempt; staging
+directories are not shared between attempt invocations. The runner uses a no-follow attempt root
+handle and device/inode checks through the last pre-publication validation. The Node-only
 contract prevents competing harness writers from replacing a claimed attempt directory. Final document
 and manifest creation use no-replace filesystem operations, and cleanup uses owned-file unlink plus
 non-recursive directory removal so a newly created final file cannot be deleted by cleanup. Protection
@@ -285,6 +285,16 @@ sibling constraints, type arrays, `anyOf`, `oneOf`, and the simple intersecting 
 by `allOf` are covered. An unsatisfied or unsupported synthesis path returns the mock's invalid
 document, which the runner rejects before publication. It never reads the bundle truth or comparison
 policy.
+
+## Development compatibility
+
+Attempt v1 was changed before package publication while the package remains private at version
+`0.0.0`. Artifacts written by the earlier Issue #2 development shape—where `attemptId` equaled
+`runId` and the manifest had no attempt identity fields—are intentionally incompatible with this
+reader. There is no migration or legacy-reader path in this repository. Development users retaining
+those artifacts must read them with the matching earlier revision or use a fresh attempt root. The
+current schema remains v1 because no earlier attempt contract was released as a stable external
+artifact.
 
 ## CI and data boundary
 

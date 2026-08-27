@@ -63,8 +63,9 @@ with a non-recursive exclusive `mkdir`; an existing entry is reported as `attemp
 losing process never cleans it up or invokes the provider. The winning process places a private
 owner-nonce marker in the claimed directory, writes and validates `document.json`, and writes the
 complete `attempt.json.pending` into a private same-filesystem `<attempt-root>/.claim-<nonce>/`
-staging directory owned by that run, without a shared staging-root lifecycle. The owner marker is
-removed only immediately before final publication. Document and manifest publication use no-replace
+staging directory owned by that attempt claim, without a shared staging-root lifecycle between
+attempt invocations. The owner marker is removed only immediately before final publication. Document
+and manifest publication use no-replace
 hard links from their complete pending files. The final
 manifest link is the sole visibility point for a complete manifest: it changes the attempt directory in
 one syscall from `document.json` to the exact `attempt.json` plus `document.json` shape. Removing
