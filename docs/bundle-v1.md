@@ -30,7 +30,8 @@ Filenames are examples. The manifest is authoritative.
 ### Identity
 
 - `bundleVersion`: integer `1`.
-- `caseId`: stable opaque identifier using lowercase ASCII letters, digits, `.`, `_`, or `-`.
+- `caseId`: stable opaque identifier of 1 to 128 characters, beginning with a lowercase ASCII
+  letter or digit and continuing with lowercase ASCII letters, digits, `.`, `_`, or `-`.
 
 A public fixture may have a descriptive case ID. A real confidential case ID must not be copied to
 GitHub.
@@ -294,9 +295,11 @@ A failed preflight must not call a provider.
 Bundle files are input and remain unchanged for the lifetime of a measurement. An attempt is a
 separate directory with its own manifest and digests. The Issue #2 runner stages provider inputs
 outside the bundle, exclusively claims the run-identity directory, validates the formal document
-(sanitizer output when configured), and writes `attempt.json.pending` before publishing a complete
-no-replace copy of that manifest as `attempt.json`. The runner bounds each staged provider input to
-16 MiB; this is an operational runner limit and does not change bundle-v1 source-file validation.
+(sanitizer output when configured), and writes `attempt.json.pending` to a private same-filesystem
+`.claims/<nonce>/` staging directory before publishing it by no-replace hard link as `attempt.json`.
+The final link is the visibility point for the exact two-file attempt shape; source cleanup is best
+effort. The runner bounds each staged provider input to 16 MiB; this is an operational runner limit
+and does not change bundle-v1 source-file validation.
 Failed runs and directories without the final manifest do not become formal attempts.
 
 Retries are not hidden. A repeat or retry is a new attempt with a distinct identity and recorded

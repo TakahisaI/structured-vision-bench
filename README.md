@@ -65,13 +65,19 @@ Run the public synthetic fixture with the deterministic mock provider:
 The runner exclusively claims the run-identity directory before provider work. The successful attempt
 contains only `attempt.json` and the formal `document.json` under the chosen attempt root; the final
 manifest is published with a no-replace filesystem operation only after its complete bytes have been
-validated. When the consumer decision requires a sanitizer, that document is the sanitizer output.
+validated. The pending manifest is staged outside the final run directory in a private
+`.claims/<nonce>/` directory, so the final manifest link is the sole transition to the reader-visible
+shape; cleanup of that source is best effort after publication. When the consumer decision requires a
+sanitizer, that document is the sanitizer output.
 Not-required attempts omit sanitizer/policy/target-binding blocks rather than storing null placeholders.
 The runner bounds each staged provider input to 16 MiB and revokes provider read callbacks after
 provider execution settles.
 See [`docs/attempt-v1.md`](docs/attempt-v1.md) and
 [`schemas/attempt-v1.schema.json`](schemas/attempt-v1.schema.json) for the lifecycle and manifest
 contract. CI and public fixtures use the mock provider only; no real model or login flow is run.
+The mock provider is deterministic and schema-valid for the validator's supported synthesis subset,
+including local `$ref` with supported sibling constraints and simple `allOf` intersections; it is not
+a general-purpose JSON Schema instance generator.
 
 The validator performs these checks before the selected provider can run:
 

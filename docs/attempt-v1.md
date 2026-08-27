@@ -45,6 +45,8 @@ summary is written to stdout; human mode writes failures to stderr.
 2. **Identity.** It snapshots `caseId`, `documentKind`, and prepared-image media type and SHA-256
    into `caseInputIdentity` v1. Schema, prompt text, instruction text, truth, comparison policy,
    bundle path, and bundle manifest digest are not part of this case identity.
+   Both attempt `caseId` fields preserve the bundle-v1 identifier contract, including its 128-character
+   maximum; other safe provenance and route labels remain bounded to 64 characters.
 3. **Consumer requirement decision.** The caller supplies a consumer-owned verifier and an immutable
    decision. The verifier derives the decision from `documentKind`; the runner compares every field,
    recomputes `requirementDecisionDigest`, and rejects a caller downgrade. The decision records
@@ -87,12 +89,16 @@ summary is written to stdout; human mode writes failures to stderr.
    bundle output schema. A schema mismatch is a classified failure and cannot create an attempt.
 10. **Atomic finalization.** The formal document is serialized to `document.json.part`, its exact
     bytes are hashed, and a no-replace hard link publishes it as `document.json` inside the claimed
-    directory. The matching manifest is written to `attempt.json.pending` and self-validated together
-    with the document while the private owner marker is present. Cleanup may remove only files owned
-    by the claim, only when the claim owner is proven, and only while `attempt.json` does not exist.
-    The owner marker is then removed and a no-replace hard link publishes the complete pending
-    manifest as `attempt.json`; the pending link is removed immediately afterwards. A reader rejects
-    the transitional extra-entry state and accepts only the exact final two-file shape.
+    directory. The matching manifest is written to the private same-filesystem staging path
+    `<attempt-root>/.claims/<owner-nonce>/attempt.json.pending` and self-validated together with the
+    document while the private owner marker is present. Before publication, final-claim cleanup may
+    remove only files owned by the claim, only when the claim owner is proven, and only while
+    `attempt.json` does not exist. The owner marker is then removed and a no-replace hard link
+    publishes the complete external pending
+    manifest as `attempt.json`. That final link is the one-syscall visibility point: the claimed run
+    directory changes directly from `document.json` to the exact final two-file shape. Removing the
+    external pending source is a separate post-publication best-effort cleanup, keyed by its recorded
+    file identity, and cannot turn a published attempt into a failure.
 
 A provider, sanitizer, approval failure, timeout, parse error, policy mismatch, or schema mismatch
 leaves no formal attempt. An unpublished claim directory may remain after a crash or after an
@@ -220,9 +226,10 @@ decision from `documentKind`; without it, the stored decision digest and shape a
 hashes the exact stored document bytes, not a reserialized value.
 
 The reader recognizes only a directory containing the final `attempt.json` and `document.json` as a
-published attempt. A directory containing `attempt.json.pending`, the owner marker, or neither
-manifest is an unpublished claim and is rejected as an attempt. The runner uses a no-follow attempt
-root handle and device/inode checks through the last pre-publication validation. The Node-only
+published attempt. A directory containing only `document.json`, the owner marker, or neither
+manifest is an unpublished claim and is rejected as an attempt. The external `.claims` staging
+directory is never part of a formal attempt. The runner uses a no-follow attempt root handle and
+device/inode checks through the last pre-publication validation. The Node-only
 contract prevents competing harness writers from replacing a claimed run directory. Final document
 and manifest creation use no-replace filesystem operations, and cleanup uses owned-file unlink plus
 non-recursive directory removal so a newly created final file cannot be deleted by cleanup. Protection
@@ -242,7 +249,11 @@ The implementation is split into these public modules:
 - `src/runner/load-bundle.ts` — runner-facing re-export of verified staging.
 
 The mock provider generates a deterministic schema-shaped synthetic document when no explicit test
-document is supplied. It never reads the bundle truth or comparison policy.
+document is supplied. Its synthesis is best-effort within the validated subset: local `$ref` with
+sibling constraints, type arrays, `anyOf`, `oneOf`, and the simple intersecting constraints supported
+by `allOf` are covered. An unsatisfied or unsupported synthesis path returns the mock's invalid
+document, which the runner rejects before publication. It never reads the bundle truth or comparison
+policy.
 
 ## CI and data boundary
 

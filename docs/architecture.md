@@ -116,8 +116,9 @@ confidential storage and is passed to a local checkout of the public harness.
    per provider input) and claims the run directory before provider work.
 6. The selected provider returns structured data or a classified failure.
 7. The runner canonicalizes, sanitizes when required, schema-validates, and publishes the attempt by
-   no-replace linking its fully validated pending manifest to `attempt.json`; the pending name is
-   removed only after the complete final file exists.
+   no-replace linking its fully validated manifest from the private same-filesystem `.claims/<nonce>/`
+   staging area to `attempt.json`; the final link changes the claimed run directory directly to its
+   exact two-file reader shape, and source cleanup is best effort.
 8. Comparison and reports derive results without mutating bundle or attempt input.
 9. Only anonymized aggregate facts may be copied to a public Issue.
 

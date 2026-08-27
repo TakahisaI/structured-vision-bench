@@ -55,15 +55,21 @@ flags, changes permissions through that handle, and compares its device/inode wi
 the last pre-publication validation. Before provider work, the run-identity destination is claimed
 with a non-recursive exclusive `mkdir`; an existing entry is reported as `attempt_exists` and the
 losing process never cleans it up or invokes the provider. The winning process places a private
-owner-nonce marker in the claimed directory, writes and validates `document.json` plus
-`attempt.json.pending`, and removes the marker only immediately before the final
-publication. Document and manifest publication use no-replace hard links from their complete pending
-files; the pending manifest link is removed immediately after the final link. The final manifest link
-is the sole visibility point for a complete manifest. Cleanup is permitted only with an explicit root
-stability guard, only for the claim owner, only for files owned by that claim, and only while the final
-manifest is absent; it uses non-recursive directory removal.
+owner-nonce marker in the claimed directory, writes and validates `document.json`, and writes the
+complete `attempt.json.pending` into a private same-filesystem `<attempt-root>/.claims/<nonce>/`
+staging directory. The owner marker is removed only immediately before final publication. Document
+and manifest publication use no-replace hard links from their complete pending files. The final
+manifest link is the sole visibility point for a complete manifest: it changes the run directory in
+one syscall from `document.json` to the exact `attempt.json` plus `document.json` shape. Removing
+the external pending source is post-publication best effort and cannot turn a published attempt into
+a failure.
+Cleanup of unpublished final-claim files is permitted only with an explicit root stability guard,
+only for the claim owner, only for files owned by that claim, and only while the final manifest is
+absent; it uses non-recursive directory removal. The separate external pending source may be removed
+after publication only by its recorded file identity, as best-effort staging cleanup.
 The reader recognizes only a directory containing the final `attempt.json` and `document.json`;
-pending-only or manifestless claim directories are rejected and are not formal attempts. The
+directories containing only `document.json`, the owner marker, or no manifest are rejected and are
+not formal attempts. The
 Node-only contract prevents competing harness writers from replacing a claimed run directory;
 protection against an adversarial same-UID process replacing the attempt root in the final path-based
 syscall window is outside this portable harness threat model. The reader uses no-follow reads,

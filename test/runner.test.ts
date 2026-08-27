@@ -33,6 +33,7 @@ import {
   claimAttemptDirectory,
   cleanupAttemptClaim,
   readAttempt,
+  writeAttemptFiles,
 } from "../src/runner/attempt.js";
 import { RunnerError } from "../src/runner/errors.js";
 import {
@@ -430,6 +431,38 @@ test("cleans up an owned unpublished claim after provider failure", async () => 
   }
 });
 
+test("cleans a claim when initialization fails before opening or writing its marker", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const attempts = path.join(temporary, "attempts");
+  const claimAttemptDirectoryWithHooks = claimAttemptDirectory as unknown as (
+    attemptDirectory: string,
+    hooks: {
+      beforeDirectoryOpen?: () => Promise<void>;
+      beforeOwnerMarkerWrite?: () => Promise<void>;
+    },
+  ) => Promise<Awaited<ReturnType<typeof claimAttemptDirectory>>>;
+  try {
+    await mkdir(attempts, { mode: 0o700 });
+    for (const [name, hook] of [
+      ["before-open", "beforeDirectoryOpen"],
+      ["before-marker-write", "beforeOwnerMarkerWrite"],
+    ] as const) {
+      const hooks = {
+        [hook]: async () => {
+          throw new Error("synthetic initialization failure");
+        },
+      };
+      await assert.rejects(
+        claimAttemptDirectoryWithHooks(path.join(attempts, name), hooks),
+        (error: unknown) => error instanceof RunnerError && error.code === "attempt_write_failed",
+      );
+      assert.deepEqual(await readdir(attempts), []);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("requires an attested consumer decision and blocks sanitizer downgrades", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
   const bundle = path.join(temporary, "bundle");
@@ -556,6 +589,84 @@ test("runs the mock provider and writes a readable sanitized attempt", async () 
   }
 });
 
+test("runs bundle-v1 caseId boundaries without invoking the provider for 129 characters", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  let providerCalls = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const manifestPath = path.join(bundle, "bundle.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { caseId: string };
+    const attemptSchema = parseJson(
+      decodeUtf8Strict(await readFile("schemas/attempt-v1.schema.json"), "attempt schema"),
+      "attempt schema",
+    );
+    const provider = createMockProvider({
+      onInvoke: () => {
+        providerCalls += 1;
+      },
+    });
+
+    for (const [index, length] of [64, 65, 128].entries()) {
+      manifest.caseId = "a".repeat(length);
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+      const result = await runBundle({ bundleDirectory: bundle, attemptRoot: attempts, provider });
+      const attempt = await readAttempt(result.attemptDirectory);
+      assert.equal(attempt.manifest.caseId, manifest.caseId);
+      assert.equal(attempt.manifest.caseInputIdentity.caseId, manifest.caseId);
+      assert.deepEqual(validateJsonSchema(attemptSchema, attempt.manifest), []);
+      assert.equal(providerCalls, index + 1);
+    }
+
+    manifest.caseId = "a".repeat(129);
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await assert.rejects(
+      runBundle({ bundleDirectory: bundle, attemptRoot: attempts, provider }),
+      (error: unknown) => error instanceof BundleValidationError,
+    );
+    assert.equal(providerCalls, 3);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("keeps provenance commit constraints aligned between the attempt schema and reader", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const result = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      provider: createMockProvider(),
+    });
+    const manifestPath = path.join(result.attemptDirectory, "attempt.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      provenance: { harnessCommit: string | null; sourceCommit: string | null };
+    };
+    const attemptSchema = parseJson(
+      decodeUtf8Strict(await readFile("schemas/attempt-v1.schema.json"), "attempt schema"),
+      "attempt schema",
+    );
+
+    for (const field of ["harnessCommit", "sourceCommit"] as const) {
+      const original = manifest.provenance[field];
+      manifest.provenance[field] = "a".repeat(65);
+      assert.notDeepEqual(validateJsonSchema(attemptSchema, manifest as unknown as JsonValue), []);
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+      await assert.rejects(
+        readAttempt(result.attemptDirectory),
+        (error: unknown) => error instanceof RunnerError && error.code === "attempt_invalid",
+      );
+      manifest.provenance[field] = original;
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("the mock provider generates documents for the supported schema subset", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
   const bundle = path.join(temporary, "bundle");
@@ -565,7 +676,7 @@ test("the mock provider generates documents for the supported schema subset", as
     allOf: [
       {
         type: "object",
-        required: ["kind", "choice", "items"],
+        required: ["kind", "choice", "items", "refined", "combined"],
         properties: {
           kind: { $ref: "#/$defs/kind" },
           choice: {
@@ -579,6 +690,8 @@ test("the mock provider generates documents for the supported schema subset", as
             minItems: 1,
             items: { $ref: "#/$defs/item" },
           },
+          refined: { $ref: "#/$defs/text", minLength: 12 },
+          combined: { allOf: [{ type: "string" }, { minLength: 12 }] },
         },
         additionalProperties: false,
       },
@@ -593,6 +706,7 @@ test("the mock provider generates documents for the supported schema subset", as
     $defs: {
       kind: { type: "string", const: "synthetic-kind" },
       item: { type: ["null", "string"], minLength: 1, not: { type: "null" } },
+      text: { type: "string" },
     },
   } satisfies JsonValue;
   try {
@@ -613,6 +727,107 @@ test("the mock provider generates documents for the supported schema subset", as
     });
     const attempt = await readAttempt(result.attemptDirectory);
     assert.deepEqual(validateJsonSchema(schema, attempt.document), []);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("makes the final link immediately readable and ignores pending-manifest cleanup failure", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  const writeAttemptFilesWithHooks = writeAttemptFiles as unknown as (
+    claim: Awaited<ReturnType<typeof claimAttemptDirectory>>,
+    manifest: Record<string, unknown>,
+    document: JsonValue,
+    canCleanup: () => Promise<boolean>,
+    beforePublish?: (() => Promise<void>) | undefined,
+    hooks?: { removePendingManifest?: (pendingPath: string) => Promise<void> },
+  ) => Promise<{ documentSha256: string }>;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const initial = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      provider: createMockProvider(),
+    });
+    const saved = await readAttempt(initial.attemptDirectory);
+    await rm(initial.attemptDirectory, { recursive: true, force: true });
+    const claim = await claimAttemptDirectory(initial.attemptDirectory);
+    const { document: _document, ...manifest } = saved.manifest;
+    let observedNames: string[] | undefined;
+    let readableDuringCleanup = false;
+    let pendingSourcePresent = false;
+    await writeAttemptFilesWithHooks(
+      claim,
+      manifest,
+      saved.document,
+      async () => true,
+      undefined,
+      {
+        removePendingManifest: async (pendingPath) => {
+          assert.notEqual(path.dirname(pendingPath), initial.attemptDirectory);
+          pendingSourcePresent = (await stat(pendingPath)).isFile();
+          observedNames = (await readdir(initial.attemptDirectory)).sort();
+          try {
+            await readAttempt(initial.attemptDirectory);
+            readableDuringCleanup = true;
+          } catch {
+            readableDuringCleanup = false;
+          }
+          throw new Error("synthetic pending cleanup failure");
+        },
+      },
+    );
+    assert.deepEqual(observedNames, ["attempt.json", "document.json"]);
+    assert.equal(readableDuringCleanup, true);
+    assert.equal(pendingSourcePresent, true);
+    assert.deepEqual((await readdir(initial.attemptDirectory)).sort(), ["attempt.json", "document.json"]);
+    assert.deepEqual((await readdir(attempts)).sort(), [".claims", path.basename(initial.attemptDirectory)]);
+    await readAttempt(initial.attemptDirectory);
+    await cleanupAttemptClaim(claim, async () => true);
+    assert.deepEqual(await readdir(attempts), [path.basename(initial.attemptDirectory)]);
+    await readAttempt(initial.attemptDirectory);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("removes a failed pre-publication claim so the same run can be retried", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const initial = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      provider: createMockProvider(),
+    });
+    const saved = await readAttempt(initial.attemptDirectory);
+    await rm(initial.attemptDirectory, { recursive: true, force: true });
+    const { document: _document, ...manifest } = saved.manifest;
+
+    const failedClaim = await claimAttemptDirectory(initial.attemptDirectory);
+    await assert.rejects(
+      writeAttemptFiles(
+        failedClaim,
+        manifest,
+        saved.document,
+        async () => true,
+        async () => {
+          throw new Error("synthetic failure before final manifest link");
+        },
+      ),
+      (error: unknown) => error instanceof RunnerError && error.code === "attempt_write_failed",
+    );
+    assert.deepEqual(await readdir(attempts), []);
+
+    const retryClaim = await claimAttemptDirectory(initial.attemptDirectory);
+    await writeAttemptFiles(retryClaim, manifest, saved.document, async () => true);
+    await cleanupAttemptClaim(retryClaim, async () => true);
+    assert.deepEqual((await readdir(initial.attemptDirectory)).sort(), ["attempt.json", "document.json"]);
+    await readAttempt(initial.attemptDirectory);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -1439,6 +1654,43 @@ test("rejects an unsupported output schema before provider invocation", async ()
         error instanceof Error && "code" in error && error.code === "output_schema_invalid",
     );
     assert.equal(providerCalls, 0);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects a deep shared schema route before provider invocation", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  let providerCalls = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    let leaf: JsonValue = { type: "string" };
+    for (let index = 0; index < 55; index += 1) leaf = { not: leaf };
+    let branch: JsonValue = { $ref: "#/$defs/leaf" };
+    for (let index = 0; index < 10; index += 1) branch = { not: branch };
+    const schema = { $defs: { leaf }, allOf: [branch] } satisfies JsonValue;
+    const schemaBytes = Buffer.from(`${JSON.stringify(schema, null, 2)}\n`, "utf8");
+    await writeFile(path.join(bundle, "schema.json"), schemaBytes);
+    const manifestPath = path.join(bundle, "bundle.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      inputs: { schema: { sha256: string } };
+    };
+    manifest.inputs.schema.sha256 = createHash("sha256").update(schemaBytes).digest("hex");
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: attempts,
+        provider: createMockProvider({ onInvoke: () => { providerCalls += 1; } }),
+      }),
+      (error: unknown) =>
+        error instanceof Error && "code" in error && error.code === "output_schema_invalid",
+    );
+    assert.equal(providerCalls, 0);
+    await assert.rejects(readFile(attempts), /ENOENT/u);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

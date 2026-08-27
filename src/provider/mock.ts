@@ -69,10 +69,15 @@ function exampleForSchema(
   if (typeof reference === "string") {
     if (resolving.has(reference)) return null;
     const resolved = resolveLocalReference(rootSchema, reference);
-    if (resolved === undefined) return null;
+    if (!isJsonObject(resolved)) return null;
     const nextResolving = new Set(resolving);
     nextResolving.add(reference);
-    return exampleForSchema(resolved, rootSchema, nextResolving);
+    const siblings = { ...schema };
+    delete siblings.$ref;
+    if (Object.keys(siblings).length === 0) {
+      return exampleForSchema(resolved, rootSchema, nextResolving);
+    }
+    return exampleForSchema({ ...resolved, ...siblings }, rootSchema, nextResolving);
   }
 
   for (const keyword of ["anyOf", "oneOf"] as const) {
@@ -87,6 +92,11 @@ function exampleForSchema(
 
   const allOf = schema.allOf;
   if (Array.isArray(allOf)) {
+    const mergedSchema = mergeAllOfSchemas(allOf);
+    if (mergedSchema !== undefined) {
+      const mergedCandidate = exampleForSchema(mergedSchema, rootSchema, resolving);
+      if (candidateMatchesSchema(schema, mergedCandidate, rootSchema)) return mergedCandidate;
+    }
     const candidates = allOf.map((alternative) =>
       exampleForSchema(alternative, rootSchema, resolving),
     );
@@ -164,6 +174,64 @@ function exampleForObject(
     }
   }
   return result;
+}
+
+function mergeAllOfSchemas(alternatives: JsonValue[]): Record<string, JsonValue> | undefined {
+  if (alternatives.some((alternative) => !isJsonObject(alternative))) return undefined;
+  const merged: Record<string, JsonValue> = {};
+  const properties: Record<string, JsonValue> = {};
+  const required = new Set<string>();
+  let hasProperties = false;
+  let hasRequired = false;
+  for (const alternative of alternatives) {
+    if (!isJsonObject(alternative)) return undefined;
+    for (const [key, value] of Object.entries(alternative)) {
+      if (key === "properties" && isJsonObject(value)) {
+        Object.assign(properties, value);
+        hasProperties = true;
+        continue;
+      }
+      if (key === "required" && Array.isArray(value)) {
+        for (const entry of value) {
+          if (typeof entry === "string") required.add(entry);
+        }
+        hasRequired = true;
+        continue;
+      }
+      if (key === "minLength" || key === "minItems" || key === "minProperties") {
+        const current = merged[key];
+        if (typeof value === "number" && (typeof current !== "number" || value > current)) {
+          merged[key] = value;
+        }
+        continue;
+      }
+      if (key === "maxLength" || key === "maxItems" || key === "maxProperties") {
+        const current = merged[key];
+        if (typeof value === "number" && (typeof current !== "number" || value < current)) {
+          merged[key] = value;
+        }
+        continue;
+      }
+      if (key === "minimum") {
+        const current = merged[key];
+        if (typeof value === "number" && (typeof current !== "number" || value > current)) {
+          merged[key] = value;
+        }
+        continue;
+      }
+      if (key === "maximum") {
+        const current = merged[key];
+        if (typeof value === "number" && (typeof current !== "number" || value < current)) {
+          merged[key] = value;
+        }
+        continue;
+      }
+      if (merged[key] === undefined) merged[key] = value;
+    }
+  }
+  if (hasProperties) merged.properties = properties;
+  if (hasRequired) merged.required = [...required];
+  return merged;
 }
 
 function stringExample(schema: Record<string, JsonValue>): string {

@@ -225,6 +225,18 @@ test("accepts a long acyclic reference chain and a shared reference DAG", () => 
   assert.deepEqual(validateJsonSchemaDefinition(shared), []);
 });
 
+test("checks the deepest route to a shared schema node during preflight", () => {
+  let leaf: JsonValue = { type: "string" };
+  for (let index = 0; index < 55; index += 1) leaf = { not: leaf };
+
+  let branch: JsonValue = { $ref: "#/$defs/leaf" };
+  for (let index = 0; index < 10; index += 1) branch = { not: branch };
+
+  const schema = { $defs: { leaf }, allOf: [branch] } satisfies JsonValue;
+  const issues = validateJsonSchemaDefinition(schema);
+  assert.ok(issues.some((issue) => issue.message === "schema nesting is too deep"));
+});
+
 test("rejects unsupported or malformed output schemas before validation", () => {
   assert.notDeepEqual(validateJsonSchemaDefinition({ type: "object", unknownKeyword: true }), []);
   assert.notDeepEqual(validateJsonSchemaDefinition({ type: "string", pattern: "[" }), []);

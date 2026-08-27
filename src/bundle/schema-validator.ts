@@ -55,7 +55,7 @@ export function validateJsonSchema(schema: JsonValue, value: JsonValue): SchemaI
 export function validateJsonSchemaDefinition(schema: JsonValue): SchemaIssue[] {
   const issues: SchemaIssue[] = [];
   const state: SchemaDefinitionState = {
-    seen: new Set(),
+    greatestDepth: new Map(),
     active: new Set(),
     hasCycle: false,
   };
@@ -67,7 +67,7 @@ export function validateJsonSchemaDefinition(schema: JsonValue): SchemaIssue[] {
 }
 
 type SchemaDefinitionState = {
-  seen: Set<Record<string, JsonValue>>;
+  greatestDepth: Map<Record<string, JsonValue>, number>;
   active: Set<Record<string, JsonValue>>;
   hasCycle: boolean;
 };
@@ -92,8 +92,9 @@ function validateSchemaDefinitionNode(
     state.hasCycle = true;
     return;
   }
-  if (state.seen.has(value)) return;
-  state.seen.add(value);
+  const greatestDepth = state.greatestDepth.get(value);
+  if (greatestDepth !== undefined && depth <= greatestDepth) return;
+  state.greatestDepth.set(value, depth);
   state.active.add(value);
   try {
     for (const key of Object.keys(value)) {
