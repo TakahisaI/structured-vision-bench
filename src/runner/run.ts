@@ -285,7 +285,7 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     }
     await loaded?.cleanup().catch(() => undefined);
     await attemptRootHandle?.close().catch(() => undefined);
-    await rm(temporaryParent, { recursive: true, force: true });
+    await rm(temporaryParent, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -467,6 +467,23 @@ function validateSanitizerRequirementSettings(
   }
   if (sanitizer === undefined || !sanitizer.required || sanitizer.sanitizer === undefined) {
     throw new RunnerError("sanitizer_required", "required sanitizer is missing");
+  }
+  if (
+    typeof sanitizer.expectedSanitizerId !== "string" ||
+    !isSafeLabel(sanitizer.expectedSanitizerId) ||
+    sanitizer.expectedProtocolVersion !== 1 ||
+    typeof sanitizer.expectedPolicyVersion !== "number" ||
+    !Number.isSafeInteger(sanitizer.expectedPolicyVersion) ||
+    sanitizer.expectedPolicyVersion < 1 ||
+    typeof sanitizer.expectedPolicyDigest !== "string" ||
+    !isDigest(sanitizer.expectedPolicyDigest) ||
+    sanitizer.expectedCaseInputIdentityVersion !== 1 ||
+    typeof sanitizer.expectedCaseInputIdentityDigest !== "string" ||
+    !isDigest(sanitizer.expectedCaseInputIdentityDigest) ||
+    typeof sanitizer.expectedPolicyBindingDigest !== "string" ||
+    !isDigest(sanitizer.expectedPolicyBindingDigest)
+  ) {
+    throw new RunnerError("sanitizer_configuration_invalid", "sanitizer configuration is incomplete");
   }
 }
 
@@ -665,9 +682,9 @@ async function executeProvider(
   harnessCommit: string | null,
   providerTimeoutMs: number | undefined,
 ): Promise<NormalizedProviderResponse> {
+  const controller = new AbortController();
+  let active = true;
   try {
-    const controller = new AbortController();
-    let active = true;
     const readBytes = async (reader: () => Promise<Buffer>): Promise<Buffer> => {
       if (!active || controller.signal.aborted) throw new Error();
       return reader();
@@ -720,6 +737,7 @@ async function executeProvider(
         controller.abort();
       },
     );
+    active = false;
     if (response === null || typeof response !== "object" || !Object.hasOwn(response, "rawDocument")) {
       throw internalRunnerError("provider_response_invalid", "provider response is invalid");
     }
@@ -729,8 +747,12 @@ async function executeProvider(
       ...metadata,
     };
   } catch (error) {
+    active = false;
     if (isInternalRunnerError(error)) throw error;
     throw internalRunnerError("provider_failed", "provider invocation failed");
+  } finally {
+    active = false;
+    controller.abort();
   }
 }
 

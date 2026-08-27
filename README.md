@@ -64,11 +64,12 @@ Run the public synthetic fixture with the deterministic mock provider:
 
 The runner exclusively claims the run-identity directory before provider work. The successful attempt
 contains only `attempt.json` and the formal `document.json` under the chosen attempt root; the final
-`attempt.json.pending` → `attempt.json` rename is the publication point. When the consumer decision
-requires a sanitizer, that document is the sanitizer output. Not-required attempts omit
-sanitizer/policy/target-binding blocks rather than storing null placeholders.
-See
-[`docs/attempt-v1.md`](docs/attempt-v1.md) and
+manifest is published with a no-replace filesystem operation only after its complete bytes have been
+validated. When the consumer decision requires a sanitizer, that document is the sanitizer output.
+Not-required attempts omit sanitizer/policy/target-binding blocks rather than storing null placeholders.
+The runner bounds each staged provider input to 16 MiB and revokes provider read callbacks after
+provider execution settles.
+See [`docs/attempt-v1.md`](docs/attempt-v1.md) and
 [`schemas/attempt-v1.schema.json`](schemas/attempt-v1.schema.json) for the lifecycle and manifest
 contract. CI and public fixtures use the mock provider only; no real model or login flow is run.
 

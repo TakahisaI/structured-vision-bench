@@ -176,6 +176,55 @@ test("rejects recursive and excessively deep schema definitions", () => {
   assert.notDeepEqual(validateJsonSchema(deep, "synthetic"), []);
 });
 
+test("rejects recursive references through schema containment edges", () => {
+  const throughProperties = {
+    $defs: {
+      node: {
+        type: "object",
+        properties: { next: { $ref: "#/$defs/node" } },
+      },
+    },
+    $ref: "#/$defs/node",
+  };
+  const throughItems = {
+    $defs: { node: { type: "array", items: { $ref: "#/$defs/node" } } },
+    $ref: "#/$defs/node",
+  };
+  const throughAnyOf = {
+    $defs: {
+      node: {
+        anyOf: [{ type: "null" }, { $ref: "#/$defs/node" }],
+      },
+    },
+    $ref: "#/$defs/node",
+  };
+  for (const schema of [throughProperties, throughItems, throughAnyOf]) {
+    assert.notDeepEqual(validateJsonSchemaDefinition(schema), []);
+  }
+});
+
+test("accepts a long acyclic reference chain and a shared reference DAG", () => {
+  const definitions: Record<string, JsonValue> = {
+    leaf: { type: "string" },
+  };
+  for (let index = 0; index < 20; index += 1) {
+    const next = index === 0 ? "leaf" : `node-${index - 1}`;
+    definitions[`node-${index}`] = { $ref: `#/$defs/${next}` };
+  }
+  const chain = { $defs: definitions, $ref: "#/$defs/node-19" };
+  assert.deepEqual(validateJsonSchemaDefinition(chain), []);
+
+  const shared = {
+    $defs: { value: { type: "string", minLength: 1 } },
+    type: "object",
+    properties: {
+      left: { $ref: "#/$defs/value" },
+      right: { $ref: "#/$defs/value" },
+    },
+  };
+  assert.deepEqual(validateJsonSchemaDefinition(shared), []);
+});
+
 test("rejects unsupported or malformed output schemas before validation", () => {
   assert.notDeepEqual(validateJsonSchemaDefinition({ type: "object", unknownKeyword: true }), []);
   assert.notDeepEqual(validateJsonSchemaDefinition({ type: "string", pattern: "[" }), []);

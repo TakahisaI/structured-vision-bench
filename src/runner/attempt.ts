@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, rmdir, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -33,8 +33,9 @@ export const MAX_DOCUMENT_BYTES = 4 * 1024 * 1024;
 const MAX_ATTEMPT_MANIFEST_BYTES = 1024 * 1024;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+const NONBLOCK = constants.O_NONBLOCK ?? 0;
 const DIRECTORY = constants.O_DIRECTORY ?? 0;
-const READ_ONLY_NOFOLLOW = constants.O_RDONLY | NOFOLLOW;
+const READ_ONLY_NOFOLLOW = constants.O_RDONLY | NOFOLLOW | NONBLOCK;
 const DIRECTORY_NOFOLLOW = READ_ONLY_NOFOLLOW | DIRECTORY;
 const OWNER_MARKER_NAME = ".attempt-owner.pending";
 const PENDING_MANIFEST_NAME = "attempt.json.pending";
@@ -51,6 +52,7 @@ type AttemptClaimState = {
   markerPresent: boolean;
   published: boolean;
   closed: boolean;
+  ownedFiles: Set<string>;
 };
 
 const ATTEMPT_CLAIMS = new WeakMap<AttemptClaim, AttemptClaimState>();
@@ -150,12 +152,24 @@ export type ReadAttemptOptions = {
 
 export async function claimAttemptDirectory(attemptDirectory: string): Promise<AttemptClaim> {
   const absoluteDirectory = path.resolve(attemptDirectory);
+  const ownerNonce = randomUUID();
   let created = false;
   let directoryHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let initializationState: AttemptClaimState | undefined;
   try {
     await mkdir(absoluteDirectory, { recursive: false, mode: 0o700 });
     created = true;
     directoryHandle = await open(absoluteDirectory, DIRECTORY_NOFOLLOW);
+    const ownerMarkerPath = path.join(absoluteDirectory, OWNER_MARKER_NAME);
+    initializationState = {
+      ownerNonce,
+      ownerMarkerPath,
+      directoryHandle,
+      markerPresent: false,
+      published: false,
+      closed: false,
+      ownedFiles: new Set(),
+    };
     const handleInfo = await directoryHandle.stat();
     const pathInfo = await lstat(absoluteDirectory);
     if (
@@ -167,21 +181,18 @@ export async function claimAttemptDirectory(attemptDirectory: string): Promise<A
       throw new Error();
     }
     await directoryHandle.chmod(0o700);
-    const ownerNonce = randomUUID();
-    const ownerMarkerPath = path.join(absoluteDirectory, OWNER_MARKER_NAME);
     await writeFile(ownerMarkerPath, `${ownerNonce}\n`, { flag: "wx", mode: 0o600 });
+    initializationState.markerPresent = true;
+    initializationState.ownedFiles.add(OWNER_MARKER_NAME);
     const claim = Object.freeze({ attemptDirectory: absoluteDirectory });
-    ATTEMPT_CLAIMS.set(claim, {
-      ownerNonce,
-      ownerMarkerPath,
-      directoryHandle,
-      markerPresent: true,
-      published: false,
-      closed: false,
-    });
+    ATTEMPT_CLAIMS.set(claim, initializationState);
+    initializationState = undefined;
     directoryHandle = undefined;
     return claim;
   } catch (error) {
+    if (created && initializationState !== undefined) {
+      await cleanupClaimInitialization(absoluteDirectory, initializationState);
+    }
     await directoryHandle?.close().catch(() => undefined);
     if (!created && isErrorCode(error, "EEXIST")) {
       throw new RunnerError("attempt_exists", "an attempt already exists for this run identity");
@@ -191,21 +202,56 @@ export async function claimAttemptDirectory(attemptDirectory: string): Promise<A
   }
 }
 
+async function cleanupClaimInitialization(
+  directory: string,
+  state: AttemptClaimState,
+): Promise<void> {
+  try {
+    const handleInfo = await state.directoryHandle.stat();
+    const pathInfo = await lstat(directory);
+    if (
+      !handleInfo.isDirectory() ||
+      pathInfo.isSymbolicLink() ||
+      !pathInfo.isDirectory() ||
+      !sameFile(handleInfo, pathInfo) ||
+      (process.platform !== "win32" && (handleInfo.mode & 0o077) !== 0)
+    ) {
+      return;
+    }
+    if (state.markerPresent && !(await ownerMarkerMatches(state.ownerMarkerPath, state.ownerNonce))) {
+      return;
+    }
+    for (const fileName of state.ownedFiles) {
+      await unlink(path.join(directory, fileName)).catch((error) => {
+        if (!isErrorCode(error, "ENOENT")) throw error;
+      });
+    }
+    await rmdir(directory);
+  } catch {
+    // Never remove a directory whose identity or emptiness cannot be proven.
+  }
+}
+
 export async function cleanupAttemptClaim(
   claim: AttemptClaim,
-  canCleanup: (() => Promise<boolean>) | undefined = undefined,
+  canCleanup: () => Promise<boolean>,
 ): Promise<void> {
   const state = ATTEMPT_CLAIMS.get(claim);
   if (state === undefined) return;
   try {
-    if (!state.published && !state.closed) {
-      const allowed = canCleanup === undefined || await canCleanup().catch(() => false);
+    if (!state.published && !state.closed && state.markerPresent) {
+      const allowed = await canCleanup().catch(() => false);
       if (
         allowed &&
         await ownsAttemptClaim(claim, state) &&
         !(await pathExists(path.join(claim.attemptDirectory, "attempt.json")))
       ) {
-        await rm(claim.attemptDirectory, { recursive: true, force: true });
+        for (const fileName of state.ownedFiles) {
+          await unlink(path.join(claim.attemptDirectory, fileName)).catch((error) => {
+            if (!isErrorCode(error, "ENOENT")) throw error;
+          });
+        }
+        await rmdir(claim.attemptDirectory);
       }
     }
   } catch {
@@ -244,7 +290,7 @@ export async function writeAttemptFiles(
   claim: AttemptClaim,
   manifest: AttemptManifestBase,
   document: JsonValue,
-  canCleanup: (() => Promise<boolean>) | undefined = undefined,
+  canCleanup: () => Promise<boolean>,
   beforePublish: (() => Promise<void>) | undefined = undefined,
 ): Promise<{ documentSha256: string }> {
   const state = ATTEMPT_CLAIMS.get(claim);
@@ -264,8 +310,11 @@ export async function writeAttemptFiles(
     };
     await assertClaimOwnership(claim, state);
     await writeFile(documentPart, encoded.bytes, { flag: "wx", mode: 0o600 });
-    await assertPathAbsent(documentPath, "attempt_write_failed");
-    await rename(documentPart, documentPath);
+    state.ownedFiles.add("document.json.part");
+    await linkNoReplace(documentPart, documentPath, "attempt_write_failed");
+    state.ownedFiles.add("document.json");
+    await unlink(documentPart);
+    state.ownedFiles.delete("document.json.part");
     const manifestValue = normalizeJsonValue(
       completeManifest as unknown as JsonValue,
       "attempt manifest",
@@ -276,16 +325,18 @@ export async function writeAttemptFiles(
       throw new RunnerError("attempt_write_failed", "attempt manifest exceeds the size limit");
     }
     await writeFile(manifestPending, manifestBytes, { flag: "wx", mode: 0o600 });
+    state.ownedFiles.add(PENDING_MANIFEST_NAME);
     await readAttemptFiles(attemptDirectory, PENDING_MANIFEST_NAME, undefined);
     await assertClaimOwnership(claim, state);
     await unlink(state.ownerMarkerPath);
     state.markerPresent = false;
+    state.ownedFiles.delete(OWNER_MARKER_NAME);
     await beforePublish?.();
     await assertClaimDirectoryStable(claim, state);
-    await assertPathAbsent(manifestPath, "attempt_exists");
-    // This same-directory rename is the publication point; keep no validation after it.
-    await rename(manifestPending, manifestPath);
+    await linkNoReplace(manifestPending, manifestPath, "attempt_exists");
     state.published = true;
+    await unlink(manifestPending);
+    state.ownedFiles.delete(PENDING_MANIFEST_NAME);
     return { documentSha256: encoded.sha256 };
   } catch (error) {
     await cleanupAttemptClaim(claim, canCleanup);
@@ -419,6 +470,24 @@ async function assertClaimOwnership(claim: AttemptClaim, state: AttemptClaimStat
   }
 }
 
+async function linkNoReplace(
+  source: string,
+  destination: string,
+  existingCode: "attempt_exists" | "attempt_write_failed",
+): Promise<void> {
+  try {
+    await link(source, destination);
+  } catch (error) {
+    if (isErrorCode(error, "EEXIST")) {
+      if (existingCode === "attempt_exists") {
+        throw new RunnerError("attempt_exists", "an attempt already exists for this run identity");
+      }
+      throw new RunnerError("attempt_write_failed", "attempt file already exists");
+    }
+    throw error;
+  }
+}
+
 async function assertClaimDirectoryStable(
   claim: AttemptClaim,
   state: AttemptClaimState,
@@ -443,9 +512,7 @@ async function assertClaimDirectoryStable(
 async function ownsAttemptClaim(claim: AttemptClaim, state: AttemptClaimState): Promise<boolean> {
   try {
     await assertClaimDirectoryStable(claim, state);
-    return state.markerPresent
-      ? await ownerMarkerMatches(state.ownerMarkerPath, state.ownerNonce)
-      : true;
+    return state.markerPresent && (await ownerMarkerMatches(state.ownerMarkerPath, state.ownerNonce));
   } catch {
     return false;
   }
@@ -497,22 +564,6 @@ async function assertOwnerMarker(file: string): Promise<void> {
   } finally {
     await handle?.close().catch(() => undefined);
   }
-}
-
-async function assertPathAbsent(
-  file: string,
-  code: "attempt_exists" | "attempt_write_failed",
-): Promise<void> {
-  try {
-    await lstat(file);
-  } catch (error) {
-    if (isErrorCode(error, "ENOENT")) return;
-    throw new RunnerError("attempt_write_failed", "attempt file could not be checked");
-  }
-  if (code === "attempt_exists") {
-    throw new RunnerError("attempt_exists", "an attempt already exists for this run identity");
-  }
-  throw new RunnerError("attempt_write_failed", "attempt file already exists");
 }
 
 async function pathExists(file: string): Promise<boolean> {

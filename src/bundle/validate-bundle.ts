@@ -10,10 +10,10 @@ import {
 } from "node:fs";
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   realpath,
-  rename,
   rm,
 } from "node:fs/promises";
 
@@ -24,12 +24,14 @@ import { validateJsonSchema, validateJsonSchemaDefinition } from "./schema-valid
 
 const MANIFEST_NAME = "bundle.json";
 export const MAX_JSON_BYTES = 4 * 1024 * 1024;
+export const MAX_PROVIDER_INPUT_BYTES = 16 * 1024 * 1024;
 export const MAX_ERROR_MESSAGE_LENGTH = 240;
 const MAX_DETAIL_MESSAGES = 20;
 const MAX_DETAIL_LENGTH = 240;
 const UTF8_TEXT_INPUT_LABELS = new Set(["inputs.system", "inputs.instruction"]);
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
-const READ_ONLY_NOFOLLOW = constants.O_RDONLY | NOFOLLOW;
+const NONBLOCK = constants.O_NONBLOCK ?? 0;
+const READ_ONLY_NOFOLLOW = constants.O_RDONLY | NOFOLLOW | NONBLOCK;
 const STAGING_DIRECTORY_MODE = 0o700;
 const STAGING_FILE_MODE = 0o600;
 
@@ -49,6 +51,13 @@ export type LoadedBundleInput = {
   sha256: string;
   mediaType: string;
 };
+
+type StagedProviderFile<T> = {
+  input: T;
+  dispose: () => void;
+};
+
+type LoadedBundleForRunnerInput = LoadedBundleForRunner["inputs"];
 
 export type LoadedBundleForRunner = {
   caseId: string;
@@ -160,19 +169,26 @@ export async function loadBundleForRunner(
   }
 
   let ownsStagingDirectory = false;
+  const disposers: Array<() => void> = [];
   try {
     await mkdir(stagingDirectory, { mode: STAGING_DIRECTORY_MODE });
     await chmod(stagingDirectory, STAGING_DIRECTORY_MODE);
     ownsStagingDirectory = true;
-    const image = await stageProviderFile(imageReference, stagingDirectory, "image", false, validated.root);
-    const system = await stageProviderFile(systemReference, stagingDirectory, "system", true, validated.root);
-    const instruction = await stageProviderFile(
+    const imageResult = await stageProviderFile(imageReference, stagingDirectory, "image", false, validated.root);
+    disposers.push(imageResult.dispose);
+    const systemResult = await stageProviderFile(systemReference, stagingDirectory, "system", true, validated.root);
+    disposers.push(systemResult.dispose);
+    const instructionResult = await stageProviderFile(
       instructionReference,
       stagingDirectory,
       "instruction",
       true,
       validated.root,
     );
+    disposers.push(instructionResult.dispose);
+    const image = imageResult.input;
+    const system = systemResult.input;
+    const instruction = instructionResult.input;
     const truthFile = validated.jsonFiles.get("inputs.truth");
     const truthReference = validated.references.get("inputs.truth");
 
@@ -209,11 +225,15 @@ export async function loadBundleForRunner(
       cleanup: async () => {
         if (cleaned) return;
         cleaned = true;
-        await rm(stagingDirectory, { recursive: true, force: true });
+        for (const dispose of disposers) dispose();
+        await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
       },
     };
   } catch (error) {
-    if (ownsStagingDirectory) await rm(stagingDirectory, { recursive: true, force: true });
+    for (const dispose of disposers) dispose();
+    if (ownsStagingDirectory) {
+      await rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+    }
     throw error;
   }
 }
@@ -536,27 +556,46 @@ async function stageProviderFile(
   basename: "image" | "system" | "instruction",
   text: false,
   root: string,
-): Promise<LoadedBundleForRunner["inputs"]["image"]>;
+): Promise<StagedProviderFile<LoadedBundleForRunnerInput["image"]>>;
 async function stageProviderFile(
   reference: ResolvedReference,
   stagingDirectory: string,
   basename: "image" | "system" | "instruction",
   text: true,
   root: string,
-): Promise<LoadedBundleForRunner["inputs"]["system"]>;
+): Promise<StagedProviderFile<LoadedBundleForRunnerInput["system"]>>;
 async function stageProviderFile(
   reference: ResolvedReference,
   stagingDirectory: string,
   basename: "image" | "system" | "instruction",
   text: boolean,
   root: string,
-): Promise<LoadedBundleForRunner["inputs"]["image"] | LoadedBundleForRunner["inputs"]["system"]> {
+): Promise<
+  | StagedProviderFile<LoadedBundleForRunnerInput["image"]>
+  | StagedProviderFile<LoadedBundleForRunnerInput["system"]>
+> {
   const partialPath = path.join(stagingDirectory, `${basename}.part`);
   const stagedPath = path.join(stagingDirectory, `${basename}.input`);
   let committed = false;
+  let disposed = false;
+  let snapshot: Buffer | undefined;
+  let textSnapshot: string | undefined;
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    snapshot?.fill(0);
+    snapshot = undefined;
+    textSnapshot = undefined;
+  };
   try {
-    await copyFileNoFollow(reference.absolute, partialPath, `inputs.${basename}`, root);
-    const snapshot = await readFileNoFollow(partialPath, `inputs.${basename}`);
+    await copyFileNoFollow(
+      reference.absolute,
+      partialPath,
+      `inputs.${basename}`,
+      root,
+      MAX_PROVIDER_INPUT_BYTES,
+    );
+    snapshot = await readFileNoFollow(partialPath, `inputs.${basename}`, MAX_PROVIDER_INPUT_BYTES);
     const digest = createHash("sha256").update(snapshot).digest("hex");
     if (digest !== reference.sha256) {
       throw new BundleValidationError(
@@ -564,22 +603,36 @@ async function stageProviderFile(
         `inputs.${basename} changed while being staged`,
       );
     }
-    const textSnapshot = text
+    textSnapshot = text
       ? decodeUtf8Strict(snapshot, `inputs.${basename}`)
       : undefined;
-    await rename(partialPath, stagedPath);
+    await link(partialPath, stagedPath);
     committed = true;
+    await rm(partialPath, { force: true }).catch(() => undefined);
     if (text) {
       return {
-        sha256: reference.sha256,
-        mediaType: reference.mediaType,
-        readText: async () => textSnapshot!,
+        input: {
+          sha256: reference.sha256,
+          mediaType: reference.mediaType,
+          readText: async () => {
+            const value = textSnapshot;
+            if (disposed || value === undefined) throw new Error();
+            return value;
+          },
+        },
+        dispose,
       };
     }
     return {
-      sha256: reference.sha256,
-      mediaType: reference.mediaType,
-      readBytes: async () => Buffer.from(snapshot),
+      input: {
+        sha256: reference.sha256,
+        mediaType: reference.mediaType,
+        readBytes: async () => {
+          if (disposed || snapshot === undefined) throw new Error();
+          return Buffer.from(snapshot);
+        },
+      },
+      dispose,
     };
   } catch (error) {
     if (error instanceof BundleValidationError) throw error;
@@ -588,8 +641,9 @@ async function stageProviderFile(
       `inputs.${basename} could not be staged`,
     );
   } finally {
-    await rm(partialPath, { force: true });
-    if (!committed) await rm(stagedPath, { force: true });
+    if (!committed) dispose();
+    await rm(partialPath, { force: true }).catch(() => undefined);
+    if (!committed) await rm(stagedPath, { force: true }).catch(() => undefined);
   }
 }
 
@@ -682,12 +736,19 @@ function readBounded(descriptor: OpenFileDescriptor, maxBytes: number | null): B
   return Buffer.concat(chunks, total);
 }
 
-async function readFileNoFollow(file: string, label: string): Promise<Buffer> {
+async function readFileNoFollow(file: string, label: string, maxBytes: number): Promise<Buffer> {
   let descriptor: OpenFileDescriptor | undefined;
   try {
     descriptor = await openVerifiedFile(file);
-    return readBounded(descriptor, null);
-  } catch {
+    return readBounded(descriptor, maxBytes);
+  } catch (error) {
+    if (error instanceof BundleValidationError) throw error;
+    if (error instanceof BoundedReadError) {
+      throw new BundleValidationError(
+        "runner_input_too_large",
+        `${label} exceeds the ${formatLimit(maxBytes)} limit`,
+      );
+    }
     throw new BundleValidationError("runner_input_unreadable", `${label} could not be read from staging`);
   } finally {
     if (descriptor !== undefined) closeDescriptor(descriptor);
@@ -699,26 +760,38 @@ async function copyFileNoFollow(
   destination: string,
   label: string,
   root: string,
+  maxBytes: number,
 ): Promise<void> {
   let sourceDescriptor: OpenFileDescriptor | undefined;
   let destinationDescriptor: OpenFileDescriptor | undefined;
   try {
     sourceDescriptor = await openVerifiedFile(source, root);
+    if (fstatSync(sourceDescriptor).size > maxBytes) throw new BoundedReadError();
     destinationDescriptor = openSync(
       destination,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW,
       STAGING_FILE_MODE,
     );
     const chunk = Buffer.alloc(64 * 1024);
+    let total = 0;
     for (;;) {
       const bytesRead = readSync(sourceDescriptor, chunk, 0, chunk.length, null);
       if (bytesRead === 0) break;
+      total += bytesRead;
+      if (total > maxBytes) throw new BoundedReadError();
       let written = 0;
       while (written < bytesRead) {
         written += writeSync(destinationDescriptor, chunk, written, bytesRead - written);
       }
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof BundleValidationError) throw error;
+    if (error instanceof BoundedReadError) {
+      throw new BundleValidationError(
+        "runner_input_too_large",
+        `${label} exceeds the ${formatLimit(maxBytes)} limit`,
+      );
+    }
     throw new BundleValidationError("runner_input_unreadable", `${label} could not be staged`);
   } finally {
     if (sourceDescriptor !== undefined) closeDescriptor(sourceDescriptor);

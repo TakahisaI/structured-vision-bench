@@ -56,10 +56,11 @@ export function validateJsonSchemaDefinition(schema: JsonValue): SchemaIssue[] {
   const issues: SchemaIssue[] = [];
   const state: SchemaDefinitionState = {
     seen: new Set(),
-    references: new Map(),
+    active: new Set(),
+    hasCycle: false,
   };
   validateSchemaDefinitionNode(schema, issues, schema, 0, state);
-  if (!issueBudgetExceeded(issues) && hasReferenceCycle(state.references)) {
+  if (!issueBudgetExceeded(issues) && state.hasCycle) {
     issues.push({ path: "$", message: "schema contains a cyclic reference" });
   }
   return issues.slice(0, MAX_ISSUES);
@@ -67,7 +68,8 @@ export function validateJsonSchemaDefinition(schema: JsonValue): SchemaIssue[] {
 
 type SchemaDefinitionState = {
   seen: Set<Record<string, JsonValue>>;
-  references: Map<Record<string, JsonValue>, Record<string, JsonValue>>;
+  active: Set<Record<string, JsonValue>>;
+  hasCycle: boolean;
 };
 
 function validateSchemaDefinitionNode(
@@ -86,71 +88,79 @@ function validateSchemaDefinitionNode(
     issues.push({ path: "$", message: "schema node must be an object" });
     return;
   }
+  if (state.active.has(value)) {
+    state.hasCycle = true;
+    return;
+  }
   if (state.seen.has(value)) return;
   state.seen.add(value);
-  for (const key of Object.keys(value)) {
-    if (!SUPPORTED_KEYWORDS.has(key)) {
-      issues.push({ path: "$", message: "schema contains an unsupported keyword" });
-      if (issues.length >= MAX_ISSUES) return;
-    }
-  }
-  if (value.$ref !== undefined) {
-    const resolved =
-      typeof value.$ref === "string" && value.$ref.startsWith("#")
-        ? resolveLocalRef(rootSchema, value.$ref)
-        : undefined;
-    if (!isJsonObject(resolved)) {
-      issues.push({ path: "$", message: "schema reference is invalid" });
-    } else {
-      state.references.set(value, resolved);
-      validateSchemaDefinitionNode(resolved, issues, rootSchema, depth + 1, state);
-    }
-  }
-  const type = value.type;
-  if (
-    type !== undefined &&
-    ((typeof type !== "string" && !Array.isArray(type)) ||
-      (Array.isArray(type) && (type.length === 0 || type.some((entry) => typeof entry !== "string"))) ||
-      (typeof type === "string" && !JSON_SCHEMA_TYPES.has(type)) ||
-      (Array.isArray(type) && type.some((entry) => typeof entry === "string" && !JSON_SCHEMA_TYPES.has(entry))))
-  ) {
-    issues.push({ path: "$", message: "schema type is invalid" });
-  }
-  if (value.pattern !== undefined) {
-    if (typeof value.pattern !== "string") {
-      issues.push({ path: "$", message: "schema pattern is invalid" });
-    } else {
-      try {
-        new RegExp(value.pattern, "u");
-      } catch {
-        issues.push({ path: "$", message: "schema pattern is invalid" });
+  state.active.add(value);
+  try {
+    for (const key of Object.keys(value)) {
+      if (!SUPPORTED_KEYWORDS.has(key)) {
+        issues.push({ path: "$", message: "schema contains an unsupported keyword" });
+        if (issues.length >= MAX_ISSUES) return;
       }
     }
-  }
-  if (value.format !== undefined && value.format !== "date-time") {
-    issues.push({ path: "$", message: "schema format is unsupported" });
-  }
-  validateRequiredKeyword(value.required, issues);
-  validateEnumKeyword(value.enum, issues);
-  validateBooleanKeyword(value.uniqueItems, issues);
-  validateNumericKeywords(value, issues);
-  validateSchemaObjectKeyword(value.properties, issues, rootSchema, depth, state);
-  validateSchemaObjectKeyword(value.$defs, issues, rootSchema, depth, state);
-  validateSchemaChild(value.additionalProperties, issues, true, rootSchema, depth, state);
-  validateSchemaChild(value.items, issues, false, rootSchema, depth, state);
-  validateSchemaChild(value.not, issues, false, rootSchema, depth, state);
-  for (const keyword of ["anyOf", "oneOf", "allOf"] as const) {
-    const alternatives = value[keyword];
-    if (alternatives !== undefined) {
-      if (!Array.isArray(alternatives) || alternatives.length === 0) {
-        issues.push({ path: "$", message: `schema ${keyword} must contain alternatives` });
+    if (value.$ref !== undefined) {
+      const resolved =
+        typeof value.$ref === "string" && value.$ref.startsWith("#")
+          ? resolveLocalRef(rootSchema, value.$ref)
+          : undefined;
+      if (!isJsonObject(resolved)) {
+        issues.push({ path: "$", message: "schema reference is invalid" });
       } else {
-        for (const alternative of alternatives) {
-          validateSchemaDefinitionNode(alternative, issues, rootSchema, depth + 1, state);
-          if (issueBudgetExceeded(issues)) return;
+        validateSchemaDefinitionNode(resolved, issues, rootSchema, depth + 1, state);
+      }
+    }
+    const type = value.type;
+    if (
+      type !== undefined &&
+      ((typeof type !== "string" && !Array.isArray(type)) ||
+        (Array.isArray(type) && (type.length === 0 || type.some((entry) => typeof entry !== "string"))) ||
+        (typeof type === "string" && !JSON_SCHEMA_TYPES.has(type)) ||
+        (Array.isArray(type) && type.some((entry) => typeof entry === "string" && !JSON_SCHEMA_TYPES.has(entry))))
+    ) {
+      issues.push({ path: "$", message: "schema type is invalid" });
+    }
+    if (value.pattern !== undefined) {
+      if (typeof value.pattern !== "string") {
+        issues.push({ path: "$", message: "schema pattern is invalid" });
+      } else {
+        try {
+          new RegExp(value.pattern, "u");
+        } catch {
+          issues.push({ path: "$", message: "schema pattern is invalid" });
         }
       }
     }
+    if (value.format !== undefined && value.format !== "date-time") {
+      issues.push({ path: "$", message: "schema format is unsupported" });
+    }
+    validateRequiredKeyword(value.required, issues);
+    validateEnumKeyword(value.enum, issues);
+    validateBooleanKeyword(value.uniqueItems, issues);
+    validateNumericKeywords(value, issues);
+    validateSchemaObjectKeyword(value.properties, issues, rootSchema, depth, state);
+    validateSchemaObjectKeyword(value.$defs, issues, rootSchema, depth, state);
+    validateSchemaChild(value.additionalProperties, issues, true, rootSchema, depth, state);
+    validateSchemaChild(value.items, issues, false, rootSchema, depth, state);
+    validateSchemaChild(value.not, issues, false, rootSchema, depth, state);
+    for (const keyword of ["anyOf", "oneOf", "allOf"] as const) {
+      const alternatives = value[keyword];
+      if (alternatives !== undefined) {
+        if (!Array.isArray(alternatives) || alternatives.length === 0) {
+          issues.push({ path: "$", message: `schema ${keyword} must contain alternatives` });
+        } else {
+          for (const alternative of alternatives) {
+            validateSchemaDefinitionNode(alternative, issues, rootSchema, depth + 1, state);
+            if (issueBudgetExceeded(issues)) return;
+          }
+        }
+      }
+    }
+  } finally {
+    state.active.delete(value);
   }
 }
 
@@ -251,24 +261,6 @@ function resolveLocalRef(rootSchema: JsonValue, ref: string): JsonValue | undefi
     return undefined;
   }
   return current;
-}
-
-function hasReferenceCycle(
-  references: Map<Record<string, JsonValue>, Record<string, JsonValue>>,
-): boolean {
-  const visited = new Set<Record<string, JsonValue>>();
-  for (const start of references.keys()) {
-    const chain = new Set<Record<string, JsonValue>>();
-    let current: Record<string, JsonValue> | undefined = start;
-    while (current !== undefined) {
-      if (chain.has(current)) return true;
-      if (visited.has(current)) break;
-      chain.add(current);
-      visited.add(current);
-      current = references.get(current);
-    }
-  }
-  return false;
 }
 
 function validateNode(

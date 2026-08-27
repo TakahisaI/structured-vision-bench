@@ -112,11 +112,12 @@ confidential storage and is passed to a local checkout of the public harness.
 3. The consumer verifier derives the sanitizer requirement from document kind; the runner attests every
    decision field and digest.
 4. Approval and sanitizer policy bindings are checked before the relevant boundary is crossed.
-5. After approval, the runner stages verified provider inputs outside the bundle and claims the run
-   directory before provider work.
+5. After approval, the runner stages verified provider inputs outside the bundle (bounded to 16 MiB
+   per provider input) and claims the run directory before provider work.
 6. The selected provider returns structured data or a classified failure.
 7. The runner canonicalizes, sanitizes when required, schema-validates, and publishes the attempt by
-   renaming its fully validated pending manifest to `attempt.json`.
+   no-replace linking its fully validated pending manifest to `attempt.json`; the pending name is
+   removed only after the complete final file exists.
 8. Comparison and reports derive results without mutating bundle or attempt input.
 9. Only anonymized aggregate facts may be copied to a public Issue.
 

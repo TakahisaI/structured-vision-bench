@@ -44,9 +44,11 @@ Bundle paths use normalized forward-slash relative paths. The validator rejects:
 
 Actual bundle reads use no-follow descriptors and recheck the canonical bundle root; hashing and
 strict text validation consume the same opened bytes. Provider inputs are copied into a private
-per-run staging directory after approval, with 0700 directories and 0600 files. Provider read
-callbacks are invalidated when a timeout aborts the run, so a late in-process provider cannot reopen
-staging through the request.
+per-run staging directory after approval, with 0700 directories and 0600 files. Each provider input
+is bounded to 16 MiB before it is snapshotted;
+larger inputs fail with a stable runner error. Provider read callbacks are invalidated whenever
+provider execution settles (including timeout), and cleanup disposes the captured snapshots, so a
+late in-process provider cannot reopen staging through the request.
 
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through
@@ -55,8 +57,11 @@ with a non-recursive exclusive `mkdir`; an existing entry is reported as `attemp
 losing process never cleans it up or invokes the provider. The winning process places a private
 owner-nonce marker in the claimed directory, writes and validates `document.json` plus
 `attempt.json.pending`, and removes the marker only immediately before the final
-`attempt.json.pending` → `attempt.json` rename. That final manifest rename is the sole publication
-point. Cleanup is permitted only for the claim owner and only while the final manifest is absent.
+publication. Document and manifest publication use no-replace hard links from their complete pending
+files; the pending manifest link is removed immediately after the final link. The final manifest link
+is the sole visibility point for a complete manifest. Cleanup is permitted only with an explicit root
+stability guard, only for the claim owner, only for files owned by that claim, and only while the final
+manifest is absent; it uses non-recursive directory removal.
 The reader recognizes only a directory containing the final `attempt.json` and `document.json`;
 pending-only or manifestless claim directories are rejected and are not formal attempts. The
 Node-only contract prevents competing harness writers from replacing a claimed run directory;
@@ -67,6 +72,10 @@ other than `attempt.json` and `document.json`.
 
 A provider must not receive a bundle that failed preflight validation, and a provider-facing read
 must not reopen the mutable source bundle after staging.
+
+If sanitization is required, all expected sanitizer ID/protocol, policy version/digest, case-input
+identity version/digest, and policy-binding digest fields are mandatory. Missing or mismatched
+expectations fail before provider input staging.
 
 ## Logging boundary
 

@@ -75,7 +75,8 @@ summary is written to stdout; human mode writes failures to stderr.
    The provider may return a JSON value, strict JSON text, or UTF-8 JSON bytes. All forms are
    immediately converted to one bounded, strict canonical JSON value before validation. Approval,
    provider, and sanitizer timeouts abort their optional `AbortSignal`; provider reads are invalidated
-   when a timeout fires, and no attempt is finalized.
+   when provider execution settles or a timeout fires, and no attempt is finalized. Each staged
+   provider input is bounded by the runner's 16 MiB snapshot limit.
 8. **Sanitization and binding.** When the consumer decision requires sanitization, the sanitizer must
    return a sanitized document plus the exact current identity, policy digest/version, target identity
    digest, and policy binding digest. Findings are reduced to bounded value-free codes/classifications;
@@ -85,12 +86,13 @@ summary is written to stdout; human mode writes failures to stderr.
 9. **Schema validation.** Only the formal canonical document is validated against the preflighted
    bundle output schema. A schema mismatch is a classified failure and cannot create an attempt.
 10. **Atomic finalization.** The formal document is serialized to `document.json.part`, its exact
-    bytes are hashed, and it is renamed to `document.json` inside the claimed directory.
-    The matching manifest is written to `attempt.json.pending` and self-validated together with the
-    document while the private owner marker is present. Cleanup may remove the directory only when
-    the claim owner is proven and `attempt.json` does not exist. The owner marker is then removed and
-    the final `attempt.json.pending` → `attempt.json` rename is the sole publication point. No
-    operation after that rename is needed to make the attempt readable.
+    bytes are hashed, and a no-replace hard link publishes it as `document.json` inside the claimed
+    directory. The matching manifest is written to `attempt.json.pending` and self-validated together
+    with the document while the private owner marker is present. Cleanup may remove only files owned
+    by the claim, only when the claim owner is proven, and only while `attempt.json` does not exist.
+    The owner marker is then removed and a no-replace hard link publishes the complete pending
+    manifest as `attempt.json`; the pending link is removed immediately afterwards. A reader rejects
+    the transitional extra-entry state and accepts only the exact final two-file shape.
 
 A provider, sanitizer, approval failure, timeout, parse error, policy mismatch, or schema mismatch
 leaves no formal attempt. An unpublished claim directory may remain after a crash or after an
@@ -162,6 +164,10 @@ attestation contains:
 The runner rejects a missing, malformed, stale, or downgraded decision before provider invocation.
 The attempt schema is a discriminator: a not-required decision omits `sanitizer` and the
 policy-target/sanitizer/target-binding stages; a required decision requires all of them.
+When `sanitizer.required` is true, the runner also requires explicit expected bindings for the
+sanitizer ID, protocol version, policy version, policy digest, case-input identity version and
+digest, and policy-binding digest; omitted expectations are configuration failures before input
+staging.
 
 ### Output schema subset
 
@@ -217,7 +223,9 @@ The reader recognizes only a directory containing the final `attempt.json` and `
 published attempt. A directory containing `attempt.json.pending`, the owner marker, or neither
 manifest is an unpublished claim and is rejected as an attempt. The runner uses a no-follow attempt
 root handle and device/inode checks through the last pre-publication validation. The Node-only
-contract prevents competing harness writers from replacing a claimed run directory; protection
+contract prevents competing harness writers from replacing a claimed run directory. Final document
+and manifest creation use no-replace filesystem operations, and cleanup uses owned-file unlink plus
+non-recursive directory removal so a newly created final file cannot be deleted by cleanup. Protection
 against an adversarial same-UID process replacing the attempt root in the final path-based syscall
 window is outside this portable harness threat model.
 
