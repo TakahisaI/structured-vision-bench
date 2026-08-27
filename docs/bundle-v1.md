@@ -294,7 +294,8 @@ A failed preflight must not call a provider.
 
 Bundle files are input and remain unchanged for the lifetime of a measurement. An attempt is a
 separate directory with its own manifest and digests. The Issue #2 runner stages provider inputs
-outside the bundle, exclusively claims the run-identity directory, validates the formal document
+outside the bundle, derives a caller-keyed attempt identity from the stable run identity, exclusively
+claims the attempt-identity directory, validates the formal document
 (sanitizer output when configured), and writes `attempt.json.pending` to a private same-filesystem
 `.claim-<nonce>/` staging directory before publishing it by no-replace hard link as `attempt.json`.
 The final link is the visibility point for the exact two-file attempt shape; source cleanup is best

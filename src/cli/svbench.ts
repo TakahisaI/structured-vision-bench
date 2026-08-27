@@ -11,7 +11,7 @@ import { runBundle } from "../runner/run.js";
 import { BundleValidationError } from "../bundle/validate-bundle.js";
 
 const USAGE =
-  "usage: svbench run --bundle <bundle-directory> --provider mock [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-root <directory>] [--json]";
+  "usage: svbench run --bundle <bundle-directory> --provider mock [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--json]";
 const asJson = process.argv.slice(2).includes("--json");
 
 type RunArguments = {
@@ -20,6 +20,7 @@ type RunArguments = {
   model: string | null;
   effort: string | null;
   maxTokens: number | null;
+  attemptKey: string | undefined;
   attemptRoot: string;
 };
 
@@ -46,6 +47,7 @@ if (runArguments !== undefined) {
       requestedModel: runArguments.model,
       requestedEffort: runArguments.effort,
       maxTokens: runArguments.maxTokens,
+      ...(runArguments.attemptKey === undefined ? {} : { attemptKey: runArguments.attemptKey }),
       sanitizerRequirement: cliSanitizerRequirement(),
     });
     if (asJson) {
@@ -53,12 +55,15 @@ if (runArguments !== undefined) {
         JSON.stringify({
           ok: true,
           caseId: result.caseId,
+          attemptKey: result.attemptKey,
           attemptId: result.attemptId,
           runId: result.runId,
         }),
       );
     } else {
-      console.log(`run complete: ${result.caseId} (attempt ${result.attemptId})`);
+      console.log(
+        `run complete: ${result.caseId} (key ${result.attemptKey}, attempt ${result.attemptId}, run ${result.runId})`,
+      );
     }
   } catch (error) {
     if (error instanceof BundleValidationError || error instanceof RunnerError) {
@@ -89,6 +94,7 @@ function parseRunArguments(): RunArguments {
       model: { type: "string" },
       effort: { type: "string" },
       "max-tokens": { type: "string" },
+      "attempt-key": { type: "string" },
       "attempt-root": { type: "string" },
       json: { type: "boolean", default: false },
     },
@@ -115,6 +121,7 @@ function parseRunArguments(): RunArguments {
     model: optionalNonEmptyString(values.model),
     effort: optionalNonEmptyString(values.effort),
     maxTokens,
+    attemptKey: parseAttemptKey(values["attempt-key"]),
     attemptRoot,
   };
 }
@@ -140,6 +147,12 @@ function cliSanitizerRequirement(): SanitizerRequirementSettings {
 function optionalNonEmptyString(value: string | undefined): string | null {
   if (value === undefined) return null;
   if (value.length === 0) throw new Error();
+  return value;
+}
+
+function parseAttemptKey(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[A-Za-z0-9._-]{1,64}$/u.test(value)) throw new Error();
   return value;
 }
 

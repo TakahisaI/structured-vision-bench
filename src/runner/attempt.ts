@@ -11,7 +11,9 @@ import {
   type JsonValue,
 } from "../bundle/json.js";
 import {
+  ATTEMPT_IDENTITY_VERSION,
   computeCaseInputIdentity,
+  computeAttemptIdentity,
   computePolicyBindingDigest,
   computeRunIdentity,
   computeSanitizerRequirementDigest,
@@ -91,6 +93,8 @@ export type AttemptStage = {
 
 export type AttemptManifest = {
   attemptVersion: 1;
+  attemptIdentityVersion: typeof ATTEMPT_IDENTITY_VERSION;
+  attemptKey: string;
   attemptId: string;
   runId: string;
   bundleVersion: 1;
@@ -252,7 +256,7 @@ export async function claimAttemptDirectory(
       await cleanupClaimInitialization(absoluteDirectory, initializationState);
     }
     if (!created && isErrorCode(error, "EEXIST")) {
-      throw new RunnerError("attempt_exists", "an attempt already exists for this run identity");
+      throw new RunnerError("attempt_exists", "an attempt already exists for this attempt identity");
     }
     if (error instanceof RunnerError) throw error;
     throw new RunnerError("attempt_write_failed", "attempt directory could not be claimed");
@@ -440,6 +444,7 @@ async function readPendingAttemptFiles(
   await assertClaimDirectoryEntries(attemptDirectory, [OWNER_MARKER_NAME, "document.json"]);
   const manifestFile = await readAttemptJson(manifestPath);
   const manifest = parseAttemptManifest(manifestFile.value, undefined);
+  assertAttemptDirectoryIdentity(attemptDirectory, manifest.attemptId);
   const documentFile = await readAttemptJson(path.join(attemptDirectory, manifest.document.path), true);
   if (createHash("sha256").update(documentFile.bytes).digest("hex") !== manifest.document.sha256) {
     throw new RunnerError(
@@ -621,6 +626,7 @@ async function readAttemptFiles(
   await assertAttemptDirectory(absoluteDirectory);
   const manifestFile = await readAttemptJson(path.join(absoluteDirectory, "attempt.json"));
   const manifest = parseAttemptManifest(manifestFile.value, requirementVerifier);
+  assertAttemptDirectoryIdentity(absoluteDirectory, manifest.attemptId);
   const documentFile = await readAttemptJson(path.join(absoluteDirectory, manifest.document.path), true);
   if (createHash("sha256").update(documentFile.bytes).digest("hex") !== manifest.document.sha256) {
     throw new RunnerError(
@@ -630,6 +636,12 @@ async function readAttemptFiles(
   }
   await assertAttemptDirectory(absoluteDirectory);
   return { manifest, documentFile };
+}
+
+function assertAttemptDirectoryIdentity(directory: string, attemptId: string): void {
+  if (path.basename(directory) !== attemptId) {
+    throw new RunnerError("attempt_identity_mismatch", "attempt directory identity is invalid");
+  }
 }
 
 async function assertAttemptDirectory(directory: string): Promise<void> {
@@ -723,7 +735,7 @@ async function linkNoReplace(
   } catch (error) {
     if (isErrorCode(error, "EEXIST")) {
       if (existingCode === "attempt_exists") {
-        throw new RunnerError("attempt_exists", "an attempt already exists for this run identity");
+        throw new RunnerError("attempt_exists", "an attempt already exists for this attempt identity");
       }
       throw new RunnerError("attempt_write_failed", "attempt file already exists");
     }
@@ -805,6 +817,8 @@ function parseAttemptManifest(
   const manifest = requiredObject(value);
   assertKeys(manifest, [
     "attemptVersion",
+    "attemptIdentityVersion",
+    "attemptKey",
     "attemptId",
     "runId",
     "bundleVersion",
@@ -822,10 +836,17 @@ function parseAttemptManifest(
     "document",
     "timing",
   ]);
-  if (manifest.attemptVersion !== ATTEMPT_VERSION || manifest.bundleVersion !== 1) invalid();
+  if (
+    manifest.attemptVersion !== ATTEMPT_VERSION ||
+    manifest.attemptIdentityVersion !== ATTEMPT_IDENTITY_VERSION ||
+    manifest.bundleVersion !== 1
+  ) invalid();
+  const attemptKey = requiredSafeLabel(manifest.attemptKey);
   const attemptId = requiredDigest(manifest.attemptId);
   const runId = requiredDigest(manifest.runId);
-  if (attemptId !== runId) invalid();
+  if (computeAttemptIdentity({ runId, attemptKey }).attemptId !== attemptId) {
+    throw new RunnerError("attempt_identity_mismatch", "attempt instance identity is invalid");
+  }
   const caseId = requiredCaseId(manifest.caseId);
   const documentKind = requiredSafeLabel(manifest.documentKind);
   const bundleManifestDigest = requiredDigest(manifest.bundleManifestDigest);

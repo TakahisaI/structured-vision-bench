@@ -23,6 +23,7 @@ import { validateJsonSchemaDefinition } from "../src/bundle/schema-validator.js"
 import { validateJsonSchema } from "../src/bundle/schema-validator.js";
 import { createMockProvider } from "../src/provider/mock.js";
 import {
+  computeAttemptIdentity,
   computeCaseInputIdentity,
   computePolicyBindingDigest,
   computeRunIdentity,
@@ -139,6 +140,18 @@ test("policyBindingDigest uses the v1 fixed vector", () => {
       policyDigest: "bc57d67ac57d3947717e8a4858356af81969a2d5a2e533e4722be3fc4ca18569",
     }),
     "315fe3576fc69fda19be1d4e0338214f3c39a6a75506073a035cb6d6249a20cf",
+  );
+});
+
+test("computes the attempt identity v1 fixed vector", () => {
+  assert.deepEqual(
+    computeAttemptIdentity({ runId: "0".repeat(64), attemptKey: "single" }),
+    {
+      attemptIdentityVersion: 1,
+      runId: "0".repeat(64),
+      attemptKey: "single",
+      attemptId: "fdfb37c2c6f5a51a8fca6ed03aeaea452aca82cc501396074b35bd04e008e3b0",
+    },
   );
 });
 
@@ -333,8 +346,8 @@ test("does not replace a pre-existing document in a claimed directory", async ()
     id: "pre-existing-document",
     route: "synthetic",
     invoke: async () => {
-      const [runId] = await readdir(attempts);
-      await writeFile(path.join(attempts, runId!, "document.json"), existingDocument, {
+      const [attemptId] = await readdir(attempts);
+      await writeFile(path.join(attempts, attemptId!, "document.json"), existingDocument, {
         mode: 0o600,
       });
       return {
@@ -355,8 +368,11 @@ test("does not replace a pre-existing document in a claimed directory", async ()
       runBundle({ bundleDirectory: bundle, attemptRoot: attempts, provider }),
       (error: unknown) => error instanceof RunnerError && error.code === "attempt_write_failed",
     );
-    const [runId] = await readdir(attempts);
-    assert.deepEqual(await readFile(path.join(attempts, runId!, "document.json")), existingDocument);
+    const [attemptId] = await readdir(attempts);
+    assert.deepEqual(
+      await readFile(path.join(attempts, attemptId!, "document.json")),
+      existingDocument,
+    );
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -529,13 +545,19 @@ test("runs the mock provider and writes a readable sanitized attempt", async () 
     });
 
     assert.equal(result.caseId, "synthetic-invoice-basic");
+    assert.equal(result.attemptKey, "single");
     assert.match(result.attemptId, /^[a-f0-9]{64}$/u);
+    assert.match(result.runId, /^[a-f0-9]{64}$/u);
+    assert.notEqual(result.attemptId, result.runId);
     assert.equal(imageReads, 1);
     assert.ok(capturedRequest);
     assert.equal(capturedRequest!.caseId, undefined);
     assert.equal(capturedRequest!.truth, undefined);
     assert.equal(capturedRequest!.comparison, undefined);
     assert.equal(capturedRequest!.bundleRoot, undefined);
+    assert.equal(capturedRequest!.attemptKey, undefined);
+    assert.equal(capturedRequest!.attemptId, undefined);
+    assert.equal(capturedRequest!.runId, undefined);
 
     const attempt = await readAttempt(result.attemptDirectory);
     const attemptSchema = parseJson(
@@ -558,6 +580,10 @@ test("runs the mock provider and writes a readable sanitized attempt", async () 
       requirementVerifier: syntheticRequirement(false).verifier,
     });
     assert.equal(attempt.manifest.attemptVersion, 1);
+    assert.equal(attempt.manifest.attemptIdentityVersion, 1);
+    assert.equal(attempt.manifest.attemptKey, "single");
+    assert.equal(attempt.manifest.attemptId, result.attemptId);
+    assert.equal(attempt.manifest.runId, result.runId);
     assert.equal(attempt.manifest.caseId, "synthetic-invoice-basic");
     assert.equal(attempt.manifest.run.requested.model, "mock-v1");
     assert.equal(attempt.manifest.run.requested.effort, "medium");
@@ -584,6 +610,122 @@ test("runs the mock provider and writes a readable sanitized attempt", async () 
       }),
       (error: unknown) => error instanceof RunnerError && error.code === "attempt_identity_mismatch",
     );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("separates attempt instances from stable run identity", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  let providerCalls = 0;
+  let imageReads = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const provider = createMockProvider({
+      onInvoke: () => {
+        providerCalls += 1;
+      },
+      onImageRead: () => {
+        imageReads += 1;
+      },
+    });
+    const first = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      attemptKey: "dev-001",
+      provider,
+    });
+    const second = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      attemptKey: "dev-002",
+      provider,
+    });
+
+    assert.equal(first.runId, second.runId);
+    assert.notEqual(first.attemptId, second.attemptId);
+    assert.equal(first.attemptKey, "dev-001");
+    assert.equal(second.attemptKey, "dev-002");
+    assert.deepEqual(
+      (await readdir(attempts)).sort(),
+      [first.attemptId, second.attemptId].sort(),
+    );
+    const [firstAttempt, secondAttempt] = await Promise.all([
+      readAttempt(first.attemptDirectory),
+      readAttempt(second.attemptDirectory),
+    ]);
+    assert.equal(
+      firstAttempt.manifest.caseInputIdentity.digest,
+      secondAttempt.manifest.caseInputIdentity.digest,
+    );
+    assert.equal(firstAttempt.manifest.bundleManifestDigest, secondAttempt.manifest.bundleManifestDigest);
+    assert.deepEqual(firstAttempt.manifest.inputs, secondAttempt.manifest.inputs);
+    assert.equal(providerCalls, 2);
+    assert.equal(imageReads, 2);
+
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: attempts,
+        attemptKey: "dev-001",
+        provider,
+      }),
+      (error: unknown) => error instanceof RunnerError && error.code === "attempt_exists",
+    );
+    assert.equal(providerCalls, 2);
+    assert.equal(imageReads, 2);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("enforces attempt key boundaries before provider input is read", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  let providerCalls = 0;
+  let imageReads = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const provider = createMockProvider({
+      onInvoke: () => {
+        providerCalls += 1;
+      },
+      onImageRead: () => {
+        imageReads += 1;
+      },
+    });
+
+    for (const attemptKey of ["a", "a".repeat(64)]) {
+      const result = await runBundle({ bundleDirectory: bundle, attemptRoot: attempts, attemptKey, provider });
+      assert.equal(result.attemptKey, attemptKey);
+    }
+    assert.equal(providerCalls, 2);
+    assert.equal(imageReads, 2);
+
+    for (const attemptKey of ["", "a".repeat(65), "synthetic/key", "合成"]) {
+      await assert.rejects(
+        runBundle({ bundleDirectory: bundle, attemptRoot: attempts, attemptKey, provider }),
+        (error: unknown) =>
+          error instanceof RunnerError && error.code === "run_configuration_invalid",
+      );
+    }
+    for (const attemptKey of [null, 1, { synthetic: true }]) {
+      await assert.rejects(
+        runBundle({
+          bundleDirectory: bundle,
+          attemptRoot: attempts,
+          attemptKey: attemptKey as unknown as string,
+          provider,
+        }),
+        (error: unknown) =>
+          error instanceof RunnerError && error.code === "run_configuration_invalid",
+      );
+    }
+    assert.equal(providerCalls, 2);
+    assert.equal(imageReads, 2);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -854,6 +996,12 @@ test("does not expose mutable aliases or internal input digests to a provider", 
       (provider as { id: string; route: string }).id = "SYNTHETIC-PRIVATE-ID";
       (provider as { id: string; route: string }).route = "/synthetic/private/route";
       assert.equal("sha256" in request.image, false);
+      assert.equal("attemptKey" in request, false);
+      assert.equal("attemptId" in request, false);
+      assert.equal("runId" in request, false);
+      assert.equal("attemptKey" in context, false);
+      assert.equal("attemptId" in context, false);
+      assert.equal("runId" in context, false);
       try {
         (request.schema as Record<string, unknown>).type = "string";
       } catch {
@@ -1222,6 +1370,9 @@ test("does not invoke or let a rejected approval gate reach the provider", async
       assert.equal("caseId" in request, false);
       assert.equal("truth" in request, false);
       assert.equal("comparison" in request, false);
+      assert.equal("attemptKey" in request, false);
+      assert.equal("attemptId" in request, false);
+      assert.equal("runId" in request, false);
       return {
         responseVersion: 1,
         approved: false,
@@ -1382,6 +1533,9 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
     sanitize: async (request) => {
       assert.deepEqual(request.policy, { syntheticRule: "remove-extra-fields" });
       assert.equal(request.caseInputIdentity.digest, identity.digest);
+      assert.equal("attemptKey" in request, false);
+      assert.equal("attemptId" in request, false);
+      assert.equal("runId" in request, false);
       return {
         sanitizedDocument: {
           documentKind: "synthetic_invoice",
@@ -1424,22 +1578,24 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         forbiddenRawField: "SYNTHETIC-RAW-VALUE",
       },
     });
+    const sanitizerSettings = {
+      required: true,
+      sanitizer,
+      policyEnvelopeBytes: policyBytes,
+      expectedSanitizerId: sanitizer.id,
+      expectedProtocolVersion: sanitizer.protocolVersion,
+      expectedPolicyVersion: 1,
+      expectedPolicyDigest: policyDigest,
+      expectedCaseInputIdentityVersion: 1,
+      expectedCaseInputIdentityDigest: identity.digest,
+      expectedPolicyBindingDigest: policyBindingDigest,
+    } as const;
     const result = await runBundle({
       bundleDirectory: bundle,
       attemptRoot: attempts,
+      attemptKey: "dev-001",
       provider,
-      sanitizer: {
-        required: true,
-        sanitizer,
-        policyEnvelopeBytes: policyBytes,
-        expectedSanitizerId: sanitizer.id,
-        expectedProtocolVersion: sanitizer.protocolVersion,
-        expectedPolicyVersion: 1,
-        expectedPolicyDigest: policyDigest,
-        expectedCaseInputIdentityVersion: 1,
-        expectedCaseInputIdentityDigest: identity.digest,
-        expectedPolicyBindingDigest: policyBindingDigest,
-      },
+      sanitizer: sanitizerSettings,
     });
     const attempt = await readAttempt(result.attemptDirectory);
     const sanitizerManifest = attempt.manifest.sanitizer;
@@ -1468,6 +1624,21 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
     for (const stage of Object.values(attempt.manifest.stages)) {
       assert.deepEqual(stage, { status: "passed", errorCode: null });
     }
+    const repeated = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      attemptKey: "dev-002",
+      provider,
+      sanitizer: sanitizerSettings,
+    });
+    const repeatedAttempt = await readAttempt(repeated.attemptDirectory);
+    assert.equal(result.runId, repeated.runId);
+    assert.notEqual(result.attemptId, repeated.attemptId);
+    assert.deepEqual(attempt.manifest.inputs, repeatedAttempt.manifest.inputs);
+    assert.equal(
+      attempt.manifest.sanitizer?.policyBindingDigest,
+      repeatedAttempt.manifest.sanitizer?.policyBindingDigest,
+    );
     await assert.rejects(
       runBundle({
         bundleDirectory: bundle,
@@ -1978,6 +2149,54 @@ test("reader hashes the exact stored document bytes and rejects identity tamperi
   }
 });
 
+test("reader rejects attempt identity tampering and directory-name mismatch", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const result = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      attemptKey: "synthetic-reader",
+      provider: createMockProvider(),
+    });
+    const manifestPath = path.join(result.attemptDirectory, "attempt.json");
+    const originalManifest = await readFile(manifestPath);
+    const manifest = JSON.parse(originalManifest.toString("utf8")) as {
+      attemptKey: string;
+      attemptId: string;
+      runId: string;
+    };
+
+    for (const mutate of [
+      () => { manifest.attemptKey = "synthetic-tampered"; },
+      () => { manifest.attemptId = "0".repeat(64); },
+      () => { manifest.runId = "1".repeat(64); },
+    ]) {
+      mutate();
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+      await assert.rejects(
+        readAttempt(result.attemptDirectory),
+        (error: unknown) =>
+          error instanceof RunnerError && error.code === "attempt_identity_mismatch",
+      );
+      await writeFile(manifestPath, originalManifest);
+      Object.assign(manifest, JSON.parse(originalManifest.toString("utf8")));
+    }
+
+    const movedDirectory = path.join(attempts, "f".repeat(64));
+    await rename(result.attemptDirectory, movedDirectory);
+    await assert.rejects(
+      readAttempt(movedDirectory),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "attempt_identity_mismatch",
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("rejects extra attempt files and invalid timestamps", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
   const bundle = path.join(temporary, "bundle");
@@ -2390,7 +2609,7 @@ test("does not let concurrent runs delete each other's staging files", async () 
       await readAttempt(result.attemptDirectory);
     }
     const entries = (await readdir(attempts)).sort();
-    assert.deepEqual(entries, results.map((result) => result.runId).sort());
+    assert.deepEqual(entries, results.map((result) => result.attemptId).sort());
     assert.equal(entries.some((entry) => entry.startsWith(".claim-")), false);
   } finally {
     await rm(temporary, { recursive: true, force: true });
