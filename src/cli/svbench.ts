@@ -1,6 +1,11 @@
 import { parseArgs } from "node:util";
 import path from "node:path";
 
+import {
+  compareAttempt,
+  ComparisonError,
+  renderComparisonMarkdown,
+} from "../comparison/compare.js";
 import { createMockProvider } from "../provider/mock.js";
 import { RunnerError } from "../runner/errors.js";
 import {
@@ -10,8 +15,10 @@ import {
 import { runBundle } from "../runner/run.js";
 import { BundleValidationError } from "../bundle/validate-bundle.js";
 
-const USAGE =
+const RUN_USAGE =
   "usage: svbench run --bundle <bundle-directory> --provider mock [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--json]";
+const COMPARE_USAGE =
+  "usage: svbench compare --bundle <bundle-directory> --attempt <attempt-directory> [--rescore --rescore-reason <code>] [--json]";
 const asJson = process.argv.slice(2).includes("--json");
 
 type RunArguments = {
@@ -24,6 +31,17 @@ type RunArguments = {
   attemptRoot: string;
 };
 
+type CompareArguments = {
+  bundle: string;
+  attempt: string;
+  mode: "normal" | "rescore";
+  rescoreReason: string | undefined;
+};
+
+type CommandArguments =
+  | { kind: "run"; arguments: RunArguments }
+  | { kind: "compare"; arguments: CompareArguments };
+
 type Failure = {
   code: string;
   message: string;
@@ -31,42 +49,37 @@ type Failure = {
   exitCode: 1 | 2;
 };
 
-let runArguments: RunArguments | undefined;
+let command: CommandArguments | undefined;
 try {
-  runArguments = parseRunArguments();
+  if (process.argv[2] === "run") {
+    command = { kind: "run", arguments: parseRunArguments() };
+  } else if (process.argv[2] === "compare") {
+    command = { kind: "compare", arguments: parseCompareArguments() };
+  } else {
+    throw new Error();
+  }
 } catch {
-  reportFailure({ code: "invalid_arguments", message: USAGE, details: [], exitCode: 2 });
+  reportFailure({
+    code: "invalid_arguments",
+    message: process.argv[2] === "compare" ? COMPARE_USAGE : RUN_USAGE,
+    details: [],
+    exitCode: 2,
+  });
 }
 
-if (runArguments !== undefined) {
+if (command !== undefined) {
   try {
-    const result = await runBundle({
-      bundleDirectory: runArguments.bundle,
-      attemptRoot: runArguments.attemptRoot,
-      provider: createMockProvider(),
-      requestedModel: runArguments.model,
-      requestedEffort: runArguments.effort,
-      maxTokens: runArguments.maxTokens,
-      ...(runArguments.attemptKey === undefined ? {} : { attemptKey: runArguments.attemptKey }),
-      sanitizerRequirement: cliSanitizerRequirement(),
-    });
-    if (asJson) {
-      console.log(
-        JSON.stringify({
-          ok: true,
-          caseId: result.caseId,
-          attemptKey: result.attemptKey,
-          attemptId: result.attemptId,
-          runId: result.runId,
-        }),
-      );
+    if (command.kind === "run") {
+      await executeRun(command.arguments);
     } else {
-      console.log(
-        `run complete: ${result.caseId} (key ${result.attemptKey}, attempt ${result.attemptId}, run ${result.runId})`,
-      );
+      await executeCompare(command.arguments);
     }
   } catch (error) {
-    if (error instanceof BundleValidationError || error instanceof RunnerError) {
+    if (
+      error instanceof BundleValidationError ||
+      error instanceof RunnerError ||
+      error instanceof ComparisonError
+    ) {
       reportFailure({
         code: error.code,
         message: error.message,
@@ -76,11 +89,55 @@ if (runArguments !== undefined) {
     } else {
       reportFailure({
         code: "internal_error",
-        message: "run failed unexpectedly",
+        message: "command failed unexpectedly",
         details: [],
         exitCode: 2,
       });
     }
+  }
+}
+
+async function executeRun(runArguments: RunArguments): Promise<void> {
+  const result = await runBundle({
+    bundleDirectory: runArguments.bundle,
+    attemptRoot: runArguments.attemptRoot,
+    provider: createMockProvider(),
+    requestedModel: runArguments.model,
+    requestedEffort: runArguments.effort,
+    maxTokens: runArguments.maxTokens,
+    ...(runArguments.attemptKey === undefined ? {} : { attemptKey: runArguments.attemptKey }),
+    sanitizerRequirement: cliSanitizerRequirement(),
+  });
+  if (asJson) {
+    console.log(
+      JSON.stringify({
+        ok: true,
+        caseId: result.caseId,
+        attemptKey: result.attemptKey,
+        attemptId: result.attemptId,
+        runId: result.runId,
+      }),
+    );
+  } else {
+    console.log(
+      `run complete: ${result.caseId} (key ${result.attemptKey}, attempt ${result.attemptId}, run ${result.runId})`,
+    );
+  }
+}
+
+async function executeCompare(compareArguments: CompareArguments): Promise<void> {
+  const result = await compareAttempt({
+    bundleDirectory: compareArguments.bundle,
+    attemptDirectory: compareArguments.attempt,
+    mode: compareArguments.mode,
+    ...(compareArguments.rescoreReason === undefined
+      ? {}
+      : { rescoreReason: compareArguments.rescoreReason }),
+  });
+  if (asJson) {
+    console.log(JSON.stringify({ ok: true, result }));
+  } else {
+    process.stdout.write(renderComparisonMarkdown(result));
   }
 }
 
@@ -126,6 +183,39 @@ function parseRunArguments(): RunArguments {
   };
 }
 
+function parseCompareArguments(): CompareArguments {
+  const { positionals, values } = parseArgs({
+    args: process.argv.slice(3),
+    options: {
+      bundle: { type: "string" },
+      attempt: { type: "string" },
+      rescore: { type: "boolean", default: false },
+      "rescore-reason": { type: "string" },
+      json: { type: "boolean", default: false },
+    },
+    allowPositionals: true,
+    strict: true,
+  });
+  if (
+    positionals.length !== 0 ||
+    typeof values.bundle !== "string" ||
+    values.bundle.length === 0 ||
+    typeof values.attempt !== "string" ||
+    values.attempt.length === 0
+  ) {
+    throw new Error();
+  }
+  const rescoreReason = parseSafeReason(values["rescore-reason"]);
+  if (values.rescore !== true && rescoreReason !== undefined) throw new Error();
+  if (values.rescore === true && rescoreReason === undefined) throw new Error();
+  return {
+    bundle: values.bundle,
+    attempt: values.attempt,
+    mode: values.rescore === true ? "rescore" : "normal",
+    rescoreReason,
+  };
+}
+
 function cliSanitizerRequirement(): SanitizerRequirementSettings {
   const verifier = {
     id: "svbench-cli",
@@ -151,6 +241,12 @@ function optionalNonEmptyString(value: string | undefined): string | null {
 }
 
 function parseAttemptKey(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[A-Za-z0-9._-]{1,64}$/u.test(value)) throw new Error();
+  return value;
+}
+
+function parseSafeReason(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   if (!/^[A-Za-z0-9._-]{1,64}$/u.test(value)) throw new Error();
   return value;

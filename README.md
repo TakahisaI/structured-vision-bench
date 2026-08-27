@@ -82,6 +82,20 @@ The mock provider is deterministic and schema-valid for the validator's supporte
 including local `$ref` with supported sibling constraints and simple `allOf` intersections; it is not
 a general-purpose JSON Schema instance generator.
 
+Compare a finalized attempt with its exact execution bundle:
+
+```bash
+./scripts/svbench.mjs compare \
+  --bundle fixtures/synthetic/invoice-basic \
+  --attempt /tmp/svbench-attempts/<attempt-id> \
+  --json
+```
+
+Human mode emits a value-free Markdown report. Explicit truth or comparison-policy corrections use
+`--rescore --rescore-reason <safe-label>` and still require the case, provenance, and all four
+provider-input identities to match. See [`docs/comparison-v1.md`](docs/comparison-v1.md) and
+[`schemas/comparison-v1.schema.json`](schemas/comparison-v1.schema.json).
+
 The validator performs these checks before the selected provider can run:
 
 1. `bundle.json` conforms to [`schemas/bundle-v1.schema.json`](schemas/bundle-v1.schema.json).

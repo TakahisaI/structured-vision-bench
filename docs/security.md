@@ -114,6 +114,13 @@ consumer decision says sanitization is not required, sanitizer/policy/target-bin
 are absent rather than null-filled. Attempt readers reject symlinks, unknown fields or entries,
 non-private modes, digest changes, identity changes, and policy-binding changes.
 
+Comparison output contains aggregate counts, stable warning codes, and declaration positions only;
+it does not contain truth values, extracted values, case IDs, comparison pointers, local paths, or
+raw sanitizer paths. Normal comparison requires the exact execution bundle digest. Explicit
+rescoring is separately requested and still fixes the case, provenance, four provider inputs,
+formal-document digest, and sanitizer identity. Comparison errors never echo mismatched values or
+digests.
+
 ## Network and CI boundary
 
 GitHub Actions performs formatting, policy linting, type checking, unit tests, and synthetic bundle
