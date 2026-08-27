@@ -2,15 +2,16 @@
 
 ## Scope
 
-This repository-internal state machine is the single-thread, single-turn protocol core for Codex
-app-server. It is independent of process, filesystem, credentials, approval, and runner state. It is
-not a Provider, login client, credential adapter, autonomous coding agent, or general app-server
-client. Process isolation is Issue #25, one-shot approval and Provider integration are Issue #20,
-CLI selection is Issue #17, and sanitizer-required execution is Issue #18.
+This repository-internal transport consists of a single-thread, single-turn protocol core and its
+isolated one-shot process client. The protocol core remains independent of process, filesystem,
+credentials, approval, and runner state. The combined transport is not a Provider, login client,
+credential adapter, autonomous coding agent, or general app-server client. One-shot approval and
+Provider integration are Issue #20, CLI selection is Issue #17, and sanitizer-required execution is
+Issue #18.
 
 The client uses the documented app-server messages and exactly one ephemeral thread with one turn.
-Automated tests use a deterministic in-memory connection and synthetic inputs; they start no
-process and need no login.
+Protocol-core tests use a deterministic in-memory connection. Process contract tests start only a
+deterministic fake executable with synthetic inputs. Neither path needs login or calls a model.
 
 ## Fixed identity
 
@@ -24,9 +25,15 @@ The v1 implementation is fixed to:
   `codex-app-server-v2-9b3de71a5a2ffc98`.
 
 The generated-schema digest is the build-time identity for the strict message shapes implemented
-here. Issue #25 verifies that the selected executable reports exact output `codex-cli 0.149.1`
-before it supplies a connection. Changing the pinned CLI or generated schema requires a reviewed
-protocol update and contract-test update.
+here. The process client additionally requires the same live app-server process to emit the exact
+`codex-app-server-isolation-v1` readiness message before any extraction input is read. That message
+binds CLI `0.149.1`, managed-config loading disabled, plugin-startup tasks disabled, all
+account/extension prompt contributors disabled, the fixed-extraction prompt contract, and a
+single-process execution model to the process that receives the request. Process analytics and
+telemetry are disabled as part of the same proof. Startup prewarm and every internal request,
+stream, authorization-recovery retry, and transport fallback are also disabled, so one public
+attempt causes exactly one hosted inference request. Changing the pinned CLI, generated schema, or
+isolation contract requires a reviewed protocol update and contract-test update.
 
 Maintainers derive the digest from a clean pinned installation with
 `codex app-server generate-json-schema --out <private-temporary-directory>` and SHA-256 the emitted
@@ -50,7 +57,7 @@ The client accepts exactly four already-materialized inputs from its caller:
 The thread and turn carry only the requested model and effort in addition to those extraction
 inputs. Bundle identity, case ID, document kind, provenance, approval, sanitizer requirement,
 truth, comparison, past attempts, and digests are not serialized to app-server. The only path is the
-empty canonical workspace supplied by Issue #25.
+empty canonical workspace supplied by the process client.
 
 Issue #20 owns the approval boundary that is allowed to call this client. The client does not accept
 or serialize approval, sanitizer requirement, case identity, provenance, truth, or comparison data.
@@ -98,18 +105,15 @@ tool items, command items, file-change items, MCP calls, dynamic tools, collabor
 search, image generation, unexpected notifications, extra final messages, protocol errors, and
 incomplete turns fail closed. Experimental raw-response notifications also fail closed because the
 stable protocol disables them. The client does not answer approval or tool requests. Abort sends a
-best-effort `turn/interrupt` when identifiers are known and closes connection input. Issue #25 owns
-byte framing, timeout, process termination, and workspace cleanup.
+best-effort `turn/interrupt` when identifiers are known and closes connection input. The process
+client owns byte framing, timeout, process termination, and workspace cleanup.
 
 The thread config requests that shell tools, shell snapshot collection, view-image, code-mode host,
 multi-agent, web search, MCP entries, hooks, and legacy notify commands are disabled. It also opts
 out of fixed remote-control, account rate-limit, and generic warning notifications. Warning
-conditions that affect the no-host-tool guarantee must be rejected by #25 before startup rather
-than inferred from value-bearing warning text. These are defense-in-depth
-protocol settings, not a claim that a supplied connection is host-tool-free: the stable protocol
-cannot remove every catalog tool before process startup. Issue #25 owns the enforceable no-host-tool
-boundary, including process-start feature overrides, isolated configuration, model tool-surface
-verification, and tests that no host read, child turn, code cell, shell, or file operation can occur.
+conditions that affect the no-host-tool guarantee are rejected before startup rather than inferred
+from value-bearing warning text. These are defense-in-depth protocol settings. The process boundary
+below supplies the enforceable no-host-tool connection.
 
 The final agent-message text is strict JSON and is parsed inside the client. Raw model text,
 response values, paths, and process diagnostics are never copied into normal errors or result
@@ -131,7 +135,91 @@ approval, run, and attempt identity.
 ## Limits
 
 Workspace path, image bytes, text inputs, metadata labels, and final document text are bounded.
-Protocol value bounds include the base64 expansion and user-message envelope of a maximum-sized
-prepared image and instruction.
-Issue #25 adds executable, argv, environment, JSONL line, stdout, and stderr limits. Neither layer
-locates, reads, copies, migrates, refreshes, or prints Codex credentials.
+Protocol value and total-output bounds include sixfold JSON control-character escaping, base64
+expansion, the user-message envelope, repeated lifecycle items, and a maximum-sized final document.
+The process client adds executable, argv, environment, JSONL line, stdout, and stderr limits.
+Neither layer locates, reads, copies, migrates, refreshes, or prints Codex credentials.
+
+## Private process boundary
+
+The process client accepts an absolute executable plus a bounded prefix argv used by a selected
+installation. It invokes no shell. The selected executable must implement the fixed
+`codex-app-server-isolation-v1` process contract; the unmodified Codex `0.149.1` release executable
+does not implement it and therefore fails closed. A conforming executable disables every
+managed-config source and plugin-startup task as part of starting the app-server, then emits one
+exact readiness message as its first JSONL value:
+
+```json
+{"method":"svbench/isolation/ready","params":{"protocol":"codex-app-server-isolation-v1","codexCliVersion":"0.149.1","managedConfig":"disabled","pluginStartupTasks":"disabled","accountPromptContributors":"disabled","telemetry":"disabled","startupPrewarm":"disabled","hostedRequestPolicy":"single-no-retry-no-fallback","promptContract":"fixed-extraction-only","processModel":"single-process"}}
+```
+
+The client does not send a request or read an extraction callback until that message arrives from
+the same live process. A missing, malformed, duplicate, late, or mismatched readiness value fails.
+A non-null maximum-token request, absent model, malformed digest, invalid executable setting,
+abort, timeout, or identity mismatch therefore releases no provider input.
+
+The v1 process client supports POSIX hosts only. It fails before process start and before reading an
+input callback on Windows because Node's process API does not expose a durable Job Object identity;
+an exited leader PID plus ambient `taskkill.exe` cannot prove descendant reclamation.
+
+The readiness contract is stronger than checking that host-managed files or preferences happen to
+be absent. Codex release builds give those sources higher precedence than command-line settings,
+and an absence snapshot has an unavoidable race with process startup. A conforming executable must
+make the sources unreachable in its loader itself, before startup tasks or any readiness output;
+the process client never treats host-state inspection or a separate probe process as evidence.
+The same executable contract disables git-attribution account settings and every other extension
+world-state contributor before they can perform account-derived network calls or add developer
+instructions. Process analytics are fixed off before initialization, so account analytics endpoints
+receive no lifecycle telemetry. The executable also forbids descendant process creation.
+It does not schedule WebSocket or auth prewarm and does not recover authorization, retry a request
+or stream, or switch transport after a failure. The client also disables unbounded connection
+retries as defense in depth; the remaining retry and transport controls are executable invariants
+because Codex rejects configuration overrides for its reserved built-in provider. The executable
+also forbids descendant process creation. Same-process-group termination remains defense in depth
+for a nonconforming executable; detached descendants are outside the accepted executable contract
+rather than something a portable Node client can contain after the fact.
+
+Each invocation creates one mode-0700 temporary root under the canonical system `/tmp`, ignoring
+ambient temporary-directory variables, with separate empty workspace, home,
+`CODEX_HOME`, config home, cache, temporary directory, and executable search path. The child cwd is
+the empty workspace, never a consumer repository, bundle directory, or their parent. The child
+environment starts empty. A caller may explicitly allowlist bounded environment names needed by an
+upstream-supported logged-in process boundary, but the process client always replaces home, config,
+cache, path, and temporary-directory variables with its private paths. It does not locate, read,
+copy, transform, refresh, or print a credential file.
+
+The fixed tool profile identity is `codex-no-host-tools-v1`. The client starts app-server with
+strict config and disables code mode, code-mode host, shell and unified exec, shell snapshot,
+view-image, multi-agent v1/v2, hooks, apps, plugins, skill search, image generation, and MCP
+elicitation features. Empty MCP, hook, and notify settings are fixed at process start; plan and user
+input tools are disabled. Project-root markers are empty and project-document bytes are fixed to
+zero. Environment, permission, collaboration-mode, app, and skill instructions are disabled;
+bundled skills are disabled and personality is fixed to none. Thus shared temporary ancestors,
+runtime date/path context, and bundled skill catalogs cannot contribute instructions. A private
+model catalog preserves the explicitly requested model slug and effort while fixing these model
+properties:
+
+- shell type `disabled`;
+- apply-patch tool absent;
+- direct tool mode and multi-agent version `disabled`;
+- no experimental tools, search, skill, plugin, or app instructions;
+- Node REPL disabled.
+
+The catalog has an empty base instruction. The consumer system preamble remains the sole
+`thread/start.baseInstructions` value. The pinned CLI parses this catalog as authoritative static
+model metadata, so a remote catalog or parent cache cannot restore a host tool.
+
+After the live process proves the isolation identity, the client invokes each image, schema, system,
+and instruction callback once, copies at most the provider-input limit, and verifies its declared
+SHA-256 before sending any protocol request. The four inputs are kept in memory and never written
+into the private workspace. The schema and text inputs require strict UTF-8; the schema also
+requires strict JSON.
+
+Stdin and stdout use one strict UTF-8 JSON value per LF-terminated line. Individual values and total
+stdout are bounded; stderr is counted and discarded. Raw process output, document values, digests,
+and private paths never enter normal errors. Success requires the protocol end-of-stream and exit
+status zero. Success as well as protocol failure, crash, overflow, timeout, or cancellation then
+terminates the durable POSIX process group, waits for close, zeroes materialized input copies, and
+removes the private root before the promise settles. Abort leaves a bounded grace after the
+best-effort interrupt write before forced teardown. Automated tests use only a deterministic fake
+executable and synthetic canaries; they perform no login and call no model.
