@@ -74,6 +74,13 @@ closed with no provider access or formal attempt. A provider-carried approval at
 replace this runner gate and, when present, must match its successful response exactly. The full
 boundary is in [`docs/approval-v1.md`](approval-v1.md).
 
+The private command sanitizer applies the corresponding post-provider boundary without
+materializing its raw document or policy as files. It uses `shell: false`, an allowlist-only
+environment, and a fresh private mode-0700 empty working directory. Strict request/response identity
+checks bind the current case input, policy target, exact policy identity, and policy binding. Stdout
+and stderr share a bound; stderr is discarded; timeout and abort wait for the initial process group
+and working-directory cleanup. See [`docs/sanitizer-v1.md`](sanitizer-v1.md).
+
 An applied gate also requires the private provider adapter to implement `prepareTransport()`. That
 hook rederives current account/session/endpoint/persistence/runtime/scope state after staging and
 immediately before provider invocation. Its attestation must exactly match the gate result. Approval

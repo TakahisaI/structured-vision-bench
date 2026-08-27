@@ -6,8 +6,8 @@ Issue #2 adds a provider-neutral single-case runner. It consumes one already val
 writes one successful attempt outside the bundle. It does not own a production prompt, business
 schema, preprocessing, provider credentials, comparison logic, repeat policy, or resume policy.
 
-The private sanitizer wire contract is defined in [`docs/sanitizer-v1.md`](sanitizer-v1.md); its
-local process adapter remains Issue #23. Approval protocol v1 Phase A is
+The private command sanitizer contract is defined in [`docs/sanitizer-v1.md`](sanitizer-v1.md).
+Approval protocol v1 Phase A is
 implemented for this single-run lifecycle: a consumer verifier must derive the requirement decision,
 and a configured private gate must approve the expected snapshot, runtime binding, and scope before
 the provider runs. Suite/resume approval integration remains Phase B of #9 after #5. This repository
@@ -300,6 +300,8 @@ The implementation is split into these public modules:
 - `src/runner/attempt.ts` — attempt writer/reader and exact document digest;
 - `src/runner/approval.ts` — shell-free bounded command approval adapter;
 - `src/runner/sanitizer.ts` — policy envelope preflight;
+- `src/runner/command-sanitizer-wire.ts` — strict private sanitizer wire codec;
+- `src/runner/command-sanitizer.ts` — shell-free private sanitizer process adapter;
 - `src/provider/mock.ts` — deterministic synthetic provider double;
 - `src/runner/load-bundle.ts` — runner-facing re-export of verified staging.
 

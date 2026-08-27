@@ -10,7 +10,19 @@ policy, target, or binding block.
 
 The public harness owns wire framing and identity checks. The consumer owns the opaque policy body
 and all document-specific sanitization rules. The local process transport is specified separately by
-Issue #23; app-server integration remains Issue #18, and suite/resume propagation remains Issue #5.
+this document; app-server integration remains Issue #18, and suite/resume propagation remains Issue
+#5.
+
+## Configuration and process boundary
+
+`createCommandSanitizer()` accepts an absolute executable, an argument vector, an environment-name
+allowlist, a bounded output limit, and the expected sanitizer ID. It snapshots all configuration and
+allowlisted environment values when the factory is called. The command is started with `shell:
+false`, an allowlist-only environment, and a fresh empty private working directory. Environment
+names must be ASCII identifiers and are unique under ASCII case folding.
+
+The executable is run configuration, never bundle content. The runner validates and binds the
+sanitizer ID, protocol version, and callable method before provider invocation.
 
 ## Request framing
 
@@ -73,5 +85,18 @@ Only `sanitizedDocument` becomes eligible for schema validation and publication.
 document, raw provider serialization/digest, policy body/path, and failure details are never written
 to the attempt or normal output.
 
-CI and automated tests use only fictional policies and synthetic documents. They never start a real
-provider, login flow, or consumer sanitizer.
+## Cancellation, limits, and cleanup
+
+Stdout and stderr share one configured byte budget; stderr is counted and discarded. Timeout or
+abort terminates the initially spawned process group and waits for child settlement and private
+working-directory cleanup before the sanitizer Promise settles. On Windows the implementation uses
+`taskkill /t` when available. Detached or daemonized descendants outside the initial process group
+are non-conforming and must not receive the request or inherited descriptors.
+
+Serialized request and collected output buffers are zeroed on all paths as best-effort memory
+hygiene. JavaScript values and strings cannot be promised deterministic erasure, so v1 does not
+claim an OS memory-sandbox boundary. The consumer-owned sanitizer and its conforming descendants
+are one trusted local invocation boundary.
+
+CI and automated tests use only a fake local sanitizer, fictional policies, and synthetic documents.
+They never start a real provider, login flow, or consumer sanitizer.
