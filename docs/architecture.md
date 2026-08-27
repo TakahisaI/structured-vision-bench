@@ -98,9 +98,11 @@ local adapter or sanitizer. Caller-owned attempt keys and derived attempt/run ID
 metadata and are never sent to the local adapter, hosted model, approval gate, or sanitizer. The
 sanitizer command is run/suite configuration, not bundle content.
 
-Providers are transport adapters, not autonomous agents. The Codex app-server provider planned in
-Issue #3 must fail rather than execute tool requests, shell commands, workspace reads, or approval
-requests.
+Providers are transport adapters, not autonomous agents. The Codex app-server protocol in Issue #3
+uses one fixed-version ephemeral turn and fails rather than answer tool, shell, file-change,
+workspace, or approval requests. Issue #25 adds the isolated process and empty workspace; Issue #20
+adds its approval-bound Provider wrapper. The protocol lifecycle and fixed identity are in
+[`docs/codex-app-server-transport-v1.md`](codex-app-server-transport-v1.md).
 
 ### Sanitizer
 
