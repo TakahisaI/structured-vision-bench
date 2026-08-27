@@ -61,6 +61,7 @@ import {
 
 export const DEFAULT_HARNESS_VERSION = "structured-vision-bench-runner-v1";
 export const DEFAULT_ATTEMPT_KEY = "single";
+export const MAX_TIMEOUT_MS = 2_147_483_647;
 const DEFAULT_APPROVAL_TIMEOUT_MS = 30_000;
 const DEFAULT_SANITIZER_TIMEOUT_MS = 30_000;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
@@ -84,7 +85,12 @@ type ProviderIdentity = {
   protocolVersion: string | null;
 };
 
-type ValidatedProvider = Readonly<ProviderIdentity & Pick<Provider, "invoke">>;
+type ValidatedProvider = Readonly<
+  ProviderIdentity &
+    Pick<Provider, "invoke"> & {
+      prepareTransport?: NonNullable<Provider["prepareTransport"]>;
+    }
+>;
 
 type ValidatedApprovalPlan = Readonly<{
   required: boolean;
@@ -109,6 +115,7 @@ type ValidatedSanitizerImplementation = Readonly<{
 export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
   const requested = normalizeRequestedSettings(options);
   const attemptKey = normalizeAttemptKey(options.attemptKey);
+  const providerTimeoutMs = options.providerTimeoutMs;
   const approvalSettings = snapshotApprovalSettings(options.approval);
   const sanitizerImplementation = validateSanitizerImplementation(options.sanitizer);
   const sanitizerSettings = snapshotSanitizerSettings(
@@ -116,7 +123,7 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     sanitizerImplementation,
   );
   validateBoundarySettings(approvalSettings, sanitizerSettings, sanitizerImplementation);
-  validateTimeoutSetting(options.providerTimeoutMs);
+  validateTimeoutSetting(providerTimeoutMs, "run_configuration_invalid");
   const provider = validateProvider(options.provider);
   const harnessVersion =
     normalizeOptionalSetting(options.harnessVersion) ?? DEFAULT_HARNESS_VERSION;
@@ -160,6 +167,7 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       ? prepareSanitizerPolicy(sanitizerSettings, identity)
       : undefined;
     const approvalPlan = validateApprovalSettings(approvalSettings, requirement);
+    validateProviderTransportPreparation(provider, approvalPlan);
     const runId = computeRunIdentity({
       caseInputIdentityDigest: identity.digest,
       bundleManifestDigest: prepared.manifestDigest,
@@ -219,6 +227,7 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     const claim = await claimAttemptDirectory(attemptDirectory);
     attemptClaim = claim;
     await assertAttemptRootHandleStable(attemptRootHandle, attemptRoot, rootGuard);
+    await prepareProviderTransport(provider, approval, approvalPlan?.timeoutMs);
     const providerResponse = await executeProvider(
       provider,
       loaded,
@@ -226,7 +235,8 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       requested,
       harnessVersion,
       harnessCommit,
-      options.providerTimeoutMs,
+      providerTimeoutMs,
+      approval.expiresAt,
     );
     validateProviderApprovalAttestation(providerResponse.approval, approval);
     const providerMetadata = normalizeProviderMetadata(provider, requested, providerResponse);
@@ -415,8 +425,8 @@ function validateBoundarySettings(
 ): void {
   validateCommandSettings(approval, "approval_configuration_invalid");
   validateCommandSettings(sanitizer, "sanitizer_configuration_invalid");
-  validateTimeoutSetting(approval?.timeoutMs);
-  validateTimeoutSetting(sanitizer?.timeoutMs);
+  validateTimeoutSetting(approval?.timeoutMs, "approval_configuration_invalid");
+  validateTimeoutSetting(sanitizer?.timeoutMs, "sanitizer_configuration_invalid");
   if (approval !== undefined && typeof approval.required !== "boolean") {
     throw new RunnerError("run_configuration_invalid", "approval configuration is invalid");
   }
@@ -666,9 +676,18 @@ function validateCommandSettings(
   }
 }
 
-function validateTimeoutSetting(timeoutMs: number | undefined): void {
-  if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)) {
-    throw new RunnerError("run_configuration_invalid", "timeout is invalid");
+function validateTimeoutSetting(
+  timeoutMs: number | undefined,
+  errorCode:
+    | "run_configuration_invalid"
+    | "approval_configuration_invalid"
+    | "sanitizer_configuration_invalid",
+): void {
+  if (
+    timeoutMs !== undefined &&
+    (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS)
+  ) {
+    throw new RunnerError(errorCode, "timeout is invalid");
   }
 }
 
@@ -686,18 +705,21 @@ function validateProvider(provider: Provider): ValidatedProvider {
       route?: unknown;
       implementationVersion?: unknown;
       protocolVersion?: unknown;
+      prepareTransport?: unknown;
       invoke?: unknown;
     };
     const id = implementation.id;
     const route = implementation.route;
     const implementationVersion = implementation.implementationVersion;
     const protocolVersion = implementation.protocolVersion;
+    const prepareTransport = implementation.prepareTransport;
     const invoke = implementation.invoke;
     if (
       typeof id !== "string" ||
       !isSafeLabel(id) ||
       typeof route !== "string" ||
       !isSafeLabel(route) ||
+      (prepareTransport !== undefined && typeof prepareTransport !== "function") ||
       typeof invoke !== "function" ||
       (implementationVersion !== undefined &&
         implementationVersion !== null &&
@@ -714,6 +736,14 @@ function validateProvider(provider: Provider): ValidatedProvider {
       route,
       implementationVersion: implementationVersion ?? null,
       protocolVersion: protocolVersion ?? null,
+      ...(prepareTransport === undefined
+        ? {}
+        : {
+            prepareTransport: Function.prototype.bind.call(
+              prepareTransport,
+              value,
+            ) as NonNullable<Provider["prepareTransport"]>,
+          }),
       invoke: Function.prototype.bind.call(invoke, value) as Provider["invoke"],
     });
   } catch {
@@ -824,6 +854,18 @@ function validateApprovalSettings(
     throw new RunnerError(
       "approval_configuration_invalid",
       "approval configuration is invalid",
+    );
+  }
+}
+
+function validateProviderTransportPreparation(
+  provider: ValidatedProvider,
+  approval: ValidatedApprovalPlan | undefined,
+): void {
+  if (approval !== undefined && provider.prepareTransport === undefined) {
+    throw new RunnerError(
+      "approval_configuration_invalid",
+      "provider transport approval boundary is missing",
     );
   }
 }
@@ -947,12 +989,7 @@ async function executeApproval(
   if (!response.approved) {
     throw new RunnerError("approval_denied", "approval gate denied this run");
   }
-  if (response.expiresAt !== undefined && response.expiresAt !== null) {
-    const expiry = Date.parse(response.expiresAt);
-    if (expiry <= Date.now()) {
-      throw new RunnerError("approval_denied", "approval gate denied this run");
-    }
-  }
+  assertApprovalNotExpired(response.expiresAt);
   return {
     required: settings.required,
     applied: true,
@@ -976,6 +1013,100 @@ async function executeApproval(
     expiresAt: response.expiresAt ?? null,
     reasonCode: response.reasonCode ?? null,
   };
+}
+
+async function prepareProviderTransport(
+  provider: ValidatedProvider,
+  approval: AttemptManifest["approval"],
+  timeoutMs: number | undefined,
+): Promise<void> {
+  if (!approval.applied) return;
+  const expected = approvalManifestResponse(approval);
+  assertApprovalNotExpired(expected.expiresAt);
+  let responseValue: ApprovalResponse;
+  try {
+    const controller = new AbortController();
+    responseValue = await withTimeout(
+      () => provider.prepareTransport!(expected, controller.signal),
+      timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS,
+      "approval_timeout",
+      () => controller.abort(),
+    );
+  } catch (error) {
+    if (isInternalRunnerError(error)) throw error;
+    throw internalRunnerError(
+      "approval_response_invalid",
+      "provider transport approval failed",
+    );
+  }
+  let response: ApprovalResponse;
+  try {
+    response = snapshotApprovalResponse(responseValue);
+  } catch {
+    throw internalRunnerError(
+      "approval_response_invalid",
+      "provider transport approval is invalid",
+    );
+  }
+  validateProviderApprovalAttestation(response, approval);
+  assertApprovalNotExpired(response.expiresAt);
+}
+
+function approvalManifestResponse(
+  approval: AttemptManifest["approval"],
+): ApprovalResponse {
+  if (
+    !approval.applied ||
+    approval.gateId === null ||
+    approval.protocolVersion === null ||
+    approval.snapshotDigest === null ||
+    approval.runtimeBindingDigest === null ||
+    approval.runtimeBindingIdentity === null ||
+    approval.approvedScopeDigest === null ||
+    approval.approvedScopeIdentity === null ||
+    approval.phase === null ||
+    approval.requirementVerifierId === null ||
+    approval.requirementVerifierVersion === null ||
+    approval.requirementDecisionDigest === null ||
+    approval.sanitizerRequirementVersion === null ||
+    approval.sanitizerRequired === null ||
+    approval.policyRequired === null ||
+    approval.sanitizerRequirementReason === null
+  ) {
+    throw internalRunnerError(
+      "approval_response_invalid",
+      "provider transport approval is incomplete",
+    );
+  }
+  return Object.freeze({
+    responseVersion: 1,
+    approved: true,
+    gateId: approval.gateId,
+    protocolVersion: approval.protocolVersion,
+    snapshotDigest: approval.snapshotDigest,
+    runtimeBindingDigest: approval.runtimeBindingDigest,
+    runtimeBindingIdentity: approval.runtimeBindingIdentity,
+    approvedScopeDigest: approval.approvedScopeDigest,
+    approvedScopeIdentity: approval.approvedScopeIdentity,
+    phase: approval.phase,
+    requirementVerifierId: approval.requirementVerifierId,
+    requirementVerifierVersion: approval.requirementVerifierVersion,
+    consumerSourceCommit: approval.consumerSourceCommit,
+    requirementDecisionDigest: approval.requirementDecisionDigest,
+    sanitizerRequirementVersion: approval.sanitizerRequirementVersion,
+    sanitizerRequired: approval.sanitizerRequired,
+    policyRequired: approval.policyRequired,
+    sanitizerRequirementReason: approval.sanitizerRequirementReason,
+    checkedAt: approval.checkedAt,
+    expiresAt: approval.expiresAt,
+    ...(approval.reasonCode === null ? {} : { reasonCode: approval.reasonCode }),
+  });
+}
+
+function assertApprovalNotExpired(expiresAt: string | null | undefined): void {
+  if (expiresAt !== undefined && expiresAt !== null && Date.parse(expiresAt) <= Date.now()) {
+    throw new RunnerError("approval_denied", "approval gate denied this run");
+  }
 }
 
 function snapshotApprovalResponse(value: unknown): ApprovalResponse {
@@ -1072,16 +1203,19 @@ async function executeProvider(
   harnessVersion: string,
   harnessCommit: string | null,
   providerTimeoutMs: number | undefined,
+  approvalExpiresAt: string | null,
 ): Promise<NormalizedProviderResponse> {
   const controller = new AbortController();
   let active = true;
   try {
     const readBytes = async (reader: () => Promise<Buffer>): Promise<Buffer> => {
       if (!active || controller.signal.aborted) throw new Error();
+      assertTransportApprovalActive(approvalExpiresAt);
       return reader();
     };
     const readText = async (reader: () => Promise<string>): Promise<string> => {
       if (!active || controller.signal.aborted) throw new Error();
+      assertTransportApprovalActive(approvalExpiresAt);
       return reader();
     };
     const request = {
@@ -1119,6 +1253,7 @@ async function executeProvider(
         sourceCommit: loaded.metadata.sourceCommit,
       }),
     });
+    assertTransportApprovalActive(approvalExpiresAt);
     const response = await withTimeout(
       () => provider.invoke(request, context, controller.signal),
       providerTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS,
@@ -1145,6 +1280,12 @@ async function executeProvider(
   } finally {
     active = false;
     controller.abort();
+  }
+}
+
+function assertTransportApprovalActive(expiresAt: string | null): void {
+  if (expiresAt !== null && Date.parse(expiresAt) <= Date.now()) {
+    throw internalRunnerError("approval_denied", "approval gate denied this run");
   }
 }
 
@@ -1488,7 +1629,7 @@ async function withTimeout<T>(
   timeoutCode: "approval_timeout" | "provider_timeout" | "sanitizer_timeout",
   onTimeout?: () => void,
 ): Promise<T> {
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
     throw internalRunnerError("run_configuration_invalid", "timeout is invalid");
   }
   return new Promise<T>((resolve, reject) => {

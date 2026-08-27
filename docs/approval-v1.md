@@ -25,6 +25,7 @@ bundle manifest/path/schema preflight
   -> approval settings and implementation validation
   -> approval gate
   -> complete bundle verification and private input staging
+  -> provider transport preparation and current-binding revalidation
   -> provider transport
   -> conditional sanitizer and policy binding
   -> schema validation and attempt publication
@@ -91,6 +92,24 @@ replace the runner gate: a successful runner gate remains canonical, and the pro
 match it field-for-field. A missing provider copy is allowed; a present mismatch is
 `approval_response_invalid`.
 
+When a gate is applied, the provider must implement `prepareTransport(approval, signal)`. The runner
+calls it after complete input staging and attempt claiming, immediately before `invoke()`. The
+private adapter rederives its current account/session/endpoint/persistence/runtime/scope binding and
+returns the current v1 attestation. The runner requires it to match the gate result exactly and
+rechecks expiration after the call. A missing hook, changed receiver state, mismatch, expiry, or
+timeout prevents `invoke()` and provider-input reads. The validated provider snapshots and binds
+both `prepareTransport` and `invoke` to the same receiver, so changing method properties after gate
+success cannot swap the approved transport implementation.
+
+`prepareTransport()` receives only the frozen approval attestation and an abort signal. It must not
+start provider transport, read staged inputs, or retain approval as authorization for a later run;
+actual extraction begins only in the immediately following `invoke()`.
+
+The runner also checks expiration immediately before `invoke()` and inside every provider-input
+read callback. This covers an adapter that delays its first image read until after an approval
+expires. The post-response `ProviderResponse.approval` comparison remains an optional audit and
+integrity check, not the transport authorization point.
+
 ## Consumer requirement decision digest
 
 `requirementDecisionDigest` v1 is:
@@ -118,7 +137,9 @@ replace the required verifier, source-commit, decision-field, and gate-identity 
 `createCommandApprovalGate()` and the CLI command mode use a local child process:
 
 - executable and `argv` are passed separately with `shell: false`;
-- the working directory is the operating-system temporary directory;
+- the executable must be an absolute path;
+- every invocation receives a new private mode-0700 working directory below the operating-system
+  temporary directory, which is removed after the child exits;
 - the child receives only environment variables named in the explicit allowlist;
 - stdin is one UTF-8 JSON request followed by a newline;
 - stdout must be exactly one bounded, strict UTF-8 JSON response;
@@ -152,6 +173,10 @@ svbench run \
 `--approval-arg` and `--approval-env` are repeatable. Timeout and output limit are set with
 `--approval-timeout-ms` and `--approval-output-limit`. Incomplete or malformed CLI approval options
 are `invalid_arguments` with exit status 2 and do not enter the runner.
+The approval executable must be absolute. Any argument that represents a file path must also be
+absolute; relative path arguments resolve only inside the fresh empty private working directory and
+therefore fail closed rather than selecting a file from a shared temporary directory. Timeout values
+are bounded to `1..2147483647` milliseconds, matching the Node.js timer range.
 
 ## Identity and attempt binding
 

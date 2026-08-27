@@ -1,3 +1,6 @@
+import { stat } from "node:fs/promises";
+import path from "node:path";
+
 const mode = process.argv[2] ?? "approve";
 
 if (mode === "nonzero") {
@@ -33,12 +36,17 @@ if (mode === "nonzero") {
     process.env.SYNTHETIC_ALLOWED_MARKER === "synthetic-allowed" &&
     process.env.SYNTHETIC_BLOCKED_MARKER === undefined;
   const literalArgumentIsSafe = process.argv[3] === "$(synthetic-not-executed)";
+  const cwdInfo = await stat(process.cwd());
+  const privateWorkingDirectoryIsSafe =
+    path.basename(process.cwd()).startsWith("svbench-approval-") &&
+    (process.platform === "win32" || (cwdInfo.mode & 0o077) === 0);
   const approved =
     mode !== "deny" &&
     (mode !== "scope" ||
       (request.documentKind === "synthetic_invoice" && request.phase === "development")) &&
     (mode !== "request-boundary" || boundaryIsSafe) &&
     (mode !== "env" || environmentIsSafe) &&
+    (mode !== "cwd" || privateWorkingDirectoryIsSafe) &&
     (mode !== "literal-arg" || literalArgumentIsSafe);
   const response = {
     responseVersion: 1,

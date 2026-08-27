@@ -72,6 +72,10 @@ export interface Provider {
   readonly route: string;
   readonly implementationVersion?: string | null;
   readonly protocolVersion?: string | null;
+  prepareTransport?(
+    approval: ApprovalResponse,
+    signal?: AbortSignal,
+  ): Promise<ApprovalResponse>;
   invoke(
     request: ProviderModelRequest,
     context: ProviderAdapterContext,

@@ -89,7 +89,11 @@ summary is written to stdout; human mode writes failures to stderr.
    until the final manifest publication. The provider receives callbacks over staged inputs, never a
    fresh open of the mutable bundle directory. If the manifest or declared image identity changed
    after approval, the run fails before provider invocation.
-7. **Provider invocation.** The provider receives two separate typed values:
+7. **Provider transport preparation and invocation.** When approval was applied, the provider must
+   rederive its current private runtime/scope binding in `prepareTransport()` immediately before
+   invocation. The returned attestation must exactly match the gate result, and expiration is
+   rechecked after preparation, before invocation, and in every staged-input callback. Only then
+   does the provider receive two separate typed values:
    - `ProviderModelRequest`: allowlisted staged prepared image, output schema snapshot, system text,
      instruction text, and requested model/effort/max tokens;
    - `ProviderAdapterContext`: local case/provenance context and input digests. It is not model

@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { readAttempt } from "../src/runner/attempt.js";
+import { MAX_TIMEOUT_MS } from "../src/runner/run.js";
 
 const CLI = path.join(".tmp", "build", "src", "cli", "svbench.js");
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
@@ -166,11 +167,13 @@ test("rejects incomplete command approval CLI arguments before runner execution"
     const invalidApprovalArguments = [
       ["--approval", "required"],
       ["--approval-command", process.execPath],
+      ["--approval", "required", "--approval-command", "./synthetic-fake-gate"],
       approvalArguments().map((value) =>
         value === "a".repeat(64) ? "synthetic-invalid-digest" : value,
       ),
       [...approvalArguments(), "--approval-env", "SYNTHETIC/INVALID"],
       [...approvalArguments(), "--approval-output-limit", String(16 * 1024 * 1024 + 1)],
+      [...approvalArguments(), "--approval-timeout-ms", String(MAX_TIMEOUT_MS + 1)],
     ];
     for (const [index, approvalArgs] of invalidApprovalArguments.entries()) {
       const attempts = path.join(temporary, `attempts-${index}`);

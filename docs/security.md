@@ -55,12 +55,14 @@ When sanitization is required, the runner validates the sanitizer ID, protocol v
 implementation/settings snapshot for policy preflight, run identity, invocation, response identity,
 and manifest creation. A missing or hostile callable accessor fails with a fixed configuration error.
 Approval gate callability is validated, bound, and snapshotted before approval invocation as well.
-Command gates use an executable and argument vector with `shell: false`, run from the OS temporary
-directory, and receive no inherited environment except names in an explicit allowlist. Stdin carries
+Command gates require an absolute executable and use an argument vector with `shell: false`. Every
+invocation runs in a fresh private mode-0700 directory below the OS temporary directory and receives
+no inherited environment except names in an explicit allowlist. Path-valued arguments must be
+absolute; relative paths resolve only inside the fresh empty directory and fail closed. Stdin carries
 one request; strict JSON stdout and discarded stderr share a bounded byte budget. Timeouts abort and
-terminate the child. The adapter creates no protocol temporary file and never persists its command,
-arguments, environment names/values, response diagnostics, or private identities beyond the
-allowlisted attempt fields.
+terminate the child. The private directory is removed after exit. The adapter creates no protocol
+file and never persists its command, arguments, environment names/values, response diagnostics, or
+private identities beyond the allowlisted attempt fields.
 
 Approval executes after bundle manifest/path/schema preflight and requirement-decision rederivation,
 but before complete provider-input verification, staging, provider process invocation, or image read.
@@ -71,6 +73,14 @@ denial, expiration, timeout, process failure, malformed or extra response data, 
 closed with no provider access or formal attempt. A provider-carried approval attestation cannot
 replace this runner gate and, when present, must match its successful response exactly. The full
 boundary is in [`docs/approval-v1.md`](approval-v1.md).
+
+An applied gate also requires the private provider adapter to implement `prepareTransport()`. That
+hook rederives current account/session/endpoint/persistence/runtime/scope state after staging and
+immediately before provider invocation. Its attestation must exactly match the gate result. Approval
+expiry is checked after this hook, immediately before invocation, and inside every provider-input
+callback. Thus a receiver-state change or an adapter that delays image access past expiry cannot use
+the earlier gate result. Provider, approval, and sanitizer timeout values are all bounded to Node's
+maximum timer delay of 2,147,483,647 milliseconds.
 
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through

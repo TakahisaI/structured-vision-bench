@@ -59,9 +59,12 @@ attempt identities, and paths. The public harness compares identities but does n
 account, endpoint, persistence, retention, or scope policy. See
 [`docs/approval-v1.md`](approval-v1.md).
 
-The successful gate response is bound into `runId` and the attempt manifest. A provider-carried copy
-may be checked against that response but cannot replace the runner gate or self-authorize transport.
-Suite and resume propagation is intentionally deferred to Phase B of Issue #9 after Issue #5.
+The successful gate response is bound into `runId` and the attempt manifest. Immediately before
+transport, an applied gate also requires the private provider adapter to rederive its current opaque
+binding through `prepareTransport()`; changed receiver state or expiry fails before `invoke()` or
+input reads. A provider-carried post-response copy may be checked against the gate response but
+cannot replace these pre-transport checks or self-authorize transport. Suite and resume propagation
+is intentionally deferred to Phase B of Issue #9 after Issue #5.
 
 ### Provider
 
@@ -136,7 +139,8 @@ confidential storage and is passed to a local checkout of the public harness.
    before provider invocation or provider-input access.
 5. After approval, the runner stages verified provider inputs outside the bundle (bounded to 16 MiB
    per provider input), derives a caller-keyed attempt ID from the stable run ID, and claims the
-   attempt directory before provider work.
+   attempt directory. The provider then revalidates the current approval binding immediately before
+   transport.
 6. The selected provider returns structured data or a classified failure.
 7. The runner canonicalizes, sanitizes when required, schema-validates, and publishes the attempt by
    no-replace linking its fully validated manifest from the private same-filesystem `.claim-<nonce>/`

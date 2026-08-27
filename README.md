@@ -87,7 +87,9 @@ a general-purpose JSON Schema instance generator.
 
 For a consumer-owned gate, add `--approval required` plus the command, expected gate/snapshot,
 runtime-binding, approved-scope, and phase options. The command is spawned without a shell and with
-only explicitly allowlisted environment variables. See
+only explicitly allowlisted environment variables; its executable and path-valued arguments are
+absolute, and each invocation uses a fresh private working directory. An approved private provider
+adapter also revalidates its current runtime/scope binding immediately before transport. See
 [`docs/approval-v1.md`](docs/approval-v1.md) for the exact CLI, wire protocol, identity binding, and
 fail-closed behavior.
 

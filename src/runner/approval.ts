@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
+import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import path from "node:path";
 
 import { decodeUtf8Strict, isJsonObject, parseJson } from "../bundle/json.js";
 import { RunnerError } from "./errors.js";
@@ -31,6 +33,7 @@ export function createCommandApprovalGate(options: CommandApprovalGateOptions): 
       typeof executable !== "string" ||
       executable.length === 0 ||
       executable.length > 240 ||
+      !path.isAbsolute(executable) ||
       argv.length > 64 ||
       argv.some((value) => typeof value !== "string" || value.length > 240) ||
       envAllowlist.length > 64 ||
@@ -49,15 +52,23 @@ export function createCommandApprovalGate(options: CommandApprovalGateOptions): 
     return Object.freeze({
       id: gateId,
       protocolVersion: APPROVAL_PROTOCOL_VERSION,
-      approve: async (request: ApprovalRequest, signal?: AbortSignal): Promise<ApprovalResponse> =>
-        runApprovalCommand(
-          executable,
-          argv,
-          envAllowlist,
-          outputLimitBytes,
-          request,
-          signal,
-        ),
+      approve: async (
+        request: ApprovalRequest,
+        signal?: AbortSignal,
+      ): Promise<ApprovalResponse> => {
+        try {
+          return await runApprovalCommand(
+            executable,
+            argv,
+            envAllowlist,
+            outputLimitBytes,
+            request,
+            signal,
+          );
+        } catch {
+          throw new Error("approval command failed");
+        }
+      },
     });
   } catch {
     throw new RunnerError(
@@ -76,17 +87,51 @@ async function runApprovalCommand(
   signal: AbortSignal | undefined,
 ): Promise<ApprovalResponse> {
   if (signal?.aborted) throw new Error("approval command aborted");
-  const environment: NodeJS.ProcessEnv = {};
+  const environment = Object.create(null) as NodeJS.ProcessEnv;
   for (const name of envAllowlist) {
     const value = process.env[name];
     if (value !== undefined) environment[name] = value;
   }
   const requestBytes = Buffer.from(`${JSON.stringify(request)}\n`, "utf8");
+  const workingDirectory = await mkdtemp(path.join(tmpdir(), "svbench-approval-"));
+  try {
+    await chmod(workingDirectory, 0o700);
+    const info = await stat(workingDirectory);
+    if (
+      !info.isDirectory() ||
+      (process.platform !== "win32" && (info.mode & 0o077) !== 0)
+    ) {
+      throw new Error("approval working directory is invalid");
+    }
+    return await spawnApprovalCommand(
+      executable,
+      argv,
+      environment,
+      outputLimitBytes,
+      requestBytes,
+      workingDirectory,
+      signal,
+    );
+  } finally {
+    await rm(workingDirectory, { recursive: true, force: true });
+  }
+}
+
+async function spawnApprovalCommand(
+  executable: string,
+  argv: string[],
+  environment: NodeJS.ProcessEnv,
+  outputLimitBytes: number,
+  requestBytes: Buffer,
+  workingDirectory: string,
+  signal: AbortSignal | undefined,
+): Promise<ApprovalResponse> {
+  if (signal?.aborted) throw new Error("approval command aborted");
   return new Promise<ApprovalResponse>((resolve, reject) => {
     let child;
     try {
       child = spawn(executable, argv, {
-        cwd: tmpdir(),
+        cwd: workingDirectory,
         env: environment,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],

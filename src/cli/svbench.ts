@@ -12,7 +12,7 @@ import {
   createSanitizerRequirementDecision,
   type SanitizerRequirementSettings,
 } from "../runner/identity.js";
-import { runBundle } from "../runner/run.js";
+import { MAX_TIMEOUT_MS, runBundle } from "../runner/run.js";
 import { BundleValidationError } from "../bundle/validate-bundle.js";
 import type { ApprovalSettings } from "../runner/types.js";
 
@@ -242,7 +242,13 @@ function parseCommandApproval(input: {
     if (input.mode === "required" || hasConfiguration) throw new Error();
     return { required: false };
   }
-  if (input.executable.length === 0 || input.executable.length > 240) throw new Error();
+  if (
+    input.executable.length === 0 ||
+    input.executable.length > 240 ||
+    !path.isAbsolute(input.executable)
+  ) {
+    throw new Error();
+  }
   const argv = input.argv ?? [];
   const envAllowlist = input.envAllowlist ?? [];
   if (
@@ -277,7 +283,7 @@ function parseCommandApproval(input: {
     expectedSanitizerRequirementReason: requirement.sanitizerRequirementReason,
     ...(input.timeoutMs === undefined
       ? {}
-      : { timeoutMs: parsePositiveSafeInteger(input.timeoutMs) }),
+      : { timeoutMs: parseTimeoutMs(input.timeoutMs) }),
     ...(input.outputLimitBytes === undefined
       ? {}
       : { outputLimitBytes: parseApprovalOutputLimit(input.outputLimitBytes) }),
@@ -373,6 +379,12 @@ function parsePositiveSafeInteger(value: string): number {
 function parseApprovalOutputLimit(value: string): number {
   const parsed = parsePositiveSafeInteger(value);
   if (parsed > 16 * 1024 * 1024) throw new Error();
+  return parsed;
+}
+
+function parseTimeoutMs(value: string): number {
+  const parsed = parsePositiveSafeInteger(value);
+  if (parsed > MAX_TIMEOUT_MS) throw new Error();
   return parsed;
 }
 
