@@ -1,6 +1,7 @@
 export * from "./bundle/json.js";
 export * from "./bundle/schema-validator.js";
 export * from "./bundle/validate-bundle.js";
+export * from "./comparison/compare.js";
 export * from "./provider/mock.js";
 export * from "./runner/attempt.js";
 export * from "./runner/errors.js";

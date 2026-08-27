@@ -1,0 +1,539 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://structured-vision-bench.example/schemas/comparison-v1.schema.json",
+  "title": "structured-vision-bench comparison result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "comparisonVersion",
+    "scoringRevisionVersion",
+    "scoringRevision",
+    "identity",
+    "fields",
+    "arrays",
+    "summary",
+    "warnings",
+    "resultDigest"
+  ],
+  "properties": {
+    "comparisonVersion": {
+      "const": 1
+    },
+    "scoringRevisionVersion": {
+      "const": 1
+    },
+    "scoringRevision": {
+      "$ref": "#/$defs/digest"
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attemptId",
+        "runId",
+        "caseInputIdentityDigest",
+        "executionBundleDigest",
+        "scoringBundleDigest",
+        "providerInputs",
+        "documentDigest",
+        "rescored",
+        "rescoreReason",
+        "sanitizer"
+      ],
+      "properties": {
+        "attemptId": {
+          "$ref": "#/$defs/digest"
+        },
+        "runId": {
+          "$ref": "#/$defs/digest"
+        },
+        "caseInputIdentityDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "executionBundleDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "scoringBundleDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "providerInputs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "image",
+            "schema",
+            "system",
+            "instruction"
+          ],
+          "properties": {
+            "image": {
+              "$ref": "#/$defs/inputIdentity"
+            },
+            "schema": {
+              "$ref": "#/$defs/inputIdentity"
+            },
+            "system": {
+              "$ref": "#/$defs/inputIdentity"
+            },
+            "instruction": {
+              "$ref": "#/$defs/inputIdentity"
+            }
+          }
+        },
+        "documentDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "rescored": {
+          "type": "boolean"
+        },
+        "rescoreReason": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/safeLabel"
+            }
+          ]
+        },
+        "sanitizer": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sanitizerIdentity"
+            }
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "rescored",
+            "rescoreReason"
+          ],
+          "properties": {
+            "rescored": {
+              "const": false
+            },
+            "rescoreReason": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "required": [
+            "rescored",
+            "rescoreReason"
+          ],
+          "properties": {
+            "rescored": {
+              "const": true
+            },
+            "rescoreReason": {
+              "$ref": "#/$defs/safeLabel"
+            }
+          }
+        }
+      ]
+    },
+    "fields": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/fieldResult"
+      }
+    },
+    "arrays": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/arrayStatistics"
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fields",
+        "arrays",
+        "outcomes",
+        "hardGate"
+      ],
+      "properties": {
+        "fields": {
+          "$ref": "#/$defs/fieldStatistics"
+        },
+        "arrays": {
+          "$ref": "#/$defs/arraySummary"
+        },
+        "outcomes": {
+          "$ref": "#/$defs/outcomes"
+        },
+        "hardGate": {
+          "$ref": "#/$defs/hardGate"
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/warning"
+      }
+    },
+    "resultDigest": {
+      "$ref": "#/$defs/digest"
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "safeLabel": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,64}$"
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nullableIndex": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      ]
+    },
+    "inputIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "mediaType"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "pattern": "^[A-Za-z0-9!#$&^_.+-]+\\/[A-Za-z0-9!#$&^_.+-]+$"
+        }
+      }
+    },
+    "sanitizerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "protocolVersion",
+        "policyBindingDigest",
+        "findings"
+      ],
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/safeLabel"
+            }
+          ]
+        },
+        "protocolVersion": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "const": 1
+            }
+          ]
+        },
+        "policyBindingDigest": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/digest"
+            }
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "code",
+              "severity",
+              "classification",
+              "hardGate",
+              "path"
+            ],
+            "properties": {
+              "code": {
+                "$ref": "#/$defs/safeLabel"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "info",
+                  "warning",
+                  "error"
+                ]
+              },
+              "classification": {
+                "$ref": "#/$defs/safeLabel"
+              },
+              "hardGate": {
+                "type": "boolean"
+              },
+              "path": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      }
+    },
+    "fieldStatistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total",
+        "matched",
+        "missed",
+        "fabricated",
+        "wrong",
+        "comparisonErrors"
+      ],
+      "properties": {
+        "total": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "matched": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "missed": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "fabricated": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "wrong": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "comparisonErrors": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "fieldResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "scalarIndex",
+        "arrayIndex",
+        "fieldIndex",
+        "statistics"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "scalar",
+            "array_field"
+          ]
+        },
+        "scalarIndex": {
+          "$ref": "#/$defs/nullableIndex"
+        },
+        "arrayIndex": {
+          "$ref": "#/$defs/nullableIndex"
+        },
+        "fieldIndex": {
+          "$ref": "#/$defs/nullableIndex"
+        },
+        "statistics": {
+          "$ref": "#/$defs/fieldStatistics"
+        }
+      }
+    },
+    "arrayStatistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "arrayIndex",
+        "expected",
+        "actual",
+        "matched",
+        "missing",
+        "extra",
+        "comparisonErrors"
+      ],
+      "properties": {
+        "arrayIndex": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "expected": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "actual": {
+          "$ref": "#/$defs/nullableIndex"
+        },
+        "matched": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "missing": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "extra": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "comparisonErrors": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "arraySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "actual",
+        "matched",
+        "missing",
+        "extra",
+        "comparisonErrors"
+      ],
+      "properties": {
+        "expected": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "actual": {
+          "$ref": "#/$defs/nullableIndex"
+        },
+        "matched": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "missing": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "extra": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "comparisonErrors": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "outcomes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "missed",
+        "fabricated",
+        "wrong",
+        "missingItem",
+        "extraItem",
+        "comparisonError"
+      ],
+      "properties": {
+        "missed": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "fabricated": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "wrong": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "missingItem": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "extraItem": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "comparisonError": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "hardGate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "passed",
+        "criticalFailures",
+        "sanitizerFailures"
+      ],
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "criticalFailures": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "sanitizerFailures": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "kind",
+        "scalarIndex",
+        "arrayIndex",
+        "fieldIndex",
+        "count"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "missed",
+            "fabricated",
+            "wrong",
+            "missing_item",
+            "extra_item",
+            "comparison_error",
+            "sanitizer_hard_gate"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "scalar",
+            "array",
+            "array_field",
+            "sanitizer"
+          ]
+        },
+        "scalarIndex": {
+          "$ref": "#/$defs/nullableIndex"
+        },
+        "arrayIndex": {
+          "$ref": "#/$defs/nullableIndex"
+        },
+        "fieldIndex": {
+          "$ref": "#/$defs/nullableIndex"
+        },
+        "count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    }
+  }
+}

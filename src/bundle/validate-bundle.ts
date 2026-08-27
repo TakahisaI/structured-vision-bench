@@ -47,6 +47,26 @@ export type BundleValidationResult = {
   bundleVersion: 1;
 };
 
+export type LoadedBundleForComparison = {
+  caseId: string;
+  documentKind: string;
+  metadata: {
+    promptVersion: string;
+    preprocessVersion: string;
+    sourceCommit: string | null;
+  };
+  bundleVersion: 1;
+  manifestDigest: string;
+  inputs: {
+    image: LoadedBundleInput;
+    schema: LoadedBundleInput;
+    system: LoadedBundleInput;
+    instruction: LoadedBundleInput;
+    truth?: LoadedBundleInput & { value: JsonValue };
+  };
+  comparison: JsonValue;
+};
+
 export type LoadedBundleInput = {
   sha256: string;
   mediaType: string;
@@ -133,6 +153,59 @@ export async function validateBundle(
   contractSchemaPath = path.resolve("schemas/bundle-v1.schema.json"),
 ): Promise<BundleValidationResult> {
   return (await validateBundleInternal(bundleDirectory, contractSchemaPath)).summary;
+}
+
+/** Loads only validated identities, truth, and policy needed by comparison. */
+export async function loadBundleForComparison(
+  bundleDirectory: string,
+  contractSchemaPath = path.resolve("schemas/bundle-v1.schema.json"),
+): Promise<LoadedBundleForComparison> {
+  const validated = await validateBundleInternal(bundleDirectory, contractSchemaPath);
+  const metadata = validated.manifest.metadata;
+  const comparison = validated.manifest.comparison;
+  const image = validated.references.get("inputs.image");
+  const schema = validated.references.get("inputs.schema");
+  const system = validated.references.get("inputs.system");
+  const instruction = validated.references.get("inputs.instruction");
+  const truthReference = validated.references.get("inputs.truth");
+  const truthFile = validated.jsonFiles.get("inputs.truth");
+  if (
+    !isJsonObject(metadata) ||
+    comparison === undefined ||
+    image === undefined ||
+    schema === undefined ||
+    system === undefined ||
+    instruction === undefined
+  ) {
+    throw new BundleValidationError("comparison_bundle_incomplete", "comparison bundle is incomplete");
+  }
+  return {
+    caseId: String(validated.manifest.caseId),
+    documentKind: String(metadata.documentKind),
+    metadata: {
+      promptVersion: String(metadata.promptVersion),
+      preprocessVersion: String(metadata.preprocessVersion),
+      sourceCommit: typeof metadata.sourceCommit === "string" ? metadata.sourceCommit : null,
+    },
+    bundleVersion: 1,
+    manifestDigest: validated.manifestDigest,
+    inputs: {
+      image: { sha256: image.sha256, mediaType: image.mediaType },
+      schema: { sha256: schema.sha256, mediaType: schema.mediaType },
+      system: { sha256: system.sha256, mediaType: system.mediaType },
+      instruction: { sha256: instruction.sha256, mediaType: instruction.mediaType },
+      ...(truthReference !== undefined && truthFile !== undefined
+        ? {
+            truth: {
+              sha256: truthReference.sha256,
+              mediaType: truthReference.mediaType,
+              value: truthFile.value,
+            },
+          }
+        : {}),
+    },
+    comparison,
+  };
 }
 
 /**
@@ -1089,7 +1162,7 @@ export function assertTruthProjection(comparison: JsonValue, truth: JsonValue): 
   for (const [scalarIndex, scalar] of collectPointerList(comparison.scalars ?? null).entries()) {
     const segments = decodePointerSegments(scalar);
     const value = resolvePointer(truth, segments);
-    if (value === NOT_FOUND) {
+    if (value === JSON_POINTER_NOT_FOUND) {
       throw truthContractError(`inputs.truth is missing declared scalar ${scalarIndex} of comparison.scalars`);
     }
     if (value !== null && typeof value === "object") {
@@ -1105,7 +1178,7 @@ export function assertTruthProjection(comparison: JsonValue, truth: JsonValue): 
     if (typeof arrayPath !== "string" || typeof keyPointer !== "string") continue;
 
     const elements = resolvePointer(truth, decodePointerSegments(arrayPath));
-    if (elements === NOT_FOUND) {
+    if (elements === JSON_POINTER_NOT_FOUND) {
       throw truthContractError(`inputs.truth is missing declared array ${entryIndex} of comparison.arrays`);
     }
     if (!Array.isArray(elements)) {
@@ -1127,7 +1200,7 @@ export function assertTruthProjection(comparison: JsonValue, truth: JsonValue): 
         );
       }
       const keyValue = resolvePointer(element, decodePointerSegments(keyPointer));
-      if (keyValue === NOT_FOUND) {
+      if (keyValue === JSON_POINTER_NOT_FOUND) {
         throw truthContractError(
           `inputs.truth element ${elementIndex} of declared array ${entryIndex} is missing its key`,
         );
@@ -1165,7 +1238,7 @@ export function assertTruthProjection(comparison: JsonValue, truth: JsonValue): 
 
       for (const [fieldIndex, fieldPointer] of fieldPointers.entries()) {
         const fieldValue = resolvePointer(element, decodePointerSegments(fieldPointer));
-        if (fieldValue === NOT_FOUND) {
+        if (fieldValue === JSON_POINTER_NOT_FOUND) {
           throw truthContractError(
             `inputs.truth element ${elementIndex} of declared array ${entryIndex} is missing compared field ${fieldIndex}`,
           );
@@ -1182,14 +1255,14 @@ export function assertTruthProjection(comparison: JsonValue, truth: JsonValue): 
   }
 }
 
-const NOT_FOUND = Symbol("pointer-not-found");
+export const JSON_POINTER_NOT_FOUND = Symbol("pointer-not-found");
 
 // RFC 6901 array indices are "0" or digits without a leading zero. "01", "1e0",
 // and "+1" name object members, never array elements.
 const ARRAY_INDEX_PATTERN = /^(?:0|[1-9][0-9]*)$/u;
 
 /** Decodes RFC 6901 escape sequences; "~2" stays invalid per the schema patterns. */
-function decodePointerSegments(pointer: string): string[] {
+export function decodePointerSegments(pointer: string): string[] {
   if (!pointer.startsWith("/")) return [];
   return pointer
     .slice(1)
@@ -1197,13 +1270,16 @@ function decodePointerSegments(pointer: string): string[] {
     .map((segment) => segment.replace(/~1/gu, "/").replace(/~0/gu, "~"));
 }
 
-function resolvePointer(root: JsonValue, segments: string[]): JsonValue | typeof NOT_FOUND {
+export function resolvePointer(
+  root: JsonValue,
+  segments: string[],
+): JsonValue | typeof JSON_POINTER_NOT_FOUND {
   let current: JsonValue = root;
   for (const segment of segments) {
     if (Array.isArray(current)) {
-      if (!ARRAY_INDEX_PATTERN.test(segment)) return NOT_FOUND;
+      if (!ARRAY_INDEX_PATTERN.test(segment)) return JSON_POINTER_NOT_FOUND;
       const index = Number(segment);
-      if (index >= current.length) return NOT_FOUND;
+      if (index >= current.length) return JSON_POINTER_NOT_FOUND;
       current = current[index]!;
       continue;
     }
@@ -1213,7 +1289,7 @@ function resolvePointer(root: JsonValue, segments: string[]): JsonValue | typeof
       current = current[segment]!;
       continue;
     }
-    return NOT_FOUND;
+    return JSON_POINTER_NOT_FOUND;
   }
   return current;
 }

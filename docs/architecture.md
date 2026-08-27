@@ -78,8 +78,11 @@ requests.
 ### Comparison
 
 Comparison, introduced by Issue #4, consumes truth, a structured result, and an explicit comparison
-policy. It separates missed, fabricated, wrong, missing-item, and extra-item outcomes. Semantic or
-LLM-judged equivalence is outside bundle v1.
+policy. It separates missed, fabricated, wrong, missing-item, extra-item, and comparison-error
+outcomes; enforces critical and sanitizer hard gates outside averages; and renders JSON plus Markdown
+without field values or pointer text. Normal scoring requires the execution bundle identity. Explicit
+rescoring permits only truth/comparison changes while the four provider inputs, case identity, and
+provenance remain fixed. Semantic or LLM-judged equivalence is outside bundle v1.
 
 ### Report
 
