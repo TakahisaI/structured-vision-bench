@@ -13,17 +13,236 @@ const ARRAY_INDEX_PATTERN = /^(?:0|[1-9][0-9]*)$/u;
 // Cap on collected issues so a hostile document cannot exhaust memory through
 // quadratic uniqueItems comparisons before boundedDetails runs.
 const MAX_ISSUES = 200;
+const MAX_SCHEMA_DEPTH = 64;
+const JSON_SCHEMA_TYPES = new Set(["array", "boolean", "integer", "null", "number", "object", "string"]);
+const SUPPORTED_KEYWORDS = new Set([
+  "$defs",
+  "$id",
+  "$ref",
+  "$schema",
+  "additionalProperties",
+  "allOf",
+  "anyOf",
+  "const",
+  "enum",
+  "format",
+  "items",
+  "maxItems",
+  "maxLength",
+  "maxProperties",
+  "maximum",
+  "minItems",
+  "minLength",
+  "minProperties",
+  "minimum",
+  "not",
+  "oneOf",
+  "pattern",
+  "properties",
+  "required",
+  "title",
+  "type",
+  "uniqueItems",
+]);
 
 export function validateJsonSchema(schema: JsonValue, value: JsonValue): SchemaIssue[] {
   const issues: SchemaIssue[] = [];
-  validateNode(schema, value, "$", issues, schema);
-  return issues;
+  validateNode(schema, value, "$", issues, schema, 0, new Set());
+  return issues.slice(0, MAX_ISSUES);
+}
+
+/** Validates the supported JSON Schema subset before it can reach a provider. */
+export function validateJsonSchemaDefinition(schema: JsonValue): SchemaIssue[] {
+  const issues: SchemaIssue[] = [];
+  const state: SchemaDefinitionState = {
+    greatestDepth: new Map(),
+    active: new Set(),
+    hasCycle: false,
+  };
+  validateSchemaDefinitionNode(schema, issues, schema, 0, state);
+  if (!issueBudgetExceeded(issues) && state.hasCycle) {
+    issues.push({ path: "$", message: "schema contains a cyclic reference" });
+  }
+  return issues.slice(0, MAX_ISSUES);
+}
+
+type SchemaDefinitionState = {
+  greatestDepth: Map<Record<string, JsonValue>, number>;
+  active: Set<Record<string, JsonValue>>;
+  hasCycle: boolean;
+};
+
+function validateSchemaDefinitionNode(
+  value: JsonValue,
+  issues: SchemaIssue[],
+  rootSchema: JsonValue,
+  depth: number,
+  state: SchemaDefinitionState,
+): void {
+  if (issues.length >= MAX_ISSUES) return;
+  if (depth > MAX_SCHEMA_DEPTH) {
+    issues.push({ path: "$", message: "schema nesting is too deep" });
+    return;
+  }
+  if (!isJsonObject(value)) {
+    issues.push({ path: "$", message: "schema node must be an object" });
+    return;
+  }
+  if (state.active.has(value)) {
+    state.hasCycle = true;
+    return;
+  }
+  const greatestDepth = state.greatestDepth.get(value);
+  if (greatestDepth !== undefined && depth <= greatestDepth) return;
+  state.greatestDepth.set(value, depth);
+  state.active.add(value);
+  try {
+    for (const key of Object.keys(value)) {
+      if (!SUPPORTED_KEYWORDS.has(key)) {
+        issues.push({ path: "$", message: "schema contains an unsupported keyword" });
+        if (issues.length >= MAX_ISSUES) return;
+      }
+    }
+    if (value.$ref !== undefined) {
+      const resolved =
+        typeof value.$ref === "string" && value.$ref.startsWith("#")
+          ? resolveLocalRef(rootSchema, value.$ref)
+          : undefined;
+      if (!isJsonObject(resolved)) {
+        issues.push({ path: "$", message: "schema reference is invalid" });
+      } else {
+        validateSchemaDefinitionNode(resolved, issues, rootSchema, depth + 1, state);
+      }
+    }
+    const type = value.type;
+    if (
+      type !== undefined &&
+      ((typeof type !== "string" && !Array.isArray(type)) ||
+        (Array.isArray(type) && (type.length === 0 || type.some((entry) => typeof entry !== "string"))) ||
+        (typeof type === "string" && !JSON_SCHEMA_TYPES.has(type)) ||
+        (Array.isArray(type) && type.some((entry) => typeof entry === "string" && !JSON_SCHEMA_TYPES.has(entry))))
+    ) {
+      issues.push({ path: "$", message: "schema type is invalid" });
+    }
+    if (value.pattern !== undefined) {
+      if (typeof value.pattern !== "string") {
+        issues.push({ path: "$", message: "schema pattern is invalid" });
+      } else {
+        try {
+          new RegExp(value.pattern, "u");
+        } catch {
+          issues.push({ path: "$", message: "schema pattern is invalid" });
+        }
+      }
+    }
+    if (value.format !== undefined && value.format !== "date-time") {
+      issues.push({ path: "$", message: "schema format is unsupported" });
+    }
+    validateRequiredKeyword(value.required, issues);
+    validateEnumKeyword(value.enum, issues);
+    validateBooleanKeyword(value.uniqueItems, issues);
+    validateNumericKeywords(value, issues);
+    validateSchemaObjectKeyword(value.properties, issues, rootSchema, depth, state);
+    validateSchemaObjectKeyword(value.$defs, issues, rootSchema, depth, state);
+    validateSchemaChild(value.additionalProperties, issues, true, rootSchema, depth, state);
+    validateSchemaChild(value.items, issues, false, rootSchema, depth, state);
+    validateSchemaChild(value.not, issues, false, rootSchema, depth, state);
+    for (const keyword of ["anyOf", "oneOf", "allOf"] as const) {
+      const alternatives = value[keyword];
+      if (alternatives !== undefined) {
+        if (!Array.isArray(alternatives) || alternatives.length === 0) {
+          issues.push({ path: "$", message: `schema ${keyword} must contain alternatives` });
+        } else {
+          for (const alternative of alternatives) {
+            validateSchemaDefinitionNode(alternative, issues, rootSchema, depth + 1, state);
+            if (issueBudgetExceeded(issues)) return;
+          }
+        }
+      }
+    }
+  } finally {
+    state.active.delete(value);
+  }
+}
+
+function validateSchemaObjectKeyword(
+  value: JsonValue | undefined,
+  issues: SchemaIssue[],
+  rootSchema: JsonValue,
+  depth: number,
+  state: SchemaDefinitionState,
+): void {
+  if (value === undefined) return;
+  if (!isJsonObject(value)) {
+    issues.push({ path: "$", message: "schema object keyword is invalid" });
+    return;
+  }
+  for (const child of Object.values(value)) {
+    validateSchemaDefinitionNode(child, issues, rootSchema, depth + 1, state);
+    if (issues.length >= MAX_ISSUES) return;
+  }
+}
+
+function validateSchemaChild(
+  value: JsonValue | undefined,
+  issues: SchemaIssue[],
+  allowBoolean: boolean,
+  rootSchema: JsonValue,
+  depth: number,
+  state: SchemaDefinitionState,
+): void {
+  if (value === undefined) return;
+  if (allowBoolean && typeof value === "boolean") return;
+  validateSchemaDefinitionNode(value, issues, rootSchema, depth + 1, state);
+}
+
+function validateRequiredKeyword(value: JsonValue | undefined, issues: SchemaIssue[]): void {
+  if (value === undefined) return;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((entry) => typeof entry !== "string") ||
+    new Set(value).size !== value.length
+  ) {
+    issues.push({ path: "$", message: "schema required is invalid" });
+  }
+}
+
+function validateEnumKeyword(value: JsonValue | undefined, issues: SchemaIssue[]): void {
+  if (value !== undefined && (!Array.isArray(value) || value.length === 0)) {
+    issues.push({ path: "$", message: "schema enum is invalid" });
+  }
+}
+
+function validateBooleanKeyword(value: JsonValue | undefined, issues: SchemaIssue[]): void {
+  if (value !== undefined && typeof value !== "boolean") {
+    issues.push({ path: "$", message: "schema boolean keyword is invalid" });
+  }
+}
+
+function validateNumericKeywords(schema: Record<string, JsonValue>, issues: SchemaIssue[]): void {
+  for (const key of ["minimum", "maximum"] as const) {
+    if (schema[key] !== undefined && (typeof schema[key] !== "number" || !Number.isFinite(schema[key]))) {
+      issues.push({ path: "$", message: "schema numeric bound is invalid" });
+    }
+  }
+  for (const key of ["minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties"] as const) {
+    const value = schema[key];
+    if (value !== undefined && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) {
+      issues.push({ path: "$", message: "schema size bound is invalid" });
+    }
+  }
 }
 
 function resolveLocalRef(rootSchema: JsonValue, ref: string): JsonValue | undefined {
   if (!ref.startsWith("#")) return undefined;
-  const pointer = decodeURIComponent(ref.slice(1));
-  if (pointer === "" ) return rootSchema;
+  let pointer: string;
+  try {
+    pointer = decodeURIComponent(ref.slice(1));
+  } catch {
+    return undefined;
+  }
+  if (pointer === "") return rootSchema;
   if (!pointer.startsWith("/")) return undefined;
   let current: JsonValue = rootSchema;
   for (const rawSegment of pointer.slice(1).split("/")) {
@@ -50,13 +269,84 @@ function validateNode(
   value: JsonValue,
   path: string,
   issues: SchemaIssue[],
-  rootSchema?: JsonValue,
+  rootSchema: JsonValue,
+  depth: number,
+  activeRefs: Set<Record<string, JsonValue>>,
 ): void {
+  if (depth > MAX_SCHEMA_DEPTH) {
+    issues.push({ path, message: "schema nesting is too deep" });
+    return;
+  }
   if (!isJsonObject(schemaValue)) {
     issues.push({ path, message: "schema node must be an object" });
     return;
   }
   const schema = schemaValue;
+
+  if (Object.hasOwn(schema, "anyOf")) {
+    const alternatives = schema.anyOf;
+    if (!Array.isArray(alternatives) || alternatives.length === 0) {
+      issues.push({ path, message: "schema anyOf must contain alternatives" });
+      return;
+    }
+    let matched = false;
+    let fatalIssue: SchemaIssue | undefined;
+    for (const alternative of alternatives) {
+      const alternativeIssues: SchemaIssue[] = [];
+      validateNode(alternative, value, path, alternativeIssues, rootSchema, depth + 1, activeRefs);
+      fatalIssue ??= firstFatalSchemaIssue(alternativeIssues);
+      if (fatalIssue !== undefined) break;
+      if (alternativeIssues.length === 0) {
+        matched = true;
+        break;
+      }
+    }
+    if (fatalIssue !== undefined) issues.push(fatalIssue);
+    else if (!matched) issues.push({ path, message: "must match one of the allowed schemas" });
+  }
+
+  if (Object.hasOwn(schema, "oneOf")) {
+    const alternatives = schema.oneOf;
+    if (!Array.isArray(alternatives) || alternatives.length === 0) {
+      issues.push({ path, message: "schema oneOf must contain alternatives" });
+    } else {
+      let matches = 0;
+      for (const alternative of alternatives) {
+        const alternativeIssues: SchemaIssue[] = [];
+        validateNode(alternative, value, path, alternativeIssues, rootSchema, depth + 1, activeRefs);
+        const fatalIssue = firstFatalSchemaIssue(alternativeIssues);
+        if (fatalIssue !== undefined) {
+          issues.push(fatalIssue);
+          return;
+        }
+        if (alternativeIssues.length === 0) matches += 1;
+      }
+      if (matches !== 1) issues.push({ path, message: "must match exactly one allowed schema" });
+    }
+  }
+
+  if (Object.hasOwn(schema, "allOf")) {
+    const alternatives = schema.allOf;
+    if (!Array.isArray(alternatives) || alternatives.length === 0) {
+      issues.push({ path, message: "schema allOf must contain alternatives" });
+    } else {
+      for (const alternative of alternatives) {
+        validateNode(alternative, value, path, issues, rootSchema, depth + 1, activeRefs);
+        if (issueBudgetExceeded(issues)) return;
+      }
+    }
+  }
+
+  if (Object.hasOwn(schema, "not")) {
+    const alternativeIssues: SchemaIssue[] = [];
+    if (schema.not !== undefined) {
+      validateNode(schema.not, value, path, alternativeIssues, rootSchema, depth + 1, activeRefs);
+    }
+    else alternativeIssues.push({ path, message: "schema node must be an object" });
+    const fatalIssue = firstFatalSchemaIssue(alternativeIssues);
+    if (fatalIssue !== undefined) issues.push(fatalIssue);
+    else if (alternativeIssues.length === 0) issues.push({ path, message: "must not match the schema" });
+  }
 
   // Draft 2020-12 allows $ref alongside sibling keywords; both must hold. Only
   // local "#/..." references are supported, which is all the bundled contract
@@ -64,35 +354,69 @@ function validateNode(
   if (Object.hasOwn(schema, "$ref") && typeof schema.$ref === "string" && rootSchema !== undefined) {
     const resolved = resolveLocalRef(rootSchema, schema.$ref);
     if (resolved === undefined) {
-      issues.push({ path, message: `unresolvable schema $ref ${schema.$ref}` });
+      issues.push({ path, message: "unresolvable schema reference" });
       return;
     }
-    validateNode(resolved, value, path, issues, rootSchema);
+    if (!isJsonObject(resolved) || resolved === schema || activeRefs.has(resolved)) {
+      issues.push({ path, message: "cyclic or invalid schema reference" });
+      return;
+    }
+    activeRefs.add(resolved);
+    try {
+      validateNode(resolved, value, path, issues, rootSchema, depth + 1, activeRefs);
+    } finally {
+      activeRefs.delete(resolved);
+    }
   }
 
   if (Object.hasOwn(schema, "const") && !isDeepStrictEqual(value, schema.const)) {
-    issues.push({ path, message: `must equal ${JSON.stringify(schema.const)}` });
+    issues.push({ path, message: "must equal the required constant" });
     return;
   }
 
   if (Array.isArray(schema.enum) && !schema.enum.some((item) => isDeepStrictEqual(item, value))) {
-    issues.push({ path, message: `must be one of ${JSON.stringify(schema.enum)}` });
+    issues.push({ path, message: "must match one allowed value" });
     return;
   }
 
-  const type = typeof schema.type === "string" ? schema.type : undefined;
-  if (type !== undefined && !matchesType(type, value)) {
-    issues.push({ path, message: `must be ${type}` });
+  const types = schemaTypes(schema.type);
+  if (schema.type !== undefined && (types.length === 0 || !matchesType(types, value))) {
+    issues.push({ path, message: "has an invalid type" });
     return;
   }
 
   if (issueBudgetExceeded(issues)) return;
 
-  const root = rootSchema ?? schema;
-  if (type === "object" && isJsonObject(value)) validateObject(schema, value, path, issues, root);
-  if (type === "array" && Array.isArray(value)) validateArray(schema, value, path, issues, root);
-  if (type === "string" && typeof value === "string") validateString(schema, value, path, issues);
-  if ((type === "number" || type === "integer") && typeof value === "number") {
+  if (
+    isJsonObject(value) &&
+    (types.length === 0 || types.includes("object")) &&
+    (types.includes("object") ||
+      schema.properties !== undefined ||
+      schema.required !== undefined ||
+      schema.additionalProperties !== undefined ||
+      schema.minProperties !== undefined ||
+      schema.maxProperties !== undefined)
+  ) {
+    validateObject(schema, value, path, issues, rootSchema, depth, activeRefs);
+  }
+  if (
+    Array.isArray(value) &&
+    (types.length === 0 || types.includes("array")) &&
+    (types.includes("array") ||
+      schema.items !== undefined ||
+      schema.uniqueItems !== undefined ||
+      schema.minItems !== undefined ||
+      schema.maxItems !== undefined)
+  ) {
+    validateArray(schema, value, path, issues, rootSchema, depth, activeRefs);
+  }
+  if ((types.length === 0 || types.includes("string")) && typeof value === "string") {
+    validateString(schema, value, path, issues);
+  }
+  if (
+    (types.length === 0 || types.includes("number") || types.includes("integer")) &&
+    typeof value === "number"
+  ) {
     validateNumber(schema, value, path, issues);
   }
 }
@@ -103,12 +427,21 @@ function validateObject(
   path: string,
   issues: SchemaIssue[],
   rootSchema: JsonValue,
+  depth: number,
+  activeRefs: Set<Record<string, JsonValue>>,
 ): void {
+  if (typeof schema.minProperties === "number" && Object.keys(value).length < schema.minProperties) {
+    issues.push({ path, message: "has too few properties" });
+  }
+  if (typeof schema.maxProperties === "number" && Object.keys(value).length > schema.maxProperties) {
+    issues.push({ path, message: "has too many properties" });
+  }
   const required = Array.isArray(schema.required)
     ? schema.required.filter((item): item is string => typeof item === "string")
     : [];
   for (const key of required) {
     if (!Object.hasOwn(value, key)) issues.push({ path: `${path}.${key}`, message: "is required" });
+    if (issueBudgetExceeded(issues)) return;
   }
 
   const properties = isJsonObject(schema.properties) ? schema.properties : {};
@@ -119,7 +452,7 @@ function validateObject(
     // Object.prototype and bypass additionalProperties: false.
     const childSchema = Object.hasOwn(properties, key) ? properties[key] : undefined;
     if (childSchema !== undefined) {
-      validateNode(childSchema, child, `${path}.${key}`, issues, rootSchema);
+      validateNode(childSchema, child, `${path}.${key}`, issues, rootSchema, depth + 1, activeRefs);
       continue;
     }
     if (schema.additionalProperties === false) {
@@ -128,6 +461,8 @@ function validateObject(
       // location and count instead.
       disallowedCount += 1;
       firstDisallowedPath ??= path;
+    } else if (isJsonObject(schema.additionalProperties)) {
+      validateNode(schema.additionalProperties, child, `${path}.${key}`, issues, rootSchema, depth + 1, activeRefs);
     }
   }
   if (disallowedCount > 0) {
@@ -147,6 +482,8 @@ function validateArray(
   path: string,
   issues: SchemaIssue[],
   rootSchema: JsonValue,
+  depth: number,
+  activeRefs: Set<Record<string, JsonValue>>,
 ): void {
   if (typeof schema.minItems === "number" && value.length < schema.minItems) {
     issues.push({ path, message: `must contain at least ${schema.minItems} items` });
@@ -171,7 +508,7 @@ function validateArray(
   }
   if (schema.items !== undefined) {
     for (const [index, item] of value.entries()) {
-      validateNode(schema.items!, item, `${path}[${index}]`, issues, rootSchema);
+      validateNode(schema.items!, item, `${path}[${index}]`, issues, rootSchema, depth + 1, activeRefs);
       if (issues.length >= MAX_ISSUES) return;
     }
   }
@@ -179,6 +516,14 @@ function validateArray(
 
 function issueBudgetExceeded(issues: SchemaIssue[]): boolean {
   return issues.length >= MAX_ISSUES;
+}
+
+function firstFatalSchemaIssue(issues: SchemaIssue[]): SchemaIssue | undefined {
+  return issues.find(
+    (issue) =>
+      issue.message === "schema nesting is too deep" ||
+      issue.message === "cyclic or invalid schema reference",
+  );
 }
 
 /** Canonical encoding for duplicate detection: object keys sorted recursively. */
@@ -222,8 +567,17 @@ function validateString(
   if (typeof schema.maxLength === "number" && stringLength(value) > schema.maxLength) {
     issues.push({ path, message: `must have at most ${schema.maxLength} characters` });
   }
-  if (typeof schema.pattern === "string" && !new RegExp(schema.pattern, "u").test(value)) {
-    issues.push({ path, message: `must match ${schema.pattern}` });
+  if (typeof schema.pattern === "string") {
+    try {
+      if (!new RegExp(schema.pattern, "u").test(value)) {
+        issues.push({ path, message: "does not match the string pattern" });
+      }
+    } catch {
+      issues.push({ path, message: "schema pattern is invalid" });
+    }
+  }
+  if (schema.format === "date-time" && !isDateTime(value)) {
+    issues.push({ path, message: "must be a valid date-time" });
   }
 }
 
@@ -241,8 +595,14 @@ function validateNumber(
   }
 }
 
-function matchesType(type: string, value: JsonValue): boolean {
-  switch (type) {
+function schemaTypes(value: JsonValue | undefined): string[] {
+  if (typeof value === "string") return [value];
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function matchesType(types: string[], value: JsonValue): boolean {
+  return types.some((type) => {
+    switch (type) {
     case "object":
       return isJsonObject(value);
     case "array":
@@ -259,5 +619,29 @@ function matchesType(type: string, value: JsonValue): boolean {
       return value === null;
     default:
       return false;
+    }
+  });
+}
+
+function isDateTime(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/u.exec(value);
+  if (match === null) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) return false;
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  if (match[7] !== "Z" && (Number(match[8]) > 23 || Number(match[9]) > 59)) return false;
+  return true;
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    return leap ? 29 : 28;
   }
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }

@@ -23,7 +23,8 @@ Its run-facing settings are separate and never enter a bundle:
 
 - provider route, requested model, effort, and token limit;
 - repeat and retry policy;
-- sanitizer command.
+- sanitizer command;
+- consumer-owned sanitizer requirement verifier and attestation.
 
 The final contract splits ownership as follows: the **bundle** carries image, schema, system,
 instruction, optional truth, comparison policy, and consumer metadata; **run or suite
@@ -34,27 +35,32 @@ later private command adapter may invoke the consumer's production API provider 
 
 ### Bundle validator
 
-The validator is the only implemented component in the bootstrap milestone. It validates the
-manifest contract, path containment, regular-file boundary, digests, and JSON syntax before a future
-provider can see the case.
+The validator validates the manifest contract, path containment, regular-file boundary, digests,
+strict UTF-8, JSON syntax, and the supported output-schema definition before a provider can see the
+case. Runner-facing loading stages provider inputs from the verified read path rather than reopening
+the mutable bundle for a provider; input staging occurs only after approval.
 
 ### Runner
 
-The runner, introduced by Issue #2, will turn one immutable bundle into one immutable attempt. It
-will own staging, finalization, cancellation, timeout handling, and machine-readable attempt
-metadata. It will not own application-specific validation.
+The Issue #2 runner turns one validated bundle into one immutable attempt. It owns provider-input
+staging, case/run identity, consumer requirement attestation, approval and sanitizer
+binding checks, cancellation/timeout signaling, exclusive attempt claiming, final-manifest
+publication, and machine-readable attempt metadata. It does not own application-specific validation.
+A provider, approval, sanitizer, parse, policy, or schema failure creates no formal attempt.
 
 ### Provider
 
 A provider accepts the prepared image, instructions, schema, and requested execution metadata. It
 returns a structured document plus metadata that the upstream protocol actually exposes. Missing
-metadata remains unknown.
+metadata remains unknown. The public implementation currently ships a deterministic mock provider;
+real process/app-server adapters are later work.
 
 Two distinct invocation surfaces must not be conflated:
 
-- **Provider-adapter invocation context** (local, never model input): the four extraction inputs,
-  run settings, and a narrowly allowlisted set of bundle/consumer provenance needed for local
-  validation and attempt recording.
+- **Provider-adapter invocation** (local, never hosted-model input): a separate model request carries
+  the four extraction inputs; its separate context carries run settings, input digests, and a
+  narrowly allowlisted set of bundle/consumer provenance needed for local validation and attempt
+  recording.
 - **Hosted-model payload**: only the prepared image, schema, system preamble, instruction, and the
   requested model / effort / max tokens.
 
@@ -102,12 +108,20 @@ confidential storage and is passed to a local checkout of the public harness.
 ## Data flow
 
 1. The consumer freezes one source revision and exports a bundle to confidential storage.
-2. The validator rejects malformed, incomplete, changed, or escaping inputs.
-3. The runner creates a staged attempt outside the bundle.
-4. The selected provider returns structured data or a classified failure.
-5. The runner validates and finalizes the attempt.
-6. Comparison and reports derive results without mutating bundle or attempt input.
-7. Only anonymized aggregate facts may be copied to a public Issue.
+2. The validator rejects malformed, incomplete, changed, or escaping inputs and preflights the output schema.
+3. The consumer verifier derives the sanitizer requirement from document kind; the runner attests every
+   decision field and digest.
+4. Approval and sanitizer implementations are runtime-validated into bound immutable snapshots, and
+   their policy/runtime bindings are checked before the relevant boundary is crossed.
+5. After approval, the runner stages verified provider inputs outside the bundle (bounded to 16 MiB
+   per provider input) and claims the run directory before provider work.
+6. The selected provider returns structured data or a classified failure.
+7. The runner canonicalizes, sanitizes when required, schema-validates, and publishes the attempt by
+   no-replace linking its fully validated manifest from the private same-filesystem `.claim-<nonce>/`
+   staging area to `attempt.json`; the final link changes the claimed run directory directly to its
+   exact two-file reader shape, and source cleanup is best effort.
+8. Comparison and reports derive results without mutating bundle or attempt input.
+9. Only anonymized aggregate facts may be copied to a public Issue.
 
 ## Dependency direction
 

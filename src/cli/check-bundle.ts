@@ -41,12 +41,21 @@ try {
   }
 } catch (error) {
   if (error instanceof BundleValidationError) {
-    reportFailure({
-      code: error.code,
-      message: error.message,
-      details: error.details,
-      exitCode: 1,
-    });
+    if (error.code === "bundle_io_error") {
+      reportFailure({
+        code: "internal_error",
+        message: "bundle validation failed unexpectedly",
+        details: [],
+        exitCode: 2,
+      });
+    } else {
+      reportFailure({
+        code: error.code,
+        message: error.message,
+        details: error.details,
+        exitCode: 1,
+      });
+    }
   } else {
     // Unexpected failures (filesystem races, permission errors, internal bugs)
     // must not masquerade as bad arguments and must never leak a stack trace

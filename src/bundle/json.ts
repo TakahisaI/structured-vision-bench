@@ -4,7 +4,25 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export class JsonContractError extends Error {}
 
 export function isJsonObject(value: unknown): value is Record<string, JsonValue> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+  );
+}
+
+export function isJsonValue(value: unknown, seen = new WeakSet<object>()): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  const valid = Array.isArray(value)
+    ? value.every((child) => isJsonValue(child, seen))
+    : isJsonObject(value) && Object.values(value).every((child) => isJsonValue(child, seen));
+  seen.delete(value);
+  return valid;
 }
 
 /**
@@ -45,6 +63,29 @@ export function parseJson(source: string, label: string): JsonValue {
   }
   assertFiniteNumbers(parsed, label);
   return parsed as JsonValue;
+}
+
+/**
+ * Re-encodes an in-memory value through the same strict JSON contract used for
+ * bytes. Structured cloning removes provider-owned prototypes, snapshots
+ * getters once, and rejects functions that could otherwise affect JSON.stringify
+ * via toJSON.
+ */
+export function normalizeJsonValue(value: unknown, label: string, maxBytes?: number): JsonValue {
+  let cloned: unknown;
+  let source: string | undefined;
+  try {
+    cloned = structuredClone(value);
+    if (!isJsonValue(cloned)) throw new Error();
+    source = JSON.stringify(cloned);
+  } catch {
+    throw new JsonContractError(`${label} is not valid JSON`);
+  }
+  if (source === undefined) throw new JsonContractError(`${label} is not valid JSON`);
+  if (maxBytes !== undefined && new TextEncoder().encode(source).length > maxBytes) {
+    throw new JsonContractError(`${label} exceeds its size limit`);
+  }
+  return parseJson(source, label);
 }
 
 function assertFiniteNumbers(value: unknown, label: string): void {

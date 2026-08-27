@@ -1,0 +1,748 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://structured-vision-bench.example/schemas/attempt-v1.schema.json",
+  "title": "structured-vision-bench attempt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "attemptVersion",
+    "attemptId",
+    "runId",
+    "bundleVersion",
+    "caseId",
+    "documentKind",
+    "bundleManifestDigest",
+    "inputs",
+    "caseInputIdentity",
+    "provenance",
+    "run",
+    "approval",
+    "sanitizerRequirement",
+    "stages",
+    "document",
+    "timing"
+  ],
+  "properties": {
+    "attemptVersion": {
+      "const": 1
+    },
+    "attemptId": {
+      "$ref": "#/$defs/digest"
+    },
+    "runId": {
+      "$ref": "#/$defs/digest"
+    },
+    "bundleVersion": {
+      "const": 1
+    },
+    "caseId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "documentKind": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9._-]{1,64}$"
+    },
+    "bundleManifestDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "schema",
+        "system",
+        "instruction"
+      ],
+      "properties": {
+        "image": {
+          "$ref": "#/$defs/input"
+        },
+        "schema": {
+          "$ref": "#/$defs/input"
+        },
+        "system": {
+          "$ref": "#/$defs/input"
+        },
+        "instruction": {
+          "$ref": "#/$defs/input"
+        }
+      }
+    },
+    "caseInputIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identityVersion",
+        "caseId",
+        "documentKind",
+        "preparedImage",
+        "digest"
+      ],
+      "properties": {
+        "identityVersion": {
+          "const": 1
+        },
+        "caseId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "documentKind": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "preparedImage": {
+          "$ref": "#/$defs/input"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "harnessVersion",
+        "harnessCommit",
+        "promptVersion",
+        "preprocessVersion",
+        "sourceCommit"
+      ],
+      "properties": {
+        "harnessVersion": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "harnessCommit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "promptVersion": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "preprocessVersion": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "sourceCommit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "route",
+        "requested",
+        "responded"
+      ],
+      "properties": {
+        "providerId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "route": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "requested": {
+          "$ref": "#/$defs/requested"
+        },
+        "responded": {
+          "$ref": "#/$defs/responded"
+        }
+      }
+    },
+    "approval": {
+      "$ref": "#/$defs/approval"
+    },
+    "sanitizerRequirement": {
+      "$ref": "#/$defs/sanitizerRequirement"
+    },
+    "sanitizer": {
+      "$ref": "#/$defs/sanitizer"
+    },
+    "stages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approval",
+        "provider",
+        "parse",
+        "schemaValidation"
+      ],
+      "properties": {
+        "policyTargetPreflight": {
+          "$ref": "#/$defs/stage"
+        },
+        "approval": {
+          "$ref": "#/$defs/stage"
+        },
+        "provider": {
+          "$ref": "#/$defs/stage"
+        },
+        "parse": {
+          "$ref": "#/$defs/stage"
+        },
+        "sanitizer": {
+          "$ref": "#/$defs/stage"
+        },
+        "targetBinding": {
+          "$ref": "#/$defs/stage"
+        },
+        "schemaValidation": {
+          "$ref": "#/$defs/stage"
+        }
+      }
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "const": "document.json"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startedAt",
+        "finishedAt",
+        "durationMs"
+      ],
+      "properties": {
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "sanitizerRequirement": {
+          "properties": {
+            "sanitizerRequired": {
+              "const": false
+            },
+            "policyRequired": {
+              "const": false
+            }
+          }
+        },
+        "stages": {
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "policyTargetPreflight"
+                ]
+              },
+              {
+                "required": [
+                  "sanitizer"
+                ]
+              },
+              {
+                "required": [
+                  "targetBinding"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "not": {
+        "required": [
+          "sanitizer"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "sanitizerRequirement": {
+          "properties": {
+            "sanitizerRequired": {
+              "const": true
+            },
+            "policyRequired": {
+              "const": true
+            }
+          }
+        },
+        "stages": {
+          "required": [
+            "policyTargetPreflight",
+            "sanitizer",
+            "targetBinding"
+          ]
+        }
+      },
+      "required": [
+        "sanitizer"
+      ]
+    }
+  ],
+  "$defs": {
+    "sanitizerRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sanitizerRequirementVersion",
+        "sanitizerRequired",
+        "policyRequired",
+        "sanitizerRequirementReason",
+        "requirementVerifierId",
+        "requirementVerifierVersion",
+        "consumerSourceCommit",
+        "requirementDecisionDigest"
+      ],
+      "properties": {
+        "sanitizerRequirementVersion": {
+          "const": 1
+        },
+        "sanitizerRequired": {
+          "type": "boolean"
+        },
+        "policyRequired": {
+          "type": "boolean"
+        },
+        "sanitizerRequirementReason": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "requirementVerifierId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "requirementVerifierVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "consumerSourceCommit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "requirementDecisionDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "mediaType"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "pattern": "^[A-Za-z0-9!#$&^_.+-]+\\/[A-Za-z0-9!#$&^_.+-]+$"
+        }
+      }
+    },
+    "requested": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "effort",
+        "maxTokens"
+      ],
+      "properties": {
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "maxTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "responded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "effort",
+        "usage",
+        "stopReason"
+      ],
+      "properties": {
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "effort": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "usage": {
+          "$ref": "#/$defs/usage"
+        },
+        "stopReason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "available"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "inputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "outputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "totalTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "applied",
+        "gateId",
+        "protocolVersion",
+        "snapshotDigest",
+        "runtimeBindingDigest",
+        "runtimeBindingIdentity"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "applied": {
+          "type": "boolean"
+        },
+        "gateId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocolVersion": {
+          "anyOf": [
+            {
+              "const": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshotDigest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtimeBindingDigest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtimeBindingIdentity": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        }
+      }
+    },
+    "sanitizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "applied",
+        "id",
+        "protocolVersion",
+        "policyVersion",
+        "policyDigest",
+        "policyTargetIdentityDigest",
+        "policyBindingIdentity",
+        "policyBindingDigest",
+        "findings"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "applied": {
+          "type": "boolean"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocolVersion": {
+          "anyOf": [
+            {
+              "const": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policyVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policyDigest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policyTargetIdentityDigest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policyBindingIdentity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/policyBindingIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policyBindingDigest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/finding"
+          }
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity",
+        "classification",
+        "hardGate",
+        "path"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "error"
+          ]
+        },
+        "classification": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "hardGate": {
+          "type": "boolean"
+        },
+        "path": {
+          "const": null
+        }
+      }
+    },
+    "policyBindingIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caseInputIdentityDigest",
+        "policyVersion",
+        "policyDigest"
+      ],
+      "properties": {
+        "caseInputIdentityDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "policyVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "policyDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "errorCode"
+      ],
+      "properties": {
+        "status": {
+          "const": "passed"
+        },
+        "errorCode": {
+          "type": "null"
+        }
+      }
+    }
+  }
+}

@@ -261,22 +261,26 @@
         "documentKind": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 128
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
         },
         "promptVersion": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 128
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
         },
         "preprocessVersion": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 128
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
         },
         "sourceCommit": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 128
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
         }
       },
       "additionalProperties": false

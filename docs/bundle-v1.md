@@ -30,7 +30,8 @@ Filenames are examples. The manifest is authoritative.
 ### Identity
 
 - `bundleVersion`: integer `1`.
-- `caseId`: stable opaque identifier using lowercase ASCII letters, digits, `.`, `_`, or `-`.
+- `caseId`: stable opaque identifier of 1 to 128 characters, beginning with a lowercase ASCII
+  letter or digit and continuing with lowercase ASCII letters, digits, `.`, `_`, or `-`.
 
 A public fixture may have a descriptive case ID. A real confidential case ID must not be copied to
 GitHub.
@@ -206,7 +207,9 @@ contract during preflight (see Truth shape).
 
 ### Metadata
 
-Required metadata identifies the consumer-owned extraction contract:
+Required metadata identifies the consumer-owned extraction contract. Each metadata identifier is
+bounded to 64 ASCII characters from `A-Z`, `a-z`, `0-9`, `.`, `_`, and `-`, so copied attempt
+metadata cannot carry a local path or unbounded diagnostic:
 
 - `documentKind`;
 - `promptVersion`;
@@ -225,9 +228,11 @@ A conforming reader refuses to parse any of the three JSON files above 4 MiB (`4
 | referenced output schema (`inputs.schema`) | 4 MiB | `json_file_too_large` |
 | referenced truth (`inputs.truth`) | 4 MiB | `json_file_too_large` |
 
-Image and text inputs have no size limit at this layer. Image bytes are verified by digest; text
-bytes are verified by digest and strict UTF-8 decoding.
-Raising or lowering a limit changes machine behavior and requires a new `bundleVersion`.
+Image and text inputs have no bundle-v1 source-file size limit. Image bytes are verified by digest;
+text bytes are verified by digest and strict UTF-8 decoding. The Issue #2 runner applies a separate
+16 MiB per-provider-input staging/snapshot limit and reports `runner_input_too_large` when it is
+exceeded. Changing the JSON limits changes bundle-v1 behavior and requires a new `bundleVersion`;
+changing the runner staging limit is a runner contract change.
 
 ## Byte-exactness contract
 
@@ -288,8 +293,14 @@ A failed preflight must not call a provider.
 ## Input and output lifecycle
 
 Bundle files are input and remain unchanged for the lifetime of a measurement. An attempt is a
-separate directory with its own manifest and digests. Future runner work will stage an attempt,
-validate it, and then rename it to a final location.
+separate directory with its own manifest and digests. The Issue #2 runner stages provider inputs
+outside the bundle, exclusively claims the run-identity directory, validates the formal document
+(sanitizer output when configured), and writes `attempt.json.pending` to a private same-filesystem
+`.claim-<nonce>/` staging directory before publishing it by no-replace hard link as `attempt.json`.
+The final link is the visibility point for the exact two-file attempt shape; source cleanup is best
+effort. The runner bounds each staged provider input to 16 MiB; this is an operational runner limit
+and does not change bundle-v1 source-file validation.
+Failed runs and directories without the final manifest do not become formal attempts.
 
 Retries are not hidden. A repeat or retry is a new attempt with a distinct identity and recorded
 reason. Failed output is not rewritten as success.
