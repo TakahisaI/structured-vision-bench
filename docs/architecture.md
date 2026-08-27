@@ -111,12 +111,13 @@ confidential storage and is passed to a local checkout of the public harness.
 2. The validator rejects malformed, incomplete, changed, or escaping inputs and preflights the output schema.
 3. The consumer verifier derives the sanitizer requirement from document kind; the runner attests every
    decision field and digest.
-4. Approval and sanitizer policy bindings are checked before the relevant boundary is crossed.
+4. Approval and sanitizer implementations are runtime-validated into bound immutable snapshots, and
+   their policy/runtime bindings are checked before the relevant boundary is crossed.
 5. After approval, the runner stages verified provider inputs outside the bundle (bounded to 16 MiB
    per provider input) and claims the run directory before provider work.
 6. The selected provider returns structured data or a classified failure.
 7. The runner canonicalizes, sanitizes when required, schema-validates, and publishes the attempt by
-   no-replace linking its fully validated manifest from the private same-filesystem `.claims/<nonce>/`
+   no-replace linking its fully validated manifest from the private same-filesystem `.claim-<nonce>/`
    staging area to `attempt.json`; the final link changes the claimed run directory directly to its
    exact two-file reader shape, and source cleanup is best effort.
 8. Comparison and reports derive results without mutating bundle or attempt input.

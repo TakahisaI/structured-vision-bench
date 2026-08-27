@@ -296,7 +296,7 @@ Bundle files are input and remain unchanged for the lifetime of a measurement. A
 separate directory with its own manifest and digests. The Issue #2 runner stages provider inputs
 outside the bundle, exclusively claims the run-identity directory, validates the formal document
 (sanitizer output when configured), and writes `attempt.json.pending` to a private same-filesystem
-`.claims/<nonce>/` staging directory before publishing it by no-replace hard link as `attempt.json`.
+`.claim-<nonce>/` staging directory before publishing it by no-replace hard link as `attempt.json`.
 The final link is the visibility point for the exact two-file attempt shape; source cleanup is best
 effort. The runner bounds each staged provider input to 16 MiB; this is an operational runner limit
 and does not change bundle-v1 source-file validation.

@@ -52,8 +52,14 @@ summary is written to stdout; human mode writes failures to stderr.
    recomputes `requirementDecisionDigest`, and rejects a caller downgrade. The decision records
    `sanitizerRequirementVersion`, `sanitizerRequired`, `policyRequired`, a safe reason code, verifier
    identity/version, and optional consumer source commit.
-4. **Policy preflight.** When the decision requires sanitization, the runner hashes the exact policy
-   envelope bytes, parses it with strict UTF-8 and JSON rules, recomputes its target identity, and
+4. **Policy preflight.** When the decision requires sanitization, the runner first validates that the
+   sanitizer ID/version are safe and `sanitize` is callable. It binds that method to its
+   implementation and freezes one snapshot used by run identity, policy preflight, invocation,
+   response checks, and the attempt manifest. Missing, non-callable, or
+   accessor-throwing implementations fail before provider invocation or provider input access. The
+   approval gate's `approve` method is validated and snapshotted at its corresponding preflight. The
+   runner then hashes the exact policy envelope bytes, parses it with strict UTF-8 and JSON rules,
+   recomputes its target identity, and
    computes the policy binding. A missing, malformed, swapped, or mismatched policy fails before
    provider invocation.
 5. **Approval.** A required approval gate must be present and match its expected gate ID, protocol
@@ -90,13 +96,13 @@ summary is written to stdout; human mode writes failures to stderr.
 10. **Atomic finalization.** The formal document is serialized to `document.json.part`, its exact
     bytes are hashed, and a no-replace hard link publishes it as `document.json` inside the claimed
     directory. The matching manifest is written to the private same-filesystem staging path
-    `<attempt-root>/.claims/<owner-nonce>/attempt.json.pending` and self-validated together with the
+    `<attempt-root>/.claim-<owner-nonce>/attempt.json.pending` and self-validated together with the
     document while the private owner marker is present. Before publication, final-claim cleanup may
     remove only files owned by the claim, only when the claim owner is proven, and only while
     `attempt.json` does not exist. The owner marker is then removed and a no-replace hard link
-    publishes the complete external pending
-    manifest as `attempt.json`. That final link is the one-syscall visibility point: the claimed run
-    directory changes directly from `document.json` to the exact final two-file shape. Removing the
+    publishes the complete external pending manifest as `attempt.json`. That final link is the
+    one-syscall visibility point: the claimed run directory changes directly from `document.json` to
+    the exact final two-file shape. Removing the
     external pending source is a separate post-publication best-effort cleanup, keyed by its recorded
     file identity, and cannot turn a published attempt into a failure.
 
@@ -227,8 +233,9 @@ hashes the exact stored document bytes, not a reserialized value.
 
 The reader recognizes only a directory containing the final `attempt.json` and `document.json` as a
 published attempt. A directory containing only `document.json`, the owner marker, or neither
-manifest is an unpublished claim and is rejected as an attempt. The external `.claims` staging
-directory is never part of a formal attempt. The runner uses a no-follow attempt root handle and
+manifest is an unpublished claim and is rejected as an attempt. Each external `.claim-<nonce>`
+staging directory belongs to one run and is never part of a formal attempt; there is no shared
+staging-directory lifecycle between runs. The runner uses a no-follow attempt root handle and
 device/inode checks through the last pre-publication validation. The Node-only
 contract prevents competing harness writers from replacing a claimed run directory. Final document
 and manifest creation use no-replace filesystem operations, and cleanup uses owned-file unlink plus

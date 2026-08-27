@@ -66,7 +66,7 @@ The runner exclusively claims the run-identity directory before provider work. T
 contains only `attempt.json` and the formal `document.json` under the chosen attempt root; the final
 manifest is published with a no-replace filesystem operation only after its complete bytes have been
 validated. The pending manifest is staged outside the final run directory in a private
-`.claims/<nonce>/` directory, so the final manifest link is the sole transition to the reader-visible
+`.claim-<nonce>/` directory, so the final manifest link is the sole transition to the reader-visible
 shape; cleanup of that source is best effort after publication. When the consumer decision requires a
 sanitizer, that document is the sanitizer output.
 Not-required attempts omit sanitizer/policy/target-binding blocks rather than storing null placeholders.

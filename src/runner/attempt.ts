@@ -69,8 +69,6 @@ type AttemptClaimState = {
   closed: boolean;
   ownedFiles: Set<string>;
   ownedFileIdentities: Map<string, FileIdentity>;
-  claimsRootPath: string | undefined;
-  claimsRootIdentity: FileIdentity | undefined;
   stagingDirectoryPath: string | undefined;
   stagingDirectoryIdentity: FileIdentity | undefined;
   ownedStagingFiles: Set<string>;
@@ -200,8 +198,6 @@ export async function claimAttemptDirectory(
       closed: false,
       ownedFiles: new Set(),
       ownedFileIdentities: new Map(),
-      claimsRootPath: undefined,
-      claimsRootIdentity: undefined,
       stagingDirectoryPath: undefined,
       stagingDirectoryIdentity: undefined,
       ownedStagingFiles: new Set(),
@@ -342,10 +338,7 @@ async function cleanupOwnedFiles(directory: string, state: AttemptClaimState): P
 async function cleanupClaimStaging(state: AttemptClaimState): Promise<void> {
   const stagingDirectory = state.stagingDirectoryPath;
   const stagingIdentity = state.stagingDirectoryIdentity;
-  if (stagingDirectory === undefined || stagingIdentity === undefined) {
-    await cleanupClaimsRoot(state);
-    return;
-  }
+  if (stagingDirectory === undefined || stagingIdentity === undefined) return;
   for (const fileName of [...state.ownedStagingFiles]) {
     const identity = state.ownedStagingFileIdentities.get(fileName);
     if (
@@ -361,16 +354,6 @@ async function cleanupClaimStaging(state: AttemptClaimState): Promise<void> {
   if (!currentStaging.isDirectory() || !sameFile(stagingIdentity, currentStaging)) return;
   if ((await readdir(stagingDirectory)).length !== 0) return;
   await rmdir(stagingDirectory);
-  await cleanupClaimsRoot(state);
-}
-
-async function cleanupClaimsRoot(state: AttemptClaimState): Promise<void> {
-  const claimsRoot = state.claimsRootPath;
-  const claimsRootIdentity = state.claimsRootIdentity;
-  if (claimsRoot === undefined || claimsRootIdentity === undefined) return;
-  const currentClaimsRoot = await lstat(claimsRoot);
-  if (!currentClaimsRoot.isDirectory() || !sameFile(claimsRootIdentity, currentClaimsRoot)) return;
-  if ((await readdir(claimsRoot)).length === 0) await rmdir(claimsRoot);
 }
 
 async function closeClaimDirectoryHandle(state: AttemptClaimState): Promise<void> {
@@ -438,18 +421,10 @@ async function prepareManifestStaging(
   state: AttemptClaimState,
   attemptDirectory: string,
 ): Promise<string> {
-  const claimsRoot = path.join(path.dirname(attemptDirectory), ".claims");
-  try {
-    await mkdir(claimsRoot, { recursive: false, mode: 0o700 });
-  } catch (error) {
-    if (!isErrorCode(error, "EEXIST")) throw error;
-  }
-  const claimsRootInfo = await lstat(claimsRoot);
-  if (!isPrivateDirectory(claimsRootInfo)) throw new Error();
-  state.claimsRootPath = claimsRoot;
-  state.claimsRootIdentity = toFileIdentity(claimsRootInfo);
-
-  const stagingDirectory = path.join(claimsRoot, state.ownerNonce);
+  const stagingDirectory = path.join(
+    path.dirname(attemptDirectory),
+    `.claim-${state.ownerNonce}`,
+  );
   await mkdir(stagingDirectory, { recursive: false, mode: 0o700 });
   state.stagingDirectoryPath = stagingDirectory;
   const stagingInfo = await lstat(stagingDirectory);
@@ -485,23 +460,13 @@ async function assertClaimDirectoryEntries(directory: string, expected: string[]
 }
 
 async function assertClaimStagingStable(state: AttemptClaimState): Promise<void> {
-  const claimsRoot = state.claimsRootPath;
-  const claimsRootIdentity = state.claimsRootIdentity;
   const stagingDirectory = state.stagingDirectoryPath;
   const stagingIdentity = state.stagingDirectoryIdentity;
-  if (
-    claimsRoot === undefined ||
-    claimsRootIdentity === undefined ||
-    stagingDirectory === undefined ||
-    stagingIdentity === undefined
-  ) {
+  if (stagingDirectory === undefined || stagingIdentity === undefined) {
     throw new Error();
   }
-  const currentClaimsRoot = await lstat(claimsRoot);
   const currentStaging = await lstat(stagingDirectory);
   if (
-    !isPrivateDirectory(currentClaimsRoot) ||
-    !sameFile(claimsRootIdentity, currentClaimsRoot) ||
     !isPrivateDirectory(currentStaging) ||
     !sameFile(stagingIdentity, currentStaging)
   ) {

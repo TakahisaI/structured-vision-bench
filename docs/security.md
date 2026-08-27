@@ -50,15 +50,22 @@ larger inputs fail with a stable runner error. Provider read callbacks are inval
 provider execution settles (including timeout), and cleanup disposes the captured snapshots, so a
 late in-process provider cannot reopen staging through the request.
 
+When sanitization is required, the runner validates the sanitizer ID, protocol version, and callable
+`sanitize` method before provider invocation or input access. It binds the method and freezes one
+implementation/settings snapshot for policy preflight, run identity, invocation, response identity,
+and manifest creation. A missing or hostile callable accessor fails with a fixed configuration error.
+Approval gate callability is validated and snapshotted before approval invocation as well.
+
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through
 the last pre-publication validation. Before provider work, the run-identity destination is claimed
 with a non-recursive exclusive `mkdir`; an existing entry is reported as `attempt_exists` and the
 losing process never cleans it up or invokes the provider. The winning process places a private
 owner-nonce marker in the claimed directory, writes and validates `document.json`, and writes the
-complete `attempt.json.pending` into a private same-filesystem `<attempt-root>/.claims/<nonce>/`
-staging directory. The owner marker is removed only immediately before final publication. Document
-and manifest publication use no-replace hard links from their complete pending files. The final
+complete `attempt.json.pending` into a private same-filesystem `<attempt-root>/.claim-<nonce>/`
+staging directory owned by that run, without a shared staging-root lifecycle. The owner marker is
+removed only immediately before final publication. Document and manifest publication use no-replace
+hard links from their complete pending files. The final
 manifest link is the sole visibility point for a complete manifest: it changes the run directory in
 one syscall from `document.json` to the exact `attempt.json` plus `document.json` shape. Removing
 the external pending source is post-publication best effort and cannot turn a published attempt into

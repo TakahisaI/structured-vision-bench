@@ -40,6 +40,7 @@ import type {
   RequestedExecutionSettings,
   RunBundleOptions,
   RunResult,
+  Sanitizer,
   SanitizerFinding,
   SanitizerResponse,
   SanitizerSettings,
@@ -73,9 +74,20 @@ type ProviderIdentity = {
   route: string;
 };
 
+type ValidatedSanitizerImplementation = Readonly<{
+  id: string;
+  protocolVersion: 1;
+  sanitize: Sanitizer["sanitize"];
+}>;
+
 export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
   const requested = normalizeRequestedSettings(options);
-  validateBoundarySettings(options.approval, options.sanitizer);
+  const sanitizerImplementation = validateSanitizerImplementation(options.sanitizer);
+  const sanitizerSettings = snapshotSanitizerSettings(
+    options.sanitizer,
+    sanitizerImplementation,
+  );
+  validateBoundarySettings(options.approval, sanitizerSettings, sanitizerImplementation);
   validateTimeoutSetting(options.providerTimeoutMs);
   const providerIdentity = validateProvider(options.provider);
   const harnessVersion =
@@ -111,9 +123,13 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       options.sanitizerRequirement,
       prepared.documentKind,
     );
-    validateSanitizerRequirementSettings(requirement, options.sanitizer);
+    validateSanitizerRequirementSettings(
+      requirement,
+      sanitizerSettings,
+      sanitizerImplementation,
+    );
     const preparedPolicy = requirement.policyRequired
-      ? prepareSanitizerPolicy(options.sanitizer, identity)
+      ? prepareSanitizerPolicy(sanitizerSettings, identity)
       : undefined;
     const approvalPlan = validateApprovalSettings(options.approval);
     const runId = computeRunIdentity({
@@ -132,9 +148,11 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       approvalRequired: approvalPlan?.required ?? false,
       sanitizerBindingDigest: preparedPolicy?.policyBindingDigest ?? null,
       sanitizerId:
-        options.sanitizer?.sanitizer?.id ?? options.sanitizer?.expectedSanitizerId ?? null,
+        sanitizerImplementation?.id ?? sanitizerSettings?.expectedSanitizerId ?? null,
       sanitizerProtocolVersion:
-        options.sanitizer?.sanitizer?.protocolVersion ?? options.sanitizer?.expectedProtocolVersion ?? null,
+        sanitizerImplementation?.protocolVersion ??
+        sanitizerSettings?.expectedProtocolVersion ??
+        null,
       sanitizerRequired: requirement.sanitizerRequired,
       policyRequired: requirement.policyRequired,
       sanitizerRequirementVersion: requirement.sanitizerRequirementVersion,
@@ -174,7 +192,8 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     );
     const providerMetadata = normalizeProviderMetadata(providerIdentity, requested, providerResponse);
     const sanitized = await executeSanitizer(
-      requirement.sanitizerRequired ? options.sanitizer : undefined,
+      requirement.sanitizerRequired ? sanitizerSettings : undefined,
+      requirement.sanitizerRequired ? sanitizerImplementation : undefined,
       preparedPolicy,
       identity,
       loaded.documentKind,
@@ -340,6 +359,7 @@ function normalizeOptionalSetting(value: string | null | undefined): string | nu
 function validateBoundarySettings(
   approval: ApprovalSettings | undefined,
   sanitizer: SanitizerSettings | undefined,
+  sanitizerImplementation: ValidatedSanitizerImplementation | undefined,
 ): void {
   validateCommandSettings(approval);
   validateCommandSettings(sanitizer);
@@ -351,40 +371,94 @@ function validateBoundarySettings(
   if (sanitizer !== undefined && typeof sanitizer.required !== "boolean") {
     throw new RunnerError("sanitizer_configuration_invalid", "sanitizer configuration is invalid");
   }
-  if (sanitizer?.expectedSanitizerId !== undefined && sanitizer.sanitizer === undefined) {
+  if (sanitizer?.expectedSanitizerId !== undefined && sanitizerImplementation === undefined) {
     throw new RunnerError("sanitizer_configuration_invalid", "sanitizer identity is invalid");
   }
   if (
     sanitizer?.expectedSanitizerId !== undefined &&
-    sanitizer.sanitizer !== undefined &&
-    sanitizer.expectedSanitizerId !== sanitizer.sanitizer.id
+    sanitizerImplementation !== undefined &&
+    sanitizer.expectedSanitizerId !== sanitizerImplementation.id
   ) {
     throw new RunnerError("sanitizer_configuration_invalid", "sanitizer identity is invalid");
   }
   if (
     sanitizer?.expectedProtocolVersion !== undefined &&
-    sanitizer.sanitizer !== undefined &&
-    sanitizer.expectedProtocolVersion !== sanitizer.sanitizer.protocolVersion
+    sanitizerImplementation !== undefined &&
+    sanitizer.expectedProtocolVersion !== sanitizerImplementation.protocolVersion
   ) {
     throw new RunnerError("sanitizer_configuration_invalid", "sanitizer identity is invalid");
   }
   if (
     sanitizer?.expectedProtocolVersion !== undefined &&
-    sanitizer.sanitizer === undefined
+    sanitizerImplementation === undefined
   ) {
     throw new RunnerError("sanitizer_configuration_invalid", "sanitizer protocol is invalid");
-  }
-  if (
-    sanitizer?.sanitizer !== undefined &&
-    (!isSafeLabel(sanitizer.sanitizer.id) || sanitizer.sanitizer.protocolVersion !== 1)
-  ) {
-    throw new RunnerError("sanitizer_configuration_invalid", "sanitizer identity is invalid");
   }
   if (
     sanitizer?.expectedSanitizerId !== undefined &&
     !isSafeLabel(sanitizer.expectedSanitizerId)
   ) {
     throw new RunnerError("sanitizer_configuration_invalid", "sanitizer identity is invalid");
+  }
+}
+
+function validateSanitizerImplementation(
+  settings: SanitizerSettings | undefined,
+): ValidatedSanitizerImplementation | undefined {
+  try {
+    const value: unknown = settings?.sanitizer;
+    if (value === undefined) return undefined;
+    if (value === null || typeof value !== "object") throw new Error();
+    const sanitizer = value as { id?: unknown; protocolVersion?: unknown; sanitize?: unknown };
+    const id = sanitizer.id;
+    const protocolVersion = sanitizer.protocolVersion;
+    const sanitize = sanitizer.sanitize;
+    if (
+      typeof id !== "string" ||
+      !isSafeLabel(id) ||
+      protocolVersion !== 1 ||
+      typeof sanitize !== "function"
+    ) {
+      throw new Error();
+    }
+    return Object.freeze({
+      id,
+      protocolVersion: 1,
+      sanitize: Function.prototype.bind.call(sanitize, value) as Sanitizer["sanitize"],
+    });
+  } catch {
+    throw new RunnerError(
+      "sanitizer_configuration_invalid",
+      "sanitizer implementation is invalid",
+    );
+  }
+}
+
+function snapshotSanitizerSettings(
+  settings: SanitizerSettings | undefined,
+  sanitizer: ValidatedSanitizerImplementation | undefined,
+): SanitizerSettings | undefined {
+  if (settings === undefined) return undefined;
+  try {
+    const snapshot = { ...settings } as SanitizerSettings;
+    if (sanitizer === undefined) {
+      delete snapshot.sanitizer;
+    } else {
+      snapshot.sanitizer = sanitizer;
+    }
+    if (settings.policyEnvelopeBytes instanceof Uint8Array) {
+      snapshot.policyEnvelopeBytes = Uint8Array.from(settings.policyEnvelopeBytes);
+    }
+    if (Array.isArray(settings.argv)) snapshot.argv = [...settings.argv];
+    if (Array.isArray(settings.envAllowlist)) {
+      snapshot.envAllowlist = [...settings.envAllowlist];
+    }
+    return Object.freeze(snapshot);
+  } catch {
+    throw new RunnerError(
+      "sanitizer_configuration_invalid",
+      "sanitizer configuration is invalid",
+    );
   }
 }
 
@@ -455,6 +529,7 @@ function verifySanitizerRequirement(
 function validateSanitizerRequirementSettings(
   requirement: SanitizerRequirementDecisionV1,
   sanitizer: SanitizerSettings | undefined,
+  sanitizerImplementation: ValidatedSanitizerImplementation | undefined,
 ): void {
   if (!requirement.sanitizerRequired) {
     if (sanitizer !== undefined) {
@@ -465,7 +540,7 @@ function validateSanitizerRequirementSettings(
     }
     return;
   }
-  if (sanitizer === undefined || !sanitizer.required || sanitizer.sanitizer === undefined) {
+  if (sanitizer === undefined || !sanitizer.required || sanitizerImplementation === undefined) {
     throw new RunnerError("sanitizer_required", "required sanitizer is missing");
   }
   if (
@@ -499,10 +574,12 @@ function validateCommandSettings(
         settings.executable.length === 0 ||
         settings.executable.length > 240)) ||
     (settings.argv !== undefined &&
-      (settings.argv.length > 64 ||
+      (!Array.isArray(settings.argv) ||
+        settings.argv.length > 64 ||
         settings.argv.some((value) => typeof value !== "string" || value.length > 240))) ||
     (settings.envAllowlist !== undefined &&
-      (settings.envAllowlist.length > 64 ||
+      (!Array.isArray(settings.envAllowlist) ||
+        settings.envAllowlist.length > 64 ||
         settings.envAllowlist.some(
           (value) =>
             typeof value !== "string" ||
@@ -553,44 +630,73 @@ function validateApprovalSettings(settings: ApprovalSettings | undefined):
       expectedProtocolVersion: 1;
       snapshotDigest: string;
       runtimeBindingDigest: string;
-    })
+  })
   | undefined {
   if (settings === undefined) return undefined;
+  let gate: ApprovalSettings["gate"];
+  try {
+    gate = settings.gate;
+  } catch {
+    throw new RunnerError(
+      "approval_configuration_invalid",
+      "approval configuration is invalid",
+    );
+  }
   if (!settings.required) {
-    if (settings.gate !== undefined) {
+    if (gate !== undefined) {
       throw new RunnerError("approval_configuration_invalid", "optional approval gates are not supported");
     }
     return undefined;
   }
-  if (settings.required && settings.gate === undefined) {
+  if (gate === undefined) {
     throw new RunnerError("approval_required", "approval gate is required");
   }
-  if (
-    settings.gate === undefined ||
-    typeof settings.expectedGateId !== "string" ||
-    !isSafeLabel(settings.expectedGateId) ||
-    settings.expectedProtocolVersion !== 1 ||
-    !isDigest(settings.snapshotDigest) ||
-    !isDigest(settings.runtimeBindingDigest)
-  ) {
-    throw new RunnerError("approval_configuration_invalid", "approval configuration is incomplete");
+  try {
+    const expectedGateId = settings.expectedGateId;
+    const snapshotDigest = settings.snapshotDigest;
+    const runtimeBindingDigest = settings.runtimeBindingDigest;
+    const runtimeBindingIdentity = settings.runtimeBindingIdentity;
+    if (
+      typeof expectedGateId !== "string" ||
+      !isSafeLabel(expectedGateId) ||
+      settings.expectedProtocolVersion !== 1 ||
+      !isDigest(snapshotDigest) ||
+      !isDigest(runtimeBindingDigest) ||
+      (runtimeBindingIdentity !== undefined && !isSafeLabel(runtimeBindingIdentity))
+    ) {
+      throw new Error();
+    }
+    const approve = gate.approve;
+    if (
+      gate.id !== expectedGateId ||
+      gate.protocolVersion !== 1 ||
+      typeof approve !== "function"
+    ) {
+      throw new Error();
+    }
+    const gateSnapshot = Object.freeze({
+      id: gate.id,
+      protocolVersion: 1 as const,
+      approve: Function.prototype.bind.call(approve, gate) as NonNullable<
+        ApprovalSettings["gate"]
+      >["approve"],
+    });
+    return Object.freeze({
+      required: true,
+      gate: gateSnapshot,
+      expectedGateId,
+      expectedProtocolVersion: 1 as const,
+      snapshotDigest,
+      runtimeBindingDigest,
+      ...(runtimeBindingIdentity === undefined ? {} : { runtimeBindingIdentity }),
+      ...(settings.timeoutMs === undefined ? {} : { timeoutMs: settings.timeoutMs }),
+    });
+  } catch {
+    throw new RunnerError(
+      "approval_configuration_invalid",
+      "approval configuration is invalid",
+    );
   }
-  if (settings.gate.id !== settings.expectedGateId || settings.gate.protocolVersion !== 1) {
-    throw new RunnerError("approval_configuration_invalid", "approval gate identity is invalid");
-  }
-  if (
-    settings.runtimeBindingIdentity !== undefined &&
-    !isSafeLabel(settings.runtimeBindingIdentity)
-  ) {
-    throw new RunnerError("approval_configuration_invalid", "approval binding identity is invalid");
-  }
-  return settings as ApprovalSettings & {
-    gate: NonNullable<ApprovalSettings["gate"]>;
-    expectedGateId: string;
-    expectedProtocolVersion: 1;
-    snapshotDigest: string;
-    runtimeBindingDigest: string;
-  };
 }
 
 async function executeApproval(
@@ -812,6 +918,7 @@ function normalizeProviderResponseMetadata(response: ProviderResponse): {
 
 async function executeSanitizer(
   settings: SanitizerSettings | undefined,
+  sanitizer: ValidatedSanitizerImplementation | undefined,
   preparedPolicy: PreparedSanitizerPolicy | undefined,
   identity: CaseInputIdentity,
   documentKind: string,
@@ -841,7 +948,6 @@ async function executeSanitizer(
   if (settings === undefined) {
     throw new RunnerError("sanitizer_required", "sanitizer configuration is missing");
   }
-  const sanitizer = settings.sanitizer;
   if (sanitizer === undefined) {
     throw new RunnerError("sanitizer_required", "sanitizer implementation is missing");
   }
@@ -907,7 +1013,7 @@ async function executeSanitizer(
     return {
       document: sanitizedDocument,
       manifest: {
-        required: settings.required,
+        required: true,
         applied: true,
         id: response.sanitizerId,
         protocolVersion: response.protocolVersion,

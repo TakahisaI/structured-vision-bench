@@ -758,6 +758,7 @@ test("makes the final link immediately readable and ignores pending-manifest cle
     let observedNames: string[] | undefined;
     let readableDuringCleanup = false;
     let pendingSourcePresent = false;
+    let stagingDirectoryName: string | undefined;
     await writeAttemptFilesWithHooks(
       claim,
       manifest,
@@ -767,6 +768,7 @@ test("makes the final link immediately readable and ignores pending-manifest cle
       {
         removePendingManifest: async (pendingPath) => {
           assert.notEqual(path.dirname(pendingPath), initial.attemptDirectory);
+          stagingDirectoryName = path.basename(path.dirname(pendingPath));
           pendingSourcePresent = (await stat(pendingPath)).isFile();
           observedNames = (await readdir(initial.attemptDirectory)).sort();
           try {
@@ -783,7 +785,12 @@ test("makes the final link immediately readable and ignores pending-manifest cle
     assert.equal(readableDuringCleanup, true);
     assert.equal(pendingSourcePresent, true);
     assert.deepEqual((await readdir(initial.attemptDirectory)).sort(), ["attempt.json", "document.json"]);
-    assert.deepEqual((await readdir(attempts)).sort(), [".claims", path.basename(initial.attemptDirectory)]);
+    assert.ok(stagingDirectoryName);
+    assert.match(stagingDirectoryName, /^\.claim-[0-9a-f-]{36}$/u);
+    assert.deepEqual((await readdir(attempts)).sort(), [
+      stagingDirectoryName,
+      path.basename(initial.attemptDirectory),
+    ].sort());
     await readAttempt(initial.attemptDirectory);
     await cleanupAttemptClaim(claim, async () => true);
     assert.deepEqual(await readdir(attempts), [path.basename(initial.attemptDirectory)]);
@@ -1310,6 +1317,45 @@ test("rejects an optional approval gate before invoking it", async () => {
   }
 });
 
+test("rejects a non-callable approval gate before provider invocation", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  let providerCalls = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: attempts,
+        provider: createMockProvider({
+          onInvoke: () => {
+            providerCalls += 1;
+          },
+        }),
+        approval: {
+          required: true,
+          gate: {
+            id: "synthetic-gate",
+            protocolVersion: 1,
+            approve: "synthetic-not-callable",
+          } as unknown as ApprovalGate,
+          expectedGateId: "synthetic-gate",
+          expectedProtocolVersion: 1,
+          snapshotDigest: "a".repeat(64),
+          runtimeBindingDigest: "b".repeat(64),
+        },
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "approval_configuration_invalid",
+    );
+    assert.equal(providerCalls, 0);
+    await assert.rejects(readdir(attempts), /ENOENT/u);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("binds sanitizer output to the current case identity and policy bytes", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
   const bundle = path.join(temporary, "bundle");
@@ -1522,6 +1568,175 @@ test("requires every expected sanitizer identity before provider invocation", as
       );
       assert.equal(providerCalls, 0, `${field} must be checked before provider invocation`);
     }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects non-callable sanitizer implementations before provider input access", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const identity = computeCaseInputIdentity({
+    caseId: "synthetic-invoice-basic",
+    documentKind: "synthetic_invoice",
+    preparedImage: { mediaType: "image/png", sha256: IMAGE_SHA256 },
+  });
+  const policyBytes = createSanitizerPolicyEnvelope({
+    target: identity,
+    policyVersion: 1,
+    policy: { syntheticRule: "remove-extra-fields" },
+  });
+  const policyDigest = createHash("sha256").update(policyBytes).digest("hex");
+  const policyBindingDigest = computePolicyBindingDigest({
+    caseInputIdentityDigest: identity.digest,
+    policyVersion: 1,
+    policyDigest,
+  });
+  const throwingGetter = Object.defineProperty(
+    { id: "fake-sanitizer", protocolVersion: 1 },
+    "sanitize",
+    {
+      enumerable: true,
+      get: () => {
+        throw new Error("SYNTHETIC-SECRET-MARKER");
+      },
+    },
+  );
+  const invalidImplementations = [
+    { id: "fake-sanitizer", protocolVersion: 1 },
+    { id: "fake-sanitizer", protocolVersion: 1, sanitize: "synthetic-not-callable" },
+    throwingGetter,
+  ];
+  let providerCalls = 0;
+  let imageReads = 0;
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    for (const [index, implementation] of invalidImplementations.entries()) {
+      const attemptRoot = path.join(temporary, `attempts-${index}`);
+      await assert.rejects(
+        runBundle({
+          bundleDirectory: bundle,
+          attemptRoot,
+          provider: createMockProvider({
+            onInvoke: () => {
+              providerCalls += 1;
+            },
+            onImageRead: () => {
+              imageReads += 1;
+            },
+          }),
+          sanitizerRequirement: syntheticRequirement(true),
+          sanitizer: {
+            required: true,
+            sanitizer: implementation as Sanitizer,
+            policyEnvelopeBytes: policyBytes,
+            expectedSanitizerId: "fake-sanitizer",
+            expectedProtocolVersion: 1,
+            expectedPolicyVersion: 1,
+            expectedPolicyDigest: policyDigest,
+            expectedCaseInputIdentityVersion: 1,
+            expectedCaseInputIdentityDigest: identity.digest,
+            expectedPolicyBindingDigest: policyBindingDigest,
+          },
+        }),
+        (error: unknown) =>
+          error instanceof RunnerError &&
+          error.code === "sanitizer_configuration_invalid" &&
+          error.message === "sanitizer implementation is invalid",
+      );
+      await assert.rejects(readdir(attemptRoot), /ENOENT/u);
+    }
+    assert.equal(providerCalls, 0);
+    assert.equal(imageReads, 0);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("uses the validated sanitizer snapshot after the original implementation is mutated", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  const identity = computeCaseInputIdentity({
+    caseId: "synthetic-invoice-basic",
+    documentKind: "synthetic_invoice",
+    preparedImage: { mediaType: "image/png", sha256: IMAGE_SHA256 },
+  });
+  const policyBytes = createSanitizerPolicyEnvelope({
+    target: identity,
+    policyVersion: 1,
+    policy: { syntheticRule: "remove-extra-fields" },
+  });
+  const policyDigest = createHash("sha256").update(policyBytes).digest("hex");
+  const policyBindingDigest = computePolicyBindingDigest({
+    caseInputIdentityDigest: identity.digest,
+    policyVersion: 1,
+    policyDigest,
+  });
+  let sanitizerCalls = 0;
+  const sanitizer: Sanitizer = {
+    id: "snapshot-sanitizer",
+    protocolVersion: 1,
+    sanitize: async function () {
+      assert.equal(this, sanitizer);
+      sanitizerCalls += 1;
+      return {
+        sanitizedDocument: {
+          documentKind: "synthetic_invoice",
+          invoiceNumber: "SYNTHETIC-001",
+          issuedAt: "2026-01-01",
+          currency: "JPY",
+          lines: [],
+          totalAmount: 0,
+        },
+        sanitizerId: "snapshot-sanitizer",
+        protocolVersion: 1,
+        policyVersion: 1,
+        policyDigest,
+        caseInputIdentityVersion: 1,
+        caseInputIdentityDigest: identity.digest,
+        policyTargetIdentityDigest: identity.digest,
+        policyBindingDigest,
+      };
+    },
+  };
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const result = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      provider: createMockProvider({
+        onInvoke: () => {
+          const mutable = sanitizer as unknown as {
+            id: string;
+            protocolVersion: number;
+            sanitize: Sanitizer["sanitize"];
+          };
+          mutable.id = "mutated-sanitizer";
+          mutable.protocolVersion = 2;
+          mutable.sanitize = async () => {
+            throw new Error("mutated sanitizer must not run");
+          };
+        },
+      }),
+      sanitizerRequirement: syntheticRequirement(true),
+      sanitizer: {
+        required: true,
+        sanitizer,
+        policyEnvelopeBytes: policyBytes,
+        expectedSanitizerId: "snapshot-sanitizer",
+        expectedProtocolVersion: 1,
+        expectedPolicyVersion: 1,
+        expectedPolicyDigest: policyDigest,
+        expectedCaseInputIdentityVersion: 1,
+        expectedCaseInputIdentityDigest: identity.digest,
+        expectedPolicyBindingDigest: policyBindingDigest,
+      },
+    });
+    assert.equal(sanitizerCalls, 1);
+    const attempt = await readAttempt(result.attemptDirectory);
+    assert.equal(attempt.manifest.sanitizer?.id, "snapshot-sanitizer");
+    assert.equal(attempt.manifest.sanitizer?.protocolVersion, 1);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -2141,27 +2356,42 @@ test("does not let concurrent runs delete each other's staging files", async () 
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
   const bundle = path.join(temporary, "bundle");
   const attempts = path.join(temporary, "attempts");
+  let providerCalls = 0;
   const provider = createMockProvider({
     onInvoke: async () => {
       providerCalls += 1;
       await new Promise((resolve) => setTimeout(resolve, 15));
     },
   });
-  let providerCalls = 0;
   try {
     await cp(FIXTURE, bundle, { recursive: true });
-    const results = await Promise.allSettled([
-      runBundle({ bundleDirectory: bundle, attemptRoot: attempts, provider }),
-      runBundle({ bundleDirectory: bundle, attemptRoot: attempts, provider }),
-    ]);
-    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
-    const rejected = results.find((result) => result.status === "rejected");
-    assert.ok(rejected && rejected.status === "rejected");
-    assert.equal(rejected.reason instanceof RunnerError && rejected.reason.code, "attempt_exists");
-    assert.equal(providerCalls, 1);
-    const entries = await readdir(attempts);
-    assert.equal(entries.length, 1);
-    assert.match(entries[0]!, /^[a-f0-9]{64}$/u);
+    const runs = [
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: attempts,
+        provider,
+        requestedModel: "synthetic-model-a",
+      }),
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: attempts,
+        provider,
+        requestedModel: "synthetic-model-b",
+      }),
+    ];
+    const results = await Promise.all(runs);
+    assert.equal(providerCalls, 2);
+    assert.notEqual(results[0]!.runId, results[1]!.runId);
+    for (const result of results) {
+      assert.deepEqual((await readdir(result.attemptDirectory)).sort(), [
+        "attempt.json",
+        "document.json",
+      ]);
+      await readAttempt(result.attemptDirectory);
+    }
+    const entries = (await readdir(attempts)).sort();
+    assert.deepEqual(entries, results.map((result) => result.runId).sort());
+    assert.equal(entries.some((entry) => entry.startsWith(".claim-")), false);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
