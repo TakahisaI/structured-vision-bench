@@ -18,6 +18,7 @@ import {
   type AttemptManifestBase,
 } from "./attempt.js";
 import { RunnerError } from "./errors.js";
+import { isAbortSettlingCommandProvider } from "../provider/command.js";
 import {
   computeCaseInputIdentity,
   computeAttemptIdentity,
@@ -61,6 +62,7 @@ import {
 
 export const DEFAULT_HARNESS_VERSION = "structured-vision-bench-runner-v1";
 export const DEFAULT_ATTEMPT_KEY = "single";
+export const DEFAULT_EXECUTION_PHASE = "development";
 export const MAX_TIMEOUT_MS = 2_147_483_647;
 const DEFAULT_APPROVAL_TIMEOUT_MS = 30_000;
 const DEFAULT_SANITIZER_TIMEOUT_MS = 30_000;
@@ -88,6 +90,7 @@ type ProviderIdentity = {
 type ValidatedProvider = Readonly<
   ProviderIdentity &
     Pick<Provider, "invoke"> & {
+      awaitAbort: boolean;
       prepareTransport?: NonNullable<Provider["prepareTransport"]>;
     }
 >;
@@ -115,6 +118,7 @@ type ValidatedSanitizerImplementation = Readonly<{
 export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
   const requested = normalizeRequestedSettings(options);
   const attemptKey = normalizeAttemptKey(options.attemptKey);
+  const phase = normalizeOptionalSetting(options.phase) ?? DEFAULT_EXECUTION_PHASE;
   const providerTimeoutMs = options.providerTimeoutMs;
   const approvalSettings = snapshotApprovalSettings(options.approval);
   const sanitizerImplementation = validateSanitizerImplementation(options.sanitizer);
@@ -167,10 +171,17 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       ? prepareSanitizerPolicy(sanitizerSettings, identity)
       : undefined;
     const approvalPlan = validateApprovalSettings(approvalSettings, requirement);
+    if (approvalPlan !== undefined && approvalPlan.phase !== phase) {
+      throw new RunnerError(
+        "approval_configuration_invalid",
+        "approval phase does not match the run phase",
+      );
+    }
     validateProviderTransportPreparation(provider, approvalPlan);
     const runId = computeRunIdentity({
       caseInputIdentityDigest: identity.digest,
       bundleManifestDigest: prepared.manifestDigest,
+      phase,
       providerId: provider.id,
       providerRoute: provider.route,
       providerImplementationVersion: provider.implementationVersion,
@@ -236,7 +247,9 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       harnessVersion,
       harnessCommit,
       providerTimeoutMs,
-      approval.expiresAt,
+      phase,
+      approval,
+      requirement,
     );
     validateProviderApprovalAttestation(providerResponse.approval, approval);
     const providerMetadata = normalizeProviderMetadata(provider, requested, providerResponse);
@@ -294,6 +307,7 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
         sourceCommit: loaded.metadata.sourceCommit,
       },
       run: {
+        phase,
         providerId: provider.id,
         route: provider.route,
         implementationVersion: provider.implementationVersion,
@@ -337,6 +351,7 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       async () => assertAttemptRootHandleStable(attemptRootHandle, attemptRoot, rootGuard),
     );
     return {
+      phase,
       attemptDirectory: claim.attemptDirectory,
       attemptId: attemptIdentity.attemptId,
       runId,
@@ -714,6 +729,7 @@ function validateProvider(provider: Provider): ValidatedProvider {
     const protocolVersion = implementation.protocolVersion;
     const prepareTransport = implementation.prepareTransport;
     const invoke = implementation.invoke;
+    const awaitAbort = isAbortSettlingCommandProvider(value);
     if (
       typeof id !== "string" ||
       !isSafeLabel(id) ||
@@ -736,6 +752,7 @@ function validateProvider(provider: Provider): ValidatedProvider {
       route,
       implementationVersion: implementationVersion ?? null,
       protocolVersion: protocolVersion ?? null,
+      awaitAbort,
       ...(prepareTransport === undefined
         ? {}
         : {
@@ -1031,6 +1048,7 @@ async function prepareProviderTransport(
       timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS,
       "approval_timeout",
       () => controller.abort(),
+      provider.awaitAbort,
     );
   } catch (error) {
     if (isInternalRunnerError(error)) throw error;
@@ -1196,26 +1214,28 @@ function daysInMonth(year: number, month: number): number {
 }
 
 async function executeProvider(
-  provider: Provider,
+  provider: ValidatedProvider,
   loaded: Awaited<ReturnType<typeof loadBundleForRunner>>,
   identity: CaseInputIdentity,
   requested: RequestedExecutionSettings,
   harnessVersion: string,
   harnessCommit: string | null,
   providerTimeoutMs: number | undefined,
-  approvalExpiresAt: string | null,
+  phase: string,
+  approval: AttemptManifest["approval"],
+  sanitizerRequirement: SanitizerRequirementDecisionV1,
 ): Promise<NormalizedProviderResponse> {
   const controller = new AbortController();
   let active = true;
   try {
     const readBytes = async (reader: () => Promise<Buffer>): Promise<Buffer> => {
       if (!active || controller.signal.aborted) throw new Error();
-      assertTransportApprovalActive(approvalExpiresAt);
+      assertTransportApprovalActive(approval.expiresAt);
       return reader();
     };
     const readText = async (reader: () => Promise<string>): Promise<string> => {
       if (!active || controller.signal.aborted) throw new Error();
-      assertTransportApprovalActive(approvalExpiresAt);
+      assertTransportApprovalActive(approval.expiresAt);
       return reader();
     };
     const request = {
@@ -1224,11 +1244,26 @@ async function executeProvider(
         readBytes: () => readBytes(loaded.inputs.image.readBytes),
       }),
       schema: freezeObject(normalizeJsonValue(loaded.inputs.schema.value, "provider schema", MAX_DOCUMENT_BYTES)),
-      system: Object.freeze({ readText: () => readText(loaded.inputs.system.readText) }),
-      instruction: Object.freeze({ readText: () => readText(loaded.inputs.instruction.readText) }),
+      schemaInput: Object.freeze({
+        mediaType: loaded.inputs.schema.mediaType,
+        readBytes: () => readBytes(loaded.inputs.schema.readBytes),
+      }),
+      system: Object.freeze({
+        mediaType: loaded.inputs.system.mediaType,
+        readText: () => readText(loaded.inputs.system.readText),
+      }),
+      instruction: Object.freeze({
+        mediaType: loaded.inputs.instruction.mediaType,
+        readText: () => readText(loaded.inputs.instruction.readText),
+      }),
       requested: freezeObject({ ...requested }),
     } satisfies ProviderModelRequest;
     const context: ProviderAdapterContext = freezeObject({
+      phase,
+      bundle: freezeObject({
+        version: loaded.bundleVersion,
+        manifestDigest: loaded.manifestDigest,
+      }),
       caseId: loaded.caseId,
       documentKind: loaded.documentKind,
       caseInputIdentity: freezeObject({
@@ -1252,8 +1287,10 @@ async function executeProvider(
         preprocessVersion: loaded.metadata.preprocessVersion,
         sourceCommit: loaded.metadata.sourceCommit,
       }),
+      sanitizerRequirement: freezeObject({ ...sanitizerRequirement }),
+      approval: approval.applied ? approvalManifestResponse(approval) : null,
     });
-    assertTransportApprovalActive(approvalExpiresAt);
+    assertTransportApprovalActive(approval.expiresAt);
     const response = await withTimeout(
       () => provider.invoke(request, context, controller.signal),
       providerTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS,
@@ -1262,6 +1299,7 @@ async function executeProvider(
         active = false;
         controller.abort();
       },
+      provider.awaitAbort,
     );
     active = false;
     if (response === null || typeof response !== "object" || !Object.hasOwn(response, "rawDocument")) {
@@ -1628,18 +1666,21 @@ async function withTimeout<T>(
   timeoutMs: number,
   timeoutCode: "approval_timeout" | "provider_timeout" | "sanitizer_timeout",
   onTimeout?: () => void,
+  awaitAbort = false,
 ): Promise<T> {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
     throw internalRunnerError("run_configuration_invalid", "timeout is invalid");
   }
   return new Promise<T>((resolve, reject) => {
+    let timeoutError: RunnerError | undefined;
     const timer = setTimeout(() => {
+      timeoutError = internalRunnerError(timeoutCode, "operation timed out");
       try {
         onTimeout?.();
       } catch {
         // Timeout classification remains deterministic even if cancellation fails.
       } finally {
-        reject(internalRunnerError(timeoutCode, "operation timed out"));
+        if (!awaitAbort) reject(timeoutError);
       }
     }, timeoutMs);
     Promise.resolve()
@@ -1647,11 +1688,13 @@ async function withTimeout<T>(
       .then(
         (value) => {
           clearTimeout(timer);
-          resolve(value);
+          if (timeoutError === undefined) resolve(value);
+          else reject(timeoutError);
         },
         (error: unknown) => {
           clearTimeout(timer);
-          reject(error);
+          if (timeoutError === undefined) reject(error);
+          else reject(timeoutError);
         },
       );
   });

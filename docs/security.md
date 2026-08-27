@@ -82,6 +82,21 @@ callback. Thus a receiver-state change or an adapter that delays image access pa
 the earlier gate result. Provider, approval, and sanitizer timeout values are all bounded to Node's
 maximum timer delay of 2,147,483,647 milliseconds.
 
+The Phase A command provider follows the same shell-free configuration boundary and accepts only
+policy-not-required runs. For approved runs, the private adapter reattests its current transport
+binding without extraction inputs at the runner hook and again after local staging immediately
+before extraction. It then copies the four exact
+verified provider inputs plus one bounded manifest into a fresh mode-0700 directory using mode-0600
+files. The schema remains byte-exact and is reparsed before spawn. The request directory contains no truth,
+comparison, prior-attempt, policy, credential, or original corpus path. The child receives an
+allowlist-only environment plus reserved operation and request-directory variables and uses a separate fresh
+empty directory as `cwd`; relative arguments therefore cannot resolve bundle-controlled inputs.
+Stdout and stderr have a shared configured bound and are never echoed. Response phase/provider/case-input/requirement/approval
+identities and requested settings are exact-match checked. Cancellation or overflow kills the child
+process group, timeouts await command cleanup, callback-returned binary buffers and private input
+copies are zeroed, and cleanup failure is fail-closed. See
+[`docs/command-provider-v1.md`](command-provider-v1.md).
+
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through
 the last pre-publication validation. Before provider work, the attempt-identity destination is claimed

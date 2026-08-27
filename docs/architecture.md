@@ -22,6 +22,7 @@ A consuming application owns the production extraction request. Its bundle-facin
 Its run-facing settings are separate and never enter a bundle:
 
 - provider route, requested model, effort, and token limit;
+- execution phase;
 - repeat and retry policy;
 - approval command, phase, snapshot, runtime binding, and approved-scope expectations;
 - sanitizer command;
@@ -70,19 +71,24 @@ is intentionally deferred to Phase B of Issue #9 after Issue #5.
 
 A provider accepts the prepared image, instructions, schema, and requested execution metadata. It
 returns a structured document plus metadata that the upstream protocol actually exposes. Missing
-metadata remains unknown. The public implementation currently ships a deterministic mock provider;
-real process/app-server adapters are later work.
+metadata remains unknown. The public implementation ships a deterministic mock provider and the
+Phase A shell-free command provider. The command provider stages the four exact verified inputs plus
+a versioned local manifest in a fresh private directory, requires the consumer-owned adapter to
+reattest approved transport before input access, invokes it, and strictly binds its response to
+phase, requested settings, provider identity, case-input identity, sanitizer requirement, and
+approval. See [`docs/command-provider-v1.md`](command-provider-v1.md). Real app-server adapters
+remain later work.
 
 Two distinct invocation surfaces must not be conflated:
 
 - **Provider-adapter invocation** (local, never hosted-model input): a separate model request carries
-  the four extraction inputs; its separate context carries run settings, input digests, and a
+  the four extraction inputs; its separate context carries phase, run settings, input digests, and a
   narrowly allowlisted set of bundle/consumer provenance needed for local validation and attempt
   recording.
 - **Hosted-model payload**: only the prepared image, schema, system preamble, instruction, and the
   requested model / effort / max tokens.
 
-Case ID, bundle version/digest, source commit, prompt/preprocess version, approval metadata,
+Case ID, bundle version/digest, source commit, prompt/preprocess version, phase, approval metadata,
 sanitizer metadata, truth, comparison policy or results, and prior attempts are never sent to the
 hosted model. Truth, comparison policy or results, and prior attempts are also never sent to the
 local adapter or sanitizer. Caller-owned attempt keys and derived attempt/run IDs are runner storage

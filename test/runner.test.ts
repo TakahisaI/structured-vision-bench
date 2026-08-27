@@ -22,6 +22,7 @@ import { decodeUtf8Strict, isJsonObject, parseJson, type JsonValue } from "../sr
 import { validateJsonSchemaDefinition } from "../src/bundle/schema-validator.js";
 import { validateJsonSchema } from "../src/bundle/schema-validator.js";
 import { createMockProvider } from "../src/provider/mock.js";
+import { isAbortSettlingCommandProvider } from "../src/provider/command.js";
 import {
   computeAttemptIdentity,
   computeCaseInputIdentity,
@@ -314,6 +315,7 @@ test("computes the attempt identity v1 fixed vector", () => {
 test("run identity changes when requested execution settings change", () => {
   const base = {
     caseInputIdentityDigest: "3d8d562479e1a99f4119e8ff5e70fc4e9a09602a8a082a56ee0a72713e0b5be0",
+    phase: "development",
     providerId: "mock",
     providerRoute: "mock",
     requestedModel: "mock-v1",
@@ -339,6 +341,7 @@ test("run identity changes when requested execution settings change", () => {
 test("run identity distinguishes absent optional values from explicit null", () => {
   const base = {
     caseInputIdentityDigest: CASE_INPUT.preparedImage.sha256,
+    phase: "development",
     providerId: "mock",
     providerRoute: "mock",
   };
@@ -361,6 +364,7 @@ test("stages verified provider inputs away from the mutable bundle", async () =>
   const bundle = path.join(temporary, "bundle");
   const staging = path.join(temporary, "staging");
   let retainedImageReader: (() => Promise<Buffer>) | undefined;
+  let retainedSchemaReader: (() => Promise<Buffer>) | undefined;
   try {
     await cp(FIXTURE, bundle, { recursive: true });
     const loaded = await loadBundleForRunner(bundle, staging);
@@ -374,17 +378,24 @@ test("stages verified provider inputs away from the mutable bundle", async () =>
       assert.equal(loaded.documentKind, "synthetic_invoice");
       assert.equal(loaded.inputs.image.mediaType, "image/png");
       retainedImageReader = loaded.inputs.image.readBytes;
+      retainedSchemaReader = loaded.inputs.schema.readBytes;
       assert.equal(await loaded.inputs.system.readText(), await readFile(path.join(bundle, "system.txt"), "utf8"));
       const stagedImage = await loaded.inputs.image.readBytes();
 
       await writeFile(path.join(bundle, "prepared-image.png"), Buffer.from("synthetic replacement"));
       assert.deepEqual(await loaded.inputs.image.readBytes(), stagedImage);
       assert.equal(loaded.inputs.schema.value !== null, true);
+      assert.deepEqual(
+        await loaded.inputs.schema.readBytes(),
+        await readFile(path.join(bundle, "schema.json")),
+      );
     } finally {
       await loaded.cleanup();
     }
     assert.ok(retainedImageReader);
+    assert.ok(retainedSchemaReader);
     await assert.rejects(retainedImageReader());
+    await assert.rejects(retainedSchemaReader());
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -417,6 +428,7 @@ test("revokes retained provider callbacks after a successful run", async () => {
     await runBundle({ bundleDirectory: bundle, attemptRoot: attempts, provider });
     assert.ok(retainedRequest);
     await assert.rejects(retainedRequest.image.readBytes());
+    await assert.rejects(retainedRequest.schemaInput.readBytes());
     await assert.rejects(retainedRequest.system.readText());
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -444,6 +456,7 @@ test("revokes retained provider callbacks after a failed run", async () => {
     );
     assert.ok(retainedRequest);
     await assert.rejects(retainedRequest.image.readBytes());
+    await assert.rejects(retainedRequest.schemaInput.readBytes());
     await assert.rejects(retainedRequest.instruction.readText());
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -683,8 +696,9 @@ test("runs the mock provider and writes a readable sanitized attempt", async () 
       effectiveEffort: null,
       onRequest: (request) => {
         assert.deepEqual(Object.keys(request.image).sort(), ["mediaType", "readBytes"]);
-        assert.deepEqual(Object.keys(request.system).sort(), ["readText"]);
-        assert.deepEqual(Object.keys(request.instruction).sort(), ["readText"]);
+        assert.deepEqual(Object.keys(request.schemaInput).sort(), ["mediaType", "readBytes"]);
+        assert.deepEqual(Object.keys(request.system).sort(), ["mediaType", "readText"]);
+        assert.deepEqual(Object.keys(request.instruction).sort(), ["mediaType", "readText"]);
         capturedRequest = request as unknown as Record<string, unknown>;
       },
       onImageRead: () => {
@@ -741,6 +755,7 @@ test("runs the mock provider and writes a readable sanitized attempt", async () 
     assert.equal(attempt.manifest.attemptId, result.attemptId);
     assert.equal(attempt.manifest.runId, result.runId);
     assert.equal(attempt.manifest.caseId, "synthetic-invoice-basic");
+    assert.equal(attempt.manifest.run.phase, "development");
     assert.equal(attempt.manifest.run.requested.model, "mock-v1");
     assert.equal(attempt.manifest.run.requested.effort, "medium");
     assert.equal(attempt.manifest.run.requested.maxTokens, 512);
@@ -3101,6 +3116,7 @@ test("denies out-of-scope document kinds and phases before provider access", asy
           bundleDirectory,
           attemptRoot: path.join(temporary, `scope-attempts-${index}`),
           provider,
+          phase: overrides.phase ?? SYNTHETIC_APPROVAL_PHASE,
           approval: syntheticCommandApprovalSettings("scope", overrides),
         }),
         (error: unknown) =>
@@ -3303,6 +3319,7 @@ test("binds phase, runtime, scope, and provider versions into the run identity",
         attemptRoot: attempts,
         attemptKey: `binding-${index}`,
         provider: createMockProvider(),
+        phase: overrides.phase ?? SYNTHETIC_APPROVAL_PHASE,
         approval: syntheticCommandApprovalSettings("approve", overrides),
       });
       runIds.push(result.runId);
@@ -3445,6 +3462,83 @@ test("times out a provider using the configured timeout without writing an attem
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+test(
+  "does not let an untrusted provider disable invoke timeout settlement",
+  { timeout: 2_000 },
+  async () => {
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+    const bundle = path.join(temporary, "bundle");
+    const attempts = path.join(temporary, "attempts");
+    const provider = {
+      id: "hostile-timeout-provider",
+      route: "synthetic",
+      awaitAbort: true,
+      invoke: async () => new Promise<never>(() => undefined),
+    } as Provider & { awaitAbort: true };
+    assert.equal(isAbortSettlingCommandProvider(provider), false);
+    assert.equal(
+      "markAbortSettlingProvider" in (await import("../src/provider/command.js")),
+      false,
+    );
+    try {
+      await cp(FIXTURE, bundle, { recursive: true });
+      await assert.rejects(
+        runBundle({
+          bundleDirectory: bundle,
+          attemptRoot: attempts,
+          provider,
+          providerTimeoutMs: 5,
+        }),
+        (error: unknown) =>
+          error instanceof RunnerError && error.code === "provider_timeout",
+      );
+      assert.deepEqual(await readdir(attempts), []);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "does not let an untrusted provider disable transport preparation timeout",
+  { timeout: 2_000 },
+  async () => {
+    const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+    const bundle = path.join(temporary, "bundle");
+    const attempts = path.join(temporary, "attempts");
+    const gate: ApprovalGate = {
+      id: "hostile-timeout-gate",
+      protocolVersion: 1,
+      approve: async (request) => syntheticApprovalResponse(request),
+    };
+    const provider = {
+      id: "hostile-timeout-provider",
+      route: "synthetic",
+      awaitAbort: true,
+      prepareTransport: async () => new Promise<never>(() => undefined),
+      invoke: async () => {
+        throw new Error("synthetic invoke must not run");
+      },
+    } as Provider & { awaitAbort: true };
+    try {
+      await cp(FIXTURE, bundle, { recursive: true });
+      await assert.rejects(
+        runBundle({
+          bundleDirectory: bundle,
+          attemptRoot: attempts,
+          provider,
+          approval: syntheticApprovalSettings(gate, { timeoutMs: 5 }),
+        }),
+        (error: unknown) =>
+          error instanceof RunnerError && error.code === "approval_timeout",
+      );
+      assert.deepEqual(await readdir(attempts), []);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  },
+);
 
 test("invalidates provider reads after a timeout even if the provider continues", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));

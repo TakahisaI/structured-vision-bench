@@ -171,13 +171,15 @@ rather than trusted from its declared digest. The manifest stores the policy bin
 
 ### Run identity
 
-`runId` is a separate identity. It includes the case identity, bundle manifest digest, provider ID,
-stable route label, provider implementation/protocol versions, requested model/effort/max tokens,
+`runId` is a separate identity. It includes the case identity, bundle manifest digest, execution
+phase, provider ID, stable route label, provider implementation/protocol versions, requested model/effort/max tokens,
 the complete approval metadata, the
 sanitizer identity/binding metadata, and the complete consumer sanitizer-requirement decision. All
 optional tuple members use an explicit presence tag, so absent and null/empty values cannot collide.
 Changing a requested execution or security setting produces a different run ID without changing
 `caseInputIdentity`. A route is a stable provider label, not an endpoint or account identifier.
+The current development contract requires `run.phase`; attempts created before this Phase A field
+was introduced are intentionally incompatible with the current reader.
 
 ### Attempt instance identity
 
@@ -251,7 +253,7 @@ It records:
 - the complete case input identity;
 - the consumer-owned sanitizer requirement decision and its decision digest;
 - harness version/commit and bundle prompt/preprocess/source metadata;
-- provider ID/stable route, implementation/protocol versions, requested settings, and only provider
+- execution phase, provider ID/stable route, implementation/protocol versions, requested settings, and only provider
   metadata actually returned;
 - approval status, gate/protocol/snapshot/runtime/scope/phase metadata and the complete mirrored
   consumer requirement attestation;
