@@ -100,13 +100,22 @@ final agent message on completion. The final summary item must equal the complet
 event, while the completed user-message event must equal the exact text and image inputs sent by
 the client, including the image `detail: null` projection. The user item must complete before any
 reasoning or final-agent item starts. Responses must match their request IDs and have the generated schema's required shapes.
-The event stream is capped at 4,096 messages. Server-initiated requests,
+Every generated-type field remains required even when its value is nullable. The protocol rejects a
+missing required key before validating its value. The event stream is capped at 4,096 messages, the
+cumulative received-message budget is 512 MiB, and no more than 16 item lifecycles may be active at
+once. The connection reports each raw message byte length; accounting uses at least the normalized
+JSON size so an in-memory connection cannot under-report it. Active-item tracking retains only the
+bounded item ID and allowed type, not the item value. The process client additionally owns the raw
+JSONL line, stdout, and stderr limits before parsing.
+Server-initiated requests,
 tool items, command items, file-change items, MCP calls, dynamic tools, collaboration items, web
 search, image generation, unexpected notifications, extra final messages, protocol errors, and
 incomplete turns fail closed. Experimental raw-response notifications also fail closed because the
-stable protocol disables them. The client does not answer approval or tool requests. Abort sends a
-best-effort `turn/interrupt` when identifiers are known and closes connection input. The process
-client owns byte framing, timeout, process termination, and workspace cleanup.
+stable protocol disables them. The client does not answer approval or tool requests. Abort starts one
+cleanup operation: when thread and turn identifiers are known, it waits for the best-effort
+`turn/interrupt` send to settle before closing connection input. The rejecting protocol path awaits
+that same cleanup operation so it cannot close input ahead of the interrupt. The process client owns
+byte framing, timeout, process termination, and workspace cleanup.
 
 The thread config requests that shell tools, shell snapshot collection, view-image, code-mode host,
 multi-agent, web search, MCP entries, hooks, and legacy notify commands are disabled. It also opts
@@ -134,11 +143,19 @@ approval, run, and attempt identity.
 
 ## Limits
 
-Workspace path, image bytes, text inputs, metadata labels, and final document text are bounded.
-Protocol value and total-output bounds include sixfold JSON control-character escaping, base64
-expansion, the user-message envelope, repeated lifecycle items, and a maximum-sized final document.
-The process client adds executable, argv, environment, JSONL line, stdout, and stderr limits.
-Neither layer locates, reads, copies, migrates, refreshes, or prints Codex credentials.
+Workspace path, image bytes, text inputs, metadata labels, final document text, each normalized
+protocol message, cumulative received message bytes, event count, and active item count are bounded.
+Receive envelopes must expose the message and reported byte length as own data properties. The
+reported length is snapshotted once and an over-budget report is rejected before the message value
+is normalized; each message is charged at the greater of its reported and normalized encoded size.
+The cumulative receive budget is 512 MiB. The 16-item active limit applies as soon as a turn-started
+notification supplies the turn identity, including while the turn/start response is pending. During
+that race the state machine retains only validated lifecycle state, with active items represented by
+bounded IDs and types rather than buffered item values. Protocol value and total-output bounds include sixfold
+JSON control-character escaping, base64 expansion, the user-message envelope, repeated lifecycle
+items, and a maximum-sized final document. The process client adds executable, argv, environment,
+JSONL line, stdout, and stderr limits. Neither layer locates, reads, copies, migrates, refreshes, or
+prints Codex credentials.
 
 ## Private process boundary
 

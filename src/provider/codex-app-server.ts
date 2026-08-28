@@ -23,15 +23,22 @@ const MAX_FINAL_DOCUMENT_BYTES = 16 * 1024 * 1024;
 // per-value bound above that canonical worst case instead of sizing it from
 // the raw provider inputs.
 export const CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES = 128 * 1024 * 1024;
+const MAX_PROTOCOL_RECEIVED_BYTES = 512 * 1024 * 1024;
 const MAX_PROTOCOL_EVENTS = 4096;
+const MAX_ACTIVE_ITEMS = 16;
 const CLIENT_NAME = "structured_vision_bench";
 const CLIENT_TITLE = "structured-vision-bench";
 const CLIENT_VERSION = "1";
 
 export type CodexAppServerProtocolConnection = Readonly<{
   send(message: JsonValue): Promise<void>;
-  receive(): Promise<JsonValue | undefined>;
+  receive(): Promise<CodexAppServerProtocolReceivedMessage | undefined>;
   closeInput(): void;
+}>;
+
+export type CodexAppServerProtocolReceivedMessage = Readonly<{
+  message: JsonValue;
+  byteLength: number;
 }>;
 
 export type CodexAppServerProtocolRequest = {
@@ -73,6 +80,21 @@ type ThreadState = {
   snapshot: JsonValue;
 };
 
+type ProtocolReceiveBudget = { remainingBytes: number };
+
+type ActiveItemType = "userMessage" | "reasoning" | "agentMessage";
+
+type TurnAccumulator = {
+  finalText: string | undefined;
+  usage: ProtocolUsage | undefined;
+  userMessageSeen: boolean;
+  finalItem: JsonValue | undefined;
+  activeItems: Map<string, ActiveItemType>;
+  result:
+    | Omit<CodexAppServerProtocolResult, "stopReason">
+    | undefined;
+};
+
 /** Runs the pinned one-thread, one-turn app-server message state machine. */
 export async function runCodexAppServerProtocol(
   connectionValue: CodexAppServerProtocolConnection,
@@ -83,38 +105,48 @@ export async function runCodexAppServerProtocol(
   let connection: CodexAppServerProtocolConnection | undefined;
   let threadId: string | undefined;
   let turnId: string | undefined;
+  let inputClosed = false;
+  let abortCleanup: Promise<void> | undefined;
   const closeInput = (): void => {
+    if (inputClosed) return;
+    inputClosed = true;
     try {
       connection?.closeInput();
     } catch {
       // The stable protocol failure below owns this boundary.
     }
   };
-  const abort = (): void => {
-    if (connection !== undefined && threadId !== undefined && turnId !== undefined) {
+  const beginAbortCleanup = (): Promise<void> => {
+    abortCleanup ??= (async () => {
       try {
-        void connection
-          .send({
+        if (connection !== undefined && threadId !== undefined && turnId !== undefined) {
+          await connection.send({
             method: "turn/interrupt",
             id: 99,
             params: { threadId, turnId },
-          })
-          .catch(() => undefined);
+          });
+        }
       } catch {
         // Connection teardown remains authoritative.
+      } finally {
+        closeInput();
       }
-    }
-    closeInput();
+    })();
+    return abortCleanup;
   };
+  const abort = (): void => void beginAbortCleanup();
   try {
     assertActive(signal);
     connection = snapshotConnection(connectionValue);
     const snapshot = snapshotRequest(requestValue);
     imageCopy = snapshot.imageCopy;
+    const receiveBudget: ProtocolReceiveBudget = {
+      remainingBytes: MAX_PROTOCOL_RECEIVED_BYTES,
+    };
     signal?.addEventListener("abort", abort, { once: true });
 
     await send(connection, initializeRequest(), signal);
-    validateInitializeResponse(await nextResponse(connection, 1, signal));
+    validateInitializeResponse(await nextResponse(connection, 1, receiveBudget, signal));
     await send(connection, { method: "initialized" }, signal);
     await send(
       connection,
@@ -135,7 +167,7 @@ export async function runCodexAppServerProtocol(
       },
       signal,
     );
-    const threadResponse = await nextResponse(connection, 2, signal);
+    const threadResponse = await nextResponse(connection, 2, receiveBudget, signal);
     const thread = validateThreadStartResponse(
       threadResponse,
       snapshot.request.workspace,
@@ -143,7 +175,7 @@ export async function runCodexAppServerProtocol(
     );
     threadId = thread.threadId;
     validateThreadStartedNotification(
-      await nextNotification(connection, "thread/started", signal),
+      await nextNotification(connection, "thread/started", receiveBudget, signal),
       snapshot.request.workspace,
       thread,
     );
@@ -177,6 +209,9 @@ export async function runCodexAppServerProtocol(
         if (turnId !== undefined && turnId !== knownTurnId) throw new Error();
         turnId = knownTurnId;
       },
+      thread,
+      turnInput,
+      receiveBudget,
       signal,
     );
     turnId = turnStart.turnId;
@@ -186,15 +221,21 @@ export async function runCodexAppServerProtocol(
       turnId,
       thread,
       turnInput,
-      turnStart.buffered,
+      turnStart.accumulator,
       turnStart.messageCount,
+      receiveBudget,
       signal,
     );
     connection.closeInput();
-    if ((await receive(connection, signal)) !== undefined) throw new Error();
+    inputClosed = true;
+    if ((await receive(connection, receiveBudget, signal)) !== undefined) throw new Error();
     return { ...result, stopReason: null };
   } catch {
-    closeInput();
+    if (abortCleanup !== undefined || signal?.aborted) {
+      await (abortCleanup ?? beginAbortCleanup());
+    } else {
+      closeInput();
+    }
     throw new Error("codex app-server protocol failed");
   } finally {
     signal?.removeEventListener("abort", abort);
@@ -221,7 +262,7 @@ function snapshotConnection(
       message: JsonValue,
     ) => Promise<void>,
     receive: Function.prototype.bind.call(receiveValue, value) as () => Promise<
-      JsonValue | undefined
+      CodexAppServerProtocolReceivedMessage | undefined
     >,
     closeInput: Function.prototype.bind.call(closeValue, value) as () => void,
   });
@@ -329,125 +370,156 @@ async function consumeTurn(
   turnId: string,
   thread: { respondedModel: string | null; effectiveEffort: string | null },
   expectedUserContent: JsonValue[],
-  initialMessages: Record<string, JsonValue>[],
+  accumulator: TurnAccumulator,
   initialMessageCount: number,
+  receiveBudget: ProtocolReceiveBudget,
   signal: AbortSignal | undefined,
 ): Promise<Omit<CodexAppServerProtocolResult, "stopReason">> {
-  let finalText: string | undefined;
-  let usage: ProtocolUsage | undefined;
-  let userMessageSeen = false;
-  let finalItem: JsonValue | undefined;
   let eventCount = initialMessageCount;
-  const buffered = [...initialMessages];
-  const activeItems = new Map<string, JsonValue>();
   for (;;) {
-    let message = buffered.shift();
-    if (message === undefined) {
-      eventCount += 1;
-      if (eventCount > MAX_PROTOCOL_EVENTS) throw new Error();
-      message = await nextMessage(connection, signal);
-    }
-    if (Object.hasOwn(message, "id")) throw new Error();
-    const method = message.method;
-    const params = requiredObject(message.params);
-    if (method === "turn/completed") {
-      if (params.threadId !== threadId || activeItems.size !== 0) throw new Error();
-      const turn = validateTurnSnapshot(params.turn, "completed", "summary");
-      if (
-        turn.id !== turnId ||
-        finalText === undefined ||
-        finalItem === undefined ||
-        !userMessageSeen
-      ) {
-        throw new Error();
-      }
-      if (buffered.length !== 0) throw new Error();
-      if (!jsonEqual(turn.items, [finalItem])) throw new Error();
-      if (Buffer.byteLength(finalText, "utf8") > MAX_FINAL_DOCUMENT_BYTES) {
-        throw new Error();
-      }
-      return {
-        document: normalizeJsonValue(
-          parseJson(finalText, "codex app-server result"),
-          "codex app-server result",
-          MAX_FINAL_DOCUMENT_BYTES,
-        ),
-        respondedModel: thread.respondedModel,
-        effectiveEffort: thread.effectiveEffort,
-        usage:
-          usage === undefined
-            ? { available: false }
-            : {
-                available: true,
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                totalTokens: usage.totalTokens,
-              },
-      };
-    }
-    if (method === "thread/status/changed") {
-      if (params.threadId !== threadId) throw new Error();
-      validateThreadStatus(params.status);
-      continue;
-    }
-    if (method === "item/started") {
-      assertTurnIdentity(params, threadId, turnId);
-      nonnegativeInteger(params.startedAtMs);
-      const snapshot = validateSafeItem(params.item, expectedUserContent);
-      const item = requiredObject(snapshot);
-      const itemId = safeLabel(item.id);
-      const itemType = safeItemType(item.type);
-      if (itemType !== "userMessage" && !userMessageSeen) throw new Error();
-      if (itemType === "userMessage" && userMessageSeen) throw new Error();
-      if (activeItems.has(itemId)) throw new Error();
-      activeItems.set(itemId, snapshot);
-      continue;
-    }
-    if (method === "item/completed") {
-      assertTurnIdentity(params, threadId, turnId);
-      nonnegativeInteger(params.completedAtMs);
-      const snapshot = validateSafeItem(params.item, expectedUserContent);
-      const item = requiredObject(snapshot);
-      const itemId = safeLabel(item.id);
-      const itemType = safeItemType(item.type);
-      const started = activeItems.get(itemId);
-      if (started === undefined || requiredObject(started).type !== itemType) {
-        throw new Error();
-      }
-      activeItems.delete(itemId);
-      if (itemType === "userMessage") {
-        if (userMessageSeen) throw new Error();
-        userMessageSeen = true;
-        continue;
-      }
-      if (itemType === "reasoning") continue;
-      if (
-        typeof item.text !== "string" ||
-        (item.phase !== null && item.phase !== "final_answer") ||
-        finalText !== undefined
-      ) {
-        throw new Error();
-      }
-      finalText = item.text;
-      finalItem = snapshot;
-      continue;
-    }
-    if (method === "thread/tokenUsage/updated") {
-      assertTurnIdentity(params, threadId, turnId);
-      const tokenUsage = requiredObject(params.tokenUsage);
-      usage = snapshotProtocolUsage(tokenUsage.total);
-      snapshotProtocolUsage(tokenUsage.last);
-      if (
-        tokenUsage.modelContextWindow !== undefined &&
-        tokenUsage.modelContextWindow !== null &&
-        !isTokenCount(tokenUsage.modelContextWindow)
-      ) {
-        throw new Error();
-      }
-      continue;
-    }
+    if (accumulator.result !== undefined) return accumulator.result;
+    eventCount += 1;
+    if (eventCount > MAX_PROTOCOL_EVENTS) throw new Error();
+    const message = await nextMessage(connection, receiveBudget, signal);
+    applyTurnNotification(
+      accumulator,
+      message,
+      threadId,
+      turnId,
+      thread,
+      expectedUserContent,
+    );
+  }
+}
+
+function createTurnAccumulator(): TurnAccumulator {
+  return {
+    finalText: undefined,
+    usage: undefined,
+    userMessageSeen: false,
+    finalItem: undefined,
+    activeItems: new Map(),
+    result: undefined,
+  };
+}
+
+function applyTurnNotification(
+  accumulator: TurnAccumulator,
+  message: Record<string, JsonValue>,
+  threadId: string,
+  turnId: string,
+  thread: { respondedModel: string | null; effectiveEffort: string | null },
+  expectedUserContent: JsonValue[],
+): void {
+  if (accumulator.result !== undefined || Object.hasOwn(message, "id")) {
     throw new Error();
   }
+  const method = message.method;
+  const params = requiredObject(message.params);
+  if (method === "turn/completed") {
+    if (params.threadId !== threadId || accumulator.activeItems.size !== 0) {
+      throw new Error();
+    }
+    const turn = validateTurnSnapshot(params.turn, "completed", "summary");
+    if (
+      turn.id !== turnId ||
+      accumulator.finalText === undefined ||
+      accumulator.finalItem === undefined ||
+      !accumulator.userMessageSeen ||
+      !jsonEqual(turn.items, [accumulator.finalItem]) ||
+      Buffer.byteLength(accumulator.finalText, "utf8") > MAX_FINAL_DOCUMENT_BYTES
+    ) {
+      throw new Error();
+    }
+    accumulator.result = {
+      document: normalizeJsonValue(
+        parseJson(accumulator.finalText, "codex app-server result"),
+        "codex app-server result",
+        MAX_FINAL_DOCUMENT_BYTES,
+      ),
+      respondedModel: thread.respondedModel,
+      effectiveEffort: thread.effectiveEffort,
+      usage:
+        accumulator.usage === undefined
+          ? { available: false }
+          : {
+              available: true,
+              inputTokens: accumulator.usage.inputTokens,
+              outputTokens: accumulator.usage.outputTokens,
+              totalTokens: accumulator.usage.totalTokens,
+            },
+    };
+    return;
+  }
+  if (method === "thread/status/changed") {
+    if (params.threadId !== threadId) throw new Error();
+    validateThreadStatus(params.status);
+    return;
+  }
+  if (method === "item/started") {
+    assertTurnIdentity(params, threadId, turnId);
+    nonnegativeInteger(params.startedAtMs);
+    const snapshot = validateSafeItem(params.item, expectedUserContent);
+    const item = requiredObject(snapshot);
+    const itemId = safeLabel(item.id);
+    const itemType = safeItemType(item.type);
+    if (itemType !== "userMessage" && !accumulator.userMessageSeen) {
+      throw new Error();
+    }
+    if (itemType === "userMessage" && accumulator.userMessageSeen) {
+      throw new Error();
+    }
+    if (
+      accumulator.activeItems.has(itemId) ||
+      accumulator.activeItems.size >= MAX_ACTIVE_ITEMS
+    ) {
+      throw new Error();
+    }
+    accumulator.activeItems.set(itemId, itemType);
+    return;
+  }
+  if (method === "item/completed") {
+    assertTurnIdentity(params, threadId, turnId);
+    nonnegativeInteger(params.completedAtMs);
+    const snapshot = validateSafeItem(params.item, expectedUserContent);
+    const item = requiredObject(snapshot);
+    const itemId = safeLabel(item.id);
+    const itemType = safeItemType(item.type);
+    const started = accumulator.activeItems.get(itemId);
+    if (started === undefined || started !== itemType) throw new Error();
+    accumulator.activeItems.delete(itemId);
+    if (itemType === "userMessage") {
+      if (accumulator.userMessageSeen) throw new Error();
+      accumulator.userMessageSeen = true;
+      return;
+    }
+    if (itemType === "reasoning") return;
+    if (
+      typeof item.text !== "string" ||
+      (item.phase !== null && item.phase !== "final_answer") ||
+      accumulator.finalText !== undefined
+    ) {
+      throw new Error();
+    }
+    accumulator.finalText = item.text;
+    accumulator.finalItem = snapshot;
+    return;
+  }
+  if (method === "thread/tokenUsage/updated") {
+    assertTurnIdentity(params, threadId, turnId);
+    const tokenUsage = requiredObject(params.tokenUsage);
+    assertRequiredKeys(tokenUsage, ["total", "last", "modelContextWindow"]);
+    accumulator.usage = snapshotProtocolUsage(tokenUsage.total);
+    snapshotProtocolUsage(tokenUsage.last);
+    if (
+      tokenUsage.modelContextWindow !== null &&
+      !isTokenCount(tokenUsage.modelContextWindow)
+    ) {
+      throw new Error();
+    }
+    return;
+  }
+  throw new Error();
 }
 
 function validateInitializeResponse(message: Record<string, JsonValue>): void {
@@ -469,6 +541,18 @@ function validateThreadStartResponse(
   requestedEffort: string | null,
 ): ThreadState {
   const result = requiredObject(message.result);
+  assertRequiredKeys(result, [
+    "thread",
+    "model",
+    "modelProvider",
+    "serviceTier",
+    "cwd",
+    "instructionSources",
+    "approvalPolicy",
+    "approvalsReviewer",
+    "sandbox",
+    "reasoningEffort",
+  ]);
   const threadSnapshot = validateThreadSnapshot(result.thread, workspace);
   const thread = requiredObject(threadSnapshot);
   const sandbox = requiredObject(result.sandbox);
@@ -485,9 +569,7 @@ function validateThreadStartResponse(
     sandbox.networkAccess !== false ||
     thread.modelProvider !== modelProvider ||
     (requestedEffort !== null && effectiveEffort !== requestedEffort) ||
-    (result.serviceTier !== undefined &&
-      result.serviceTier !== null &&
-      !isSafeLabel(result.serviceTier))
+    (result.serviceTier !== null && !isSafeLabel(result.serviceTier))
   ) {
     throw new Error();
   }
@@ -527,18 +609,21 @@ async function collectTurnStart(
   connection: CodexAppServerProtocolConnection,
   threadId: string,
   onTurnId: (turnId: string) => void,
+  thread: { respondedModel: string | null; effectiveEffort: string | null },
+  expectedUserContent: JsonValue[],
+  receiveBudget: ProtocolReceiveBudget,
   signal: AbortSignal | undefined,
 ): Promise<{
   turnId: string;
-  buffered: Record<string, JsonValue>[];
+  accumulator: TurnAccumulator;
   messageCount: number;
 }> {
   let responseTurnId: string | undefined;
   let startedTurnId: string | undefined;
   let statusSeen = false;
-  const buffered: Record<string, JsonValue>[] = [];
+  const accumulator = createTurnAccumulator();
   for (let count = 1; count <= MAX_PROTOCOL_EVENTS; count += 1) {
-    const message = await nextMessage(connection, signal);
+    const message = await nextMessage(connection, receiveBudget, signal);
     if (Object.hasOwn(message, "id")) {
       if (responseTurnId !== undefined) throw new Error();
       responseTurnId = validateTurnStartResponseMessage(message);
@@ -559,7 +644,14 @@ async function collectTurnStart(
         onTurnId(startedTurnId);
       } else {
         if (startedTurnId === undefined) throw new Error();
-        buffered.push(message);
+        applyTurnNotification(
+          accumulator,
+          message,
+          threadId,
+          startedTurnId,
+          thread,
+          expectedUserContent,
+        );
       }
     }
     if (
@@ -569,7 +661,7 @@ async function collectTurnStart(
     ) {
       return {
         turnId: responseTurnId,
-        buffered,
+        accumulator,
         messageCount: count,
       };
     }
@@ -599,6 +691,32 @@ function validateTurnStartResponseMessage(
 
 function validateThreadSnapshot(value: unknown, workspace: string): JsonValue {
   const thread = requiredObject(value);
+  assertRequiredKeys(thread, [
+    "id",
+    "sessionId",
+    "forkedFromId",
+    "parentThreadId",
+    "preview",
+    "ephemeral",
+    "section",
+    "sectionEnteredAt",
+    "projectId",
+    "modelProvider",
+    "createdAt",
+    "updatedAt",
+    "recencyAt",
+    "status",
+    "path",
+    "cwd",
+    "cliVersion",
+    "source",
+    "threadSource",
+    "agentNickname",
+    "agentRole",
+    "gitInfo",
+    "name",
+    "turns",
+  ]);
   safeLabel(thread.id);
   safeLabel(thread.sessionId);
   safeLabel(thread.modelProvider);
@@ -615,18 +733,17 @@ function validateThreadSnapshot(value: unknown, workspace: string): JsonValue {
     Buffer.byteLength(thread.preview, "utf8") > MAX_PROVIDER_INPUT_BYTES ||
     !Array.isArray(thread.turns) ||
     thread.turns.length !== 0 ||
-    !Object.hasOwn(thread, "projectId") ||
     thread.projectId !== null ||
-    (thread.forkedFromId !== undefined && thread.forkedFromId !== null) ||
-    (thread.parentThreadId !== undefined && thread.parentThreadId !== null) ||
-    (thread.path !== undefined && thread.path !== null) ||
+    thread.forkedFromId !== null ||
+    thread.parentThreadId !== null ||
+    thread.path !== null ||
     !nullableString(thread.name) ||
     !nullableString(thread.agentNickname) ||
     !nullableString(thread.agentRole) ||
     !nullableInteger(thread.recencyAt) ||
     !nullableInteger(thread.sectionEnteredAt) ||
-    (thread.section !== undefined && thread.section !== null) ||
-    (thread.gitInfo !== undefined && thread.gitInfo !== null)
+    thread.section !== null ||
+    thread.gitInfo !== null
   ) {
     throw new Error();
   }
@@ -663,12 +780,22 @@ function validateTurnSnapshot(
   expectedItemsView: "notLoaded" | "summary",
 ): { id: string; items: JsonValue[]; startedAt: number | null } {
   const turn = requiredObject(value);
+  assertRequiredKeys(turn, [
+    "id",
+    "items",
+    "itemsView",
+    "status",
+    "error",
+    "startedAt",
+    "completedAt",
+    "durationMs",
+  ]);
   const id = safeLabel(turn.id);
   if (
     turn.status !== expectedStatus ||
     !Array.isArray(turn.items) ||
     turn.itemsView !== expectedItemsView ||
-    (turn.error !== undefined && turn.error !== null) ||
+    turn.error !== null ||
     !nullableInteger(turn.startedAt) ||
     !nullableInteger(turn.completedAt) ||
     !nullableInteger(turn.durationMs)
@@ -677,8 +804,7 @@ function validateTurnSnapshot(
   }
   if (
     expectedStatus === "inProgress" &&
-    ((turn.completedAt !== undefined && turn.completedAt !== null) ||
-      (turn.durationMs !== undefined && turn.durationMs !== null))
+    (turn.completedAt !== null || turn.durationMs !== null)
   ) {
     throw new Error();
   }
@@ -686,7 +812,7 @@ function validateTurnSnapshot(
   return {
     id,
     items,
-    startedAt: turn.startedAt === undefined ? null : (turn.startedAt as number | null),
+    startedAt: turn.startedAt as number | null,
   };
 }
 
@@ -698,27 +824,38 @@ function validateSafeItem(
   safeLabel(item.id);
   const type = safeItemType(item.type);
   if (type === "userMessage") {
+    assertRequiredKeys(item, ["type", "id", "clientId", "content"]);
     if (
       !Array.isArray(item.content) ||
       expectedUserContent === undefined ||
       !jsonEqual(item.content, expectedUserContent) ||
-      (item.clientId !== undefined && !nullableString(item.clientId))
+      !nullableString(item.clientId)
     ) {
       throw new Error();
     }
   } else if (type === "reasoning") {
-    validateOptionalStringArray(item.summary);
-    validateOptionalStringArray(item.content);
-  } else if (
-    typeof item.text !== "string" ||
-    (item.phase !== undefined &&
-      item.phase !== null &&
-      item.phase !== "commentary" &&
-      item.phase !== "final_answer") ||
-    (item.memoryCitation !== undefined && item.memoryCitation !== null) ||
-    (item.delivery !== undefined && item.delivery !== null)
-  ) {
-    throw new Error();
+    assertRequiredKeys(item, ["type", "id", "summary", "content"]);
+    validateStringArray(item.summary);
+    validateStringArray(item.content);
+  } else {
+    assertRequiredKeys(item, [
+      "type",
+      "id",
+      "text",
+      "phase",
+      "memoryCitation",
+      "delivery",
+    ]);
+    if (
+      typeof item.text !== "string" ||
+      (item.phase !== null &&
+        item.phase !== "commentary" &&
+        item.phase !== "final_answer") ||
+      item.memoryCitation !== null ||
+      item.delivery !== null
+    ) {
+      throw new Error();
+    }
   }
   return normalizeJsonValue(
     item,
@@ -727,8 +864,7 @@ function validateSafeItem(
   );
 }
 
-function validateOptionalStringArray(value: unknown): void {
-  if (value === undefined) return;
+function validateStringArray(value: unknown): void {
   if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
     throw new Error();
   }
@@ -754,9 +890,10 @@ function canonicalJson(value: JsonValue): string {
 async function nextResponse(
   connection: CodexAppServerProtocolConnection,
   id: number,
+  receiveBudget: ProtocolReceiveBudget,
   signal: AbortSignal | undefined,
 ): Promise<Record<string, JsonValue>> {
-  const message = await nextMessage(connection, signal);
+  const message = await nextMessage(connection, receiveBudget, signal);
   if (
     message.id !== id ||
     Object.hasOwn(message, "error") ||
@@ -770,18 +907,20 @@ async function nextResponse(
 async function nextNotification(
   connection: CodexAppServerProtocolConnection,
   method: string,
+  receiveBudget: ProtocolReceiveBudget,
   signal: AbortSignal | undefined,
 ): Promise<Record<string, JsonValue>> {
-  const message = await nextMessage(connection, signal);
+  const message = await nextMessage(connection, receiveBudget, signal);
   if (Object.hasOwn(message, "id") || message.method !== method) throw new Error();
   return message;
 }
 
 async function nextMessage(
   connection: CodexAppServerProtocolConnection,
+  receiveBudget: ProtocolReceiveBudget,
   signal: AbortSignal | undefined,
 ): Promise<Record<string, JsonValue>> {
-  const value = await receive(connection, signal);
+  const value = await receive(connection, receiveBudget, signal);
   if (!isJsonObject(value)) throw new Error();
   return value;
 }
@@ -799,12 +938,58 @@ async function send(
 
 async function receive(
   connection: CodexAppServerProtocolConnection,
+  receiveBudget: ProtocolReceiveBudget,
   signal: AbortSignal | undefined,
 ): Promise<JsonValue | undefined> {
   assertActive(signal);
-  const value = await raceAbort(connection.receive(), signal);
+  const received = await raceAbort(connection.receive(), signal);
   assertActive(signal);
-  return value;
+  if (received === undefined) return undefined;
+  if (receiveBudget.remainingBytes < 1) throw new Error();
+  if (
+    received === null ||
+    typeof received !== "object" ||
+    Array.isArray(received)
+  ) {
+    throw new Error();
+  }
+  const byteLengthProperty = Object.getOwnPropertyDescriptor(
+    received,
+    "byteLength",
+  );
+  const messageProperty = Object.getOwnPropertyDescriptor(received, "message");
+  if (
+    byteLengthProperty === undefined ||
+    !("value" in byteLengthProperty) ||
+    messageProperty === undefined ||
+    !("value" in messageProperty)
+  ) {
+    throw new Error();
+  }
+  const reportedByteLength = byteLengthProperty.value as unknown;
+  if (
+    !Number.isSafeInteger(reportedByteLength) ||
+    typeof reportedByteLength !== "number" ||
+    reportedByteLength < 1 ||
+    reportedByteLength > receiveBudget.remainingBytes
+  ) {
+    throw new Error();
+  }
+  const snapshot = normalizeJsonValue(
+    messageProperty.value,
+    "codex app-server message",
+    Math.min(
+      CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES,
+      receiveBudget.remainingBytes,
+    ),
+  );
+  const chargedBytes = Math.max(
+    reportedByteLength,
+    Buffer.byteLength(JSON.stringify(snapshot), "utf8"),
+  );
+  if (chargedBytes > receiveBudget.remainingBytes) throw new Error();
+  receiveBudget.remainingBytes -= chargedBytes;
+  return snapshot;
 }
 
 function snapshotRequested(value: unknown): RequestedExecutionSettings {
@@ -824,10 +1009,17 @@ function snapshotRequested(value: unknown): RequestedExecutionSettings {
 
 function snapshotProtocolUsage(value: unknown): ProtocolUsage {
   const usage = requiredObject(value);
+  assertRequiredKeys(usage, [
+    "inputTokens",
+    "cachedInputTokens",
+    "cacheWriteInputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+    "totalTokens",
+  ]);
   const inputTokens = usage.inputTokens;
   const cachedInputTokens = usage.cachedInputTokens;
-  const cacheWriteInputTokens =
-    usage.cacheWriteInputTokens === undefined ? 0 : usage.cacheWriteInputTokens;
+  const cacheWriteInputTokens = usage.cacheWriteInputTokens;
   const outputTokens = usage.outputTokens;
   const reasoningOutputTokens = usage.reasoningOutputTokens;
   const totalTokens = usage.totalTokens;
@@ -870,6 +1062,15 @@ function requiredObject(value: unknown): Record<string, JsonValue> {
   return value;
 }
 
+function assertRequiredKeys(
+  object: Record<string, JsonValue>,
+  keys: readonly string[],
+): void {
+  for (const key of keys) {
+    if (!Object.hasOwn(object, key)) throw new Error();
+  }
+}
+
 function boundedMediaType(value: unknown): string {
   if (
     typeof value !== "string" ||
@@ -901,11 +1102,11 @@ function nonnegativeInteger(value: unknown): number {
 }
 
 function nullableInteger(value: unknown): boolean {
-  return value === undefined || value === null || isTokenCount(value);
+  return value === null || isTokenCount(value);
 }
 
 function nullableString(value: unknown): boolean {
-  return value === undefined || value === null || typeof value === "string";
+  return value === null || typeof value === "string";
 }
 
 function isSafeLabel(value: unknown): value is string {

@@ -1,7 +1,5 @@
 import { parseArgs } from "node:util";
 import path from "node:path";
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
 
 import {
   compareAttempt,
@@ -26,7 +24,7 @@ import {
   createSanitizerRequirementDecision,
   type SanitizerRequirementSettings,
 } from "../runner/identity.js";
-import { MAX_SANITIZER_POLICY_BYTES } from "../runner/sanitizer.js";
+import { readPrivateSanitizerPolicy } from "./sanitizer-policy.js";
 import {
   DEFAULT_EXECUTION_PHASE,
   MAX_TIMEOUT_MS,
@@ -169,45 +167,6 @@ async function executeRun(runArguments: RunArguments): Promise<void> {
     console.log(
       `run complete: ${result.caseId} (phase ${result.phase}, key ${result.attemptKey}, attempt ${result.attemptId}, run ${result.runId})`,
     );
-  }
-}
-
-async function readPrivateSanitizerPolicy(file: string): Promise<Buffer> {
-  const flags =
-    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  try {
-    handle = await open(file, flags);
-    const metadata = await handle.stat();
-    if (
-      !metadata.isFile() ||
-      metadata.size > MAX_SANITIZER_POLICY_BYTES ||
-      (process.platform !== "win32" && (metadata.mode & 0o077) !== 0)
-    ) {
-      throw new Error();
-    }
-    const bounded = Buffer.allocUnsafe(MAX_SANITIZER_POLICY_BYTES + 1);
-    let total = 0;
-    try {
-      while (total < bounded.byteLength) {
-        const { bytesRead } = await handle.read(
-          bounded,
-          total,
-          bounded.byteLength - total,
-          null,
-        );
-        if (bytesRead === 0) break;
-        total += bytesRead;
-      }
-      if (total > MAX_SANITIZER_POLICY_BYTES) throw new Error();
-      return Buffer.from(bounded.subarray(0, total));
-    } finally {
-      bounded.fill(0);
-    }
-  } catch {
-    throw new RunnerError("sanitizer_policy_invalid", "sanitizer policy is unreadable");
-  } finally {
-    await handle?.close().catch(() => undefined);
   }
 }
 
