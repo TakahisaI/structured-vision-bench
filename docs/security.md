@@ -154,29 +154,34 @@ flags, changes permissions through that handle, and compares its device/inode wi
 the last pre-publication validation. Before provider work, the attempt-identity destination is claimed
 with a non-recursive exclusive `mkdir`; an existing entry is reported as `attempt_exists` and the
 losing process never cleans it up or invokes the provider. The winning process places a private
-owner-nonce marker in the claimed directory, writes and validates `document.json`, and writes the
+owner-nonce marker in the claimed directory. After schema validation, the runner derives an artifact
+identity from the attempt ID, exact formal-document digest, sanitizer identity/binding, and ordered
+value-free finding tuples. It creates a private digest-named child below the claim, writes and
+validates `document.json` there, and writes the
 complete `attempt.json.pending` into a private same-filesystem `<attempt-root>/.claim-<nonce>/`
 staging directory owned by that attempt claim, without a shared staging-root lifecycle between
 attempt invocations. The owner marker is removed only immediately before final publication. Document
-and manifest publication use no-replace
-hard links from their complete pending files. The final
-manifest link is the sole visibility point for a complete manifest: it changes the attempt directory in
-one syscall from `document.json` to the exact `attempt.json` plus `document.json` shape. Removing
+and manifest publication use no-replace hard links from their complete pending files. The final
+manifest link inside the artifact child is the sole visibility point for a complete formal artifact.
+The successful attempt parent contains exactly that one digest-named child, whose basename is the
+manifest-external anchor. Removing
 the external pending source is post-publication best effort and cannot turn a published attempt into
 a failure.
 Cleanup of unpublished final-claim files is permitted only with an explicit root stability guard,
 only for the claim owner, only for files owned by that claim, and only while the final manifest is
 absent; it uses non-recursive directory removal. The separate external pending source may be removed
 after publication only by its recorded file identity, as best-effort staging cleanup.
-The reader recognizes only a directory containing the final `attempt.json` and `document.json`;
-directories containing only `document.json`, the owner marker, or no manifest are rejected and are
-not formal attempts. The
+The reader recognizes only an attempt-ID directory containing exactly one artifact-ID child with the
+final `attempt.json` and `document.json` inside it. Children containing only `document.json`, claim
+directories containing the owner marker, or directories without a final manifest are rejected and
+are not formal attempts. The
 Node-only contract prevents competing harness writers from replacing a claimed attempt directory;
 protection against an adversarial same-UID process replacing the attempt root in the final path-based
 syscall window is outside this portable harness threat model. The reader uses no-follow reads,
-rejects non-private modes, symlinks, non-regular files, size violations, and any directory entry
-other than `attempt.json` and `document.json`. It recomputes the attempt ID from the stored run ID and
-caller key and requires the directory basename to equal that ID. Attempt keys are bounded safe labels;
+rejects non-private modes, symlinks, non-regular files, size violations, and unknown entries at both
+directory levels. It recomputes the attempt ID from the stored run ID and caller key and requires the
+parent basename to equal that ID. It also recomputes artifact identity and requires the manifest and
+child basename to match. Attempt keys are bounded safe labels;
 the key and derived attempt/run IDs are not exposed to provider, approval, or sanitizer requests.
 
 A provider must not receive a bundle that failed preflight validation, and a provider-facing read
@@ -200,18 +205,22 @@ or secret-shaped text.
 Missing usage, model, effort, or stop-reason metadata is represented as unavailable, never zero or a
 request-derived guess. Provider metadata and sanitizer findings are accepted only as bounded safe
 labels; a non-null persisted finding path must exactly match the consumer's bounded pointer
-allowlist. Full-segment wildcards are rejected until the independently anchored artifact identity in
-Issue #45 exists. The canonical exact pointers and their digest are persisted and bound into the run
+allowlist. Full-segment wildcards remain rejected until Issue #45 enables them on top of the
+independently anchored artifact identity introduced by Issue #47. The canonical exact pointers and their digest are persisted and bound into the run
 sanitizer identity, so the untrusted attempt reader rejects both a changed path and a coordinated
 allowlist/digest change.
 Allowlist strings containing isolated UTF-16 surrogates fail configuration preflight before external
-work. A successful attempt contains only `attempt.json`
-and the formal `document.json` (the strict canonical provider document when sanitization is not
+work. A successful attempt parent contains one artifact-ID child; that child contains only
+`attempt.json` and the formal `document.json` (the strict canonical provider document when sanitization is not
 required, otherwise sanitizer output). It never stores raw provider serialization, raw prompt/image
 contents, sanitizer policy contents/paths, endpoint/account identifiers, or failure tracebacks. When
 the consumer decision says sanitization is not required, sanitizer/policy/target-binding manifest
 blocks are absent rather than null-filled. Attempt readers reject symlinks, unknown fields or
-entries, non-private modes, digest changes, identity changes, and policy-binding changes.
+entries, non-private modes, digest changes, identity changes, and policy-binding changes. Artifact
+identity commits the ordered `(code, severity, classification, hardGate, path)` tuples, the
+formal-document digest, and sanitizer identity/binding. Updating a tuple and the manifest's
+recomputed artifact ID together still fails while the independently anchored child basename remains
+fixed. Adversarial same-UID directory replacement remains outside the portable threat model above.
 
 Comparison output contains aggregate counts, stable warning codes, declaration positions, and only
 the same value-free sanitizer paths already validated for the attempt. It does not contain truth

@@ -1183,7 +1183,7 @@ test("binds the execution phase into run identity and reader validation", async 
     });
     assert.notEqual(development.runId, calibration.runId);
 
-    const manifestPath = path.join(development.attemptDirectory, "attempt.json");
+    const manifestPath = path.join(development.artifactDirectory, "attempt.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     manifest.run.phase = "frozen-holdout";
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
@@ -1213,14 +1213,14 @@ test("reader rejects an internally rehashed approval and execution phase mismatc
       sanitizerRequirement: requirement,
     });
     const manifest = JSON.parse(
-      await readFile(path.join(result.attemptDirectory, "attempt.json"), "utf8"),
+      await readFile(path.join(result.artifactDirectory, "attempt.json"), "utf8"),
     ) as AttemptManifest;
     manifest.run.phase = "frozen-holdout";
     recomputeManifestIdentities(manifest);
     const movedDirectory = path.join(attemptRoot, manifest.attemptId);
     await rename(result.attemptDirectory, movedDirectory);
     await writeFile(
-      path.join(movedDirectory, "attempt.json"),
+      path.join(movedDirectory, result.artifactId, "attempt.json"),
       `${JSON.stringify(manifest, null, 2)}\n`,
       "utf8",
     );

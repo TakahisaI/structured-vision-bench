@@ -11,7 +11,9 @@ import {
   type JsonValue,
 } from "../bundle/json.js";
 import {
+  ARTIFACT_IDENTITY_VERSION,
   ATTEMPT_IDENTITY_VERSION,
+  computeArtifactIdentity,
   computeCaseInputIdentity,
   computeAttemptIdentity,
   computePolicyBindingDigest,
@@ -19,6 +21,7 @@ import {
   computeSanitizerExecutionBindingDigest,
   computeSanitizerFindingPathAllowlistDigest,
   computeSanitizerRequirementDigest,
+  type ArtifactIdentityInput,
   type CaseInputIdentity,
   type SanitizerRequirementCoreV1,
   type SanitizerRequirementDecisionV1,
@@ -78,6 +81,11 @@ type AttemptClaimState = {
   closed: boolean;
   ownedFiles: Set<string>;
   ownedFileIdentities: Map<string, FileIdentity>;
+  artifactDirectoryPath: string | undefined;
+  artifactDirectoryIdentity: FileIdentity | undefined;
+  artifactDirectoryHandle: Awaited<ReturnType<typeof open>> | undefined;
+  ownedArtifactFiles: Set<string>;
+  ownedArtifactFileIdentities: Map<string, FileIdentity>;
   stagingDirectoryPath: string | undefined;
   stagingDirectoryIdentity: FileIdentity | undefined;
   ownedStagingFiles: Set<string>;
@@ -101,6 +109,8 @@ export type AttemptStage = {
 export type AttemptManifest = {
   attemptVersion: 1;
   attemptIdentityVersion: typeof ATTEMPT_IDENTITY_VERSION;
+  artifactIdentityVersion: typeof ARTIFACT_IDENTITY_VERSION;
+  artifactId: string;
   attemptKey: string;
   attemptId: string;
   runId: string;
@@ -190,11 +200,15 @@ export type AttemptManifest = {
   };
 };
 
-export type AttemptManifestBase = Omit<AttemptManifest, "document">;
+export type AttemptManifestBase = Omit<
+  AttemptManifest,
+  "artifactIdentityVersion" | "artifactId" | "document"
+>;
 
 export type AttemptReadResult = {
   manifest: AttemptManifest;
   document: JsonValue;
+  artifactDirectory: string;
 };
 
 export type ReadAttemptOptions = {
@@ -229,6 +243,11 @@ export async function claimAttemptDirectory(
       closed: false,
       ownedFiles: new Set(),
       ownedFileIdentities: new Map(),
+      artifactDirectoryPath: undefined,
+      artifactDirectoryIdentity: undefined,
+      artifactDirectoryHandle: undefined,
+      ownedArtifactFiles: new Set(),
+      ownedArtifactFileIdentities: new Map(),
       stagingDirectoryPath: undefined,
       stagingDirectoryIdentity: undefined,
       ownedStagingFiles: new Set(),
@@ -333,10 +352,9 @@ export async function cleanupAttemptClaim(
       allowed &&
       (state.markerPresent || state.markerRemovedByOwner) &&
       (await ownsAttemptClaim(claim, state));
-    if (
-      ownerProven &&
-      !(await pathExists(path.join(claim.attemptDirectory, "attempt.json")))
-    ) {
+    if (ownerProven) {
+      await closeArtifactDirectoryHandle(state);
+      await cleanupOwnedArtifactDirectory(state);
       await closeClaimDirectoryHandle(state);
       await cleanupOwnedFiles(claim.attemptDirectory, state);
     }
@@ -346,10 +364,36 @@ export async function cleanupAttemptClaim(
   } catch {
     // Cleanup must never replace the primary runner error.
   } finally {
+    await closeArtifactDirectoryHandle(state);
     await closeClaimDirectoryHandle(state);
     state.closed = true;
     ATTEMPT_CLAIMS.delete(claim);
   }
+}
+
+async function cleanupOwnedArtifactDirectory(state: AttemptClaimState): Promise<void> {
+  const directory = state.artifactDirectoryPath;
+  const directoryIdentity = state.artifactDirectoryIdentity;
+  if (directory === undefined || directoryIdentity === undefined) return;
+  let current;
+  try {
+    current = await lstat(directory);
+  } catch (error) {
+    if (isErrorCode(error, "ENOENT")) return;
+    throw error;
+  }
+  if (!isPrivateDirectory(current) || !sameFile(current, directoryIdentity)) return;
+  const entries = await readdir(directory, { withFileTypes: true });
+  if (entries.some((entry) => !entry.isFile() || !state.ownedArtifactFiles.has(entry.name))) return;
+  for (const fileName of [...state.ownedArtifactFiles]) {
+    const identity = state.ownedArtifactFileIdentities.get(fileName);
+    if (identity === undefined || !(await unlinkOwnedFile(path.join(directory, fileName), identity))) {
+      return;
+    }
+    state.ownedArtifactFiles.delete(fileName);
+    state.ownedArtifactFileIdentities.delete(fileName);
+  }
+  if ((await readdir(directory)).length === 0) await rmdir(directory);
 }
 
 async function cleanupOwnedFiles(directory: string, state: AttemptClaimState): Promise<void> {
@@ -393,6 +437,12 @@ async function closeClaimDirectoryHandle(state: AttemptClaimState): Promise<void
   await handle?.close().catch(() => undefined);
 }
 
+async function closeArtifactDirectoryHandle(state: AttemptClaimState): Promise<void> {
+  const handle = state.artifactDirectoryHandle;
+  state.artifactDirectoryHandle = undefined;
+  await handle?.close().catch(() => undefined);
+}
+
 async function writeOwnedFile(
   file: string,
   bytes: Buffer,
@@ -419,6 +469,56 @@ async function writeOwnedFile(
 function registerOwnedFile(state: AttemptClaimState, fileName: string, identity: FileIdentity): void {
   state.ownedFiles.add(fileName);
   state.ownedFileIdentities.set(fileName, identity);
+}
+
+function registerOwnedArtifactFile(
+  state: AttemptClaimState,
+  fileName: string,
+  identity: FileIdentity,
+): void {
+  state.ownedArtifactFiles.add(fileName);
+  state.ownedArtifactFileIdentities.set(fileName, identity);
+}
+
+async function createArtifactDirectory(
+  claim: AttemptClaim,
+  state: AttemptClaimState,
+  artifactId: string,
+): Promise<string> {
+  const artifactDirectory = path.join(claim.attemptDirectory, artifactId);
+  await mkdir(artifactDirectory, { recursive: false, mode: 0o700 });
+  const pathInfo = await lstat(artifactDirectory);
+  if (!isPrivateDirectory(pathInfo)) throw new Error();
+  state.artifactDirectoryPath = artifactDirectory;
+  state.artifactDirectoryIdentity = toFileIdentity(pathInfo);
+  const handle = await open(artifactDirectory, DIRECTORY_NOFOLLOW);
+  const handleInfo = await handle.stat();
+  if (!handleInfo.isDirectory() || !sameFile(handleInfo, pathInfo)) {
+    await handle.close().catch(() => undefined);
+    throw new Error();
+  }
+  state.artifactDirectoryIdentity = toFileIdentity(handleInfo);
+  state.artifactDirectoryHandle = handle;
+  return artifactDirectory;
+}
+
+async function assertArtifactDirectoryStable(state: AttemptClaimState): Promise<void> {
+  const directory = state.artifactDirectoryPath;
+  const identity = state.artifactDirectoryIdentity;
+  const handle = state.artifactDirectoryHandle;
+  if (directory === undefined || identity === undefined || handle === undefined) throw new Error();
+  const handleInfo = await handle.stat();
+  const pathInfo = await lstat(directory);
+  if (
+    !handleInfo.isDirectory() ||
+    pathInfo.isSymbolicLink() ||
+    !pathInfo.isDirectory() ||
+    !sameFile(handleInfo, pathInfo) ||
+    !sameFile(handleInfo, identity) ||
+    (process.platform !== "win32" && (handleInfo.mode & 0o077) !== 0)
+  ) {
+    throw new Error();
+  }
 }
 
 function registerOwnedStagingFile(
@@ -465,14 +565,15 @@ async function prepareManifestStaging(
 }
 
 async function readPendingAttemptFiles(
-  attemptDirectory: string,
+  artifactDirectory: string,
   manifestPath: string,
 ): Promise<void> {
-  await assertClaimDirectoryEntries(attemptDirectory, [OWNER_MARKER_NAME, "document.json"]);
+  await assertClaimDirectoryEntries(artifactDirectory, ["document.json"]);
   const manifestFile = await readAttemptJson(manifestPath);
   const manifest = parseAttemptManifest(manifestFile.value, undefined);
-  assertAttemptDirectoryIdentity(attemptDirectory, manifest.attemptId);
-  const documentFile = await readAttemptJson(path.join(attemptDirectory, manifest.document.path), true);
+  assertAttemptDirectoryIdentity(path.dirname(artifactDirectory), manifest.attemptId);
+  assertArtifactDirectoryIdentity(artifactDirectory, manifest);
+  const documentFile = await readAttemptJson(path.join(artifactDirectory, manifest.document.path), true);
   if (createHash("sha256").update(documentFile.bytes).digest("hex") !== manifest.document.sha256) {
     throw new RunnerError(
       "attempt_document_digest_mismatch",
@@ -481,9 +582,20 @@ async function readPendingAttemptFiles(
   }
 }
 
-async function assertClaimDirectoryEntries(directory: string, expected: string[]): Promise<void> {
+async function assertClaimDirectoryEntries(
+  directory: string,
+  expected: string[],
+  expectedDirectories: readonly string[] = [],
+): Promise<void> {
   const entries = await readdir(directory, { withFileTypes: true });
-  if (entries.some((entry) => !entry.isFile())) throw new Error();
+  const directoryNames = new Set(expectedDirectories);
+  if (
+    entries.some((entry) =>
+      directoryNames.has(entry.name) ? !entry.isDirectory() : !entry.isFile(),
+    )
+  ) {
+    throw new Error();
+  }
   const names = entries.map((entry) => entry.name).sort();
   const expectedNames = [...expected].sort();
   if (names.length !== expectedNames.length || names.some((name, index) => name !== expectedNames[index])) {
@@ -554,34 +666,46 @@ export async function writeAttemptFiles(
   canCleanup: () => Promise<boolean>,
   beforePublish: (() => Promise<void>) | undefined = undefined,
   hooks: AttemptWriteHooks = {},
-): Promise<{ documentSha256: string }> {
+): Promise<{ artifactDirectory: string; artifactId: string; documentSha256: string }> {
   const state = ATTEMPT_CLAIMS.get(claim);
   if (state === undefined || state.closed) {
     throw new RunnerError("attempt_write_failed", "attempt claim is unavailable");
   }
   const attemptDirectory = claim.attemptDirectory;
-  const documentPath = path.join(attemptDirectory, "document.json");
-  const documentPart = path.join(attemptDirectory, "document.json.part");
-  const manifestPath = path.join(attemptDirectory, "attempt.json");
   try {
     const encoded = encodeAttemptDocument(document);
+    const artifactIdentity = computeArtifactIdentity({
+      attemptId: manifest.attemptId,
+      documentSha256: encoded.sha256,
+      sanitizer: toArtifactIdentitySanitizer(manifest.sanitizer),
+    });
+    const artifactDirectory = await createArtifactDirectory(
+      claim,
+      state,
+      artifactIdentity.artifactId,
+    );
+    const documentPath = path.join(artifactDirectory, "document.json");
+    const documentPart = path.join(artifactDirectory, "document.json.part");
+    const manifestPath = path.join(artifactDirectory, "attempt.json");
     const completeManifest: AttemptManifest = {
       ...manifest,
+      ...artifactIdentity,
       document: { path: "document.json", sha256: encoded.sha256 },
     };
     await assertClaimOwnership(claim, state);
+    await assertArtifactDirectoryStable(state);
     await writeOwnedFile(documentPart, encoded.bytes, (identity) => {
-      registerOwnedFile(state, "document.json.part", identity);
+      registerOwnedArtifactFile(state, "document.json.part", identity);
     }, undefined, () => {
-      state.ownedFiles.add("document.json.part");
+      state.ownedArtifactFiles.add("document.json.part");
     });
-    const documentPartIdentity = state.ownedFileIdentities.get("document.json.part");
+    const documentPartIdentity = state.ownedArtifactFileIdentities.get("document.json.part");
     if (documentPartIdentity === undefined) throw new Error();
     await linkNoReplace(documentPart, documentPath, "attempt_write_failed");
-    registerOwnedFile(state, "document.json", documentPartIdentity);
+    registerOwnedArtifactFile(state, "document.json", documentPartIdentity);
     if (!(await unlinkOwnedFile(documentPart, documentPartIdentity))) throw new Error();
-    state.ownedFiles.delete("document.json.part");
-    state.ownedFileIdentities.delete("document.json.part");
+    state.ownedArtifactFiles.delete("document.json.part");
+    state.ownedArtifactFileIdentities.delete("document.json.part");
     const manifestValue = normalizeJsonValue(
       completeManifest as unknown as JsonValue,
       "attempt manifest",
@@ -597,7 +721,7 @@ export async function writeAttemptFiles(
     }, undefined, () => {
       state.ownedStagingFiles.add(PENDING_MANIFEST_NAME);
     });
-    await readPendingAttemptFiles(attemptDirectory, manifestPending);
+    await readPendingAttemptFiles(artifactDirectory, manifestPending);
     await assertClaimOwnership(claim, state);
     const markerIdentity = state.markerIdentity;
     if (markerIdentity === undefined || !(await unlinkOwnedFile(state.ownerMarkerPath, markerIdentity))) {
@@ -609,10 +733,19 @@ export async function writeAttemptFiles(
     state.ownedFileIdentities.delete(OWNER_MARKER_NAME);
     await beforePublish?.();
     await assertClaimDirectoryStable(claim, state);
-    await assertClaimDirectoryEntries(attemptDirectory, ["document.json"]);
+    await assertArtifactDirectoryStable(state);
+    await assertClaimDirectoryEntries(
+      attemptDirectory,
+      [artifactIdentity.artifactId],
+      [artifactIdentity.artifactId],
+    );
+    await assertClaimDirectoryEntries(artifactDirectory, ["document.json"]);
     await assertClaimStagingStable(state);
     await assertOwnedStagingFileStable(state, PENDING_MANIFEST_NAME);
+    const manifestIdentity = state.ownedStagingFileIdentities.get(PENDING_MANIFEST_NAME);
+    if (manifestIdentity === undefined) throw new Error();
     await linkNoReplace(manifestPending, manifestPath, "attempt_exists");
+    registerOwnedArtifactFile(state, "attempt.json", manifestIdentity);
     state.published = true;
     try {
       await (hooks.removePendingManifest === undefined
@@ -626,7 +759,11 @@ export async function writeAttemptFiles(
       state.ownedStagingFiles.delete(PENDING_MANIFEST_NAME);
       state.ownedStagingFileIdentities.delete(PENDING_MANIFEST_NAME);
     }
-    return { documentSha256: encoded.sha256 };
+    return {
+      artifactDirectory,
+      artifactId: artifactIdentity.artifactId,
+      documentSha256: encoded.sha256,
+    };
   } catch (error) {
     await cleanupAttemptClaim(claim, canCleanup);
     if (error instanceof RunnerError) throw error;
@@ -639,7 +776,11 @@ export async function readAttempt(
   options: ReadAttemptOptions = {},
 ): Promise<AttemptReadResult> {
   const result = await readAttemptFiles(path.resolve(attemptDirectory), options.requirementVerifier);
-  return { manifest: result.manifest, document: result.documentFile.value };
+  return {
+    manifest: result.manifest,
+    document: result.documentFile.value,
+    artifactDirectory: result.artifactDirectory,
+  };
 }
 
 async function readAttemptFiles(
@@ -648,21 +789,24 @@ async function readAttemptFiles(
 ): Promise<{
   manifest: AttemptManifest;
   documentFile: { value: JsonValue; bytes: Buffer };
+  artifactDirectory: string;
 }> {
   const absoluteDirectory = path.resolve(attemptDirectory);
-  await assertAttemptDirectory(absoluteDirectory);
-  const manifestFile = await readAttemptJson(path.join(absoluteDirectory, "attempt.json"));
+  const artifactDirectory = await resolveArtifactDirectory(absoluteDirectory);
+  const manifestFile = await readAttemptJson(path.join(artifactDirectory, "attempt.json"));
   const manifest = parseAttemptManifest(manifestFile.value, requirementVerifier);
   assertAttemptDirectoryIdentity(absoluteDirectory, manifest.attemptId);
-  const documentFile = await readAttemptJson(path.join(absoluteDirectory, manifest.document.path), true);
+  assertArtifactDirectoryIdentity(artifactDirectory, manifest);
+  const documentFile = await readAttemptJson(path.join(artifactDirectory, manifest.document.path), true);
   if (createHash("sha256").update(documentFile.bytes).digest("hex") !== manifest.document.sha256) {
     throw new RunnerError(
       "attempt_document_digest_mismatch",
       "attempt document digest does not match its manifest",
     );
   }
-  await assertAttemptDirectory(absoluteDirectory);
-  return { manifest, documentFile };
+  await assertFormalArtifactDirectory(artifactDirectory);
+  await assertAttemptContainer(absoluteDirectory, manifest.artifactId);
+  return { manifest, documentFile, artifactDirectory };
 }
 
 function assertAttemptDirectoryIdentity(directory: string, attemptId: string): void {
@@ -671,7 +815,104 @@ function assertAttemptDirectoryIdentity(directory: string, attemptId: string): v
   }
 }
 
-async function assertAttemptDirectory(directory: string): Promise<void> {
+function assertArtifactDirectoryIdentity(directory: string, manifest: AttemptManifest): void {
+  try {
+    const computed = computeArtifactIdentity({
+      attemptId: manifest.attemptId,
+      documentSha256: manifest.document.sha256,
+      sanitizer: toArtifactIdentitySanitizer(manifest.sanitizer),
+    });
+    if (
+      manifest.artifactIdentityVersion === computed.artifactIdentityVersion &&
+      manifest.artifactId === computed.artifactId &&
+      path.basename(directory) === computed.artifactId
+    ) {
+      return;
+    }
+  } catch {
+    // Normalize all malformed or mismatched artifact identity inputs below.
+  }
+  throw new RunnerError("attempt_identity_mismatch", "attempt artifact identity is invalid");
+}
+
+function toArtifactIdentitySanitizer(
+  sanitizer: AttemptManifest["sanitizer"],
+): ArtifactIdentityInput["sanitizer"] {
+  if (sanitizer === undefined) return null;
+  if (
+    sanitizer.id === null ||
+    sanitizer.protocolVersion !== 1 ||
+    sanitizer.policyBindingDigest === null
+  ) {
+    throw new RunnerError("attempt_identity_mismatch", "attempt artifact identity is invalid");
+  }
+  return {
+    id: sanitizer.id,
+    protocolVersion: sanitizer.protocolVersion,
+    bindingDigest: computeSanitizerExecutionBindingDigest({
+      policyBindingDigest: sanitizer.policyBindingDigest,
+      findingPathAllowlistDigest: sanitizer.findingPathAllowlistDigest,
+    }),
+    findings: sanitizer.findings.map((finding) => ({
+      code: finding.code,
+      severity: finding.severity,
+      classification: finding.classification,
+      hardGate: finding.hardGate,
+      path: finding.path ?? null,
+    })),
+  };
+}
+
+async function resolveArtifactDirectory(attemptDirectory: string): Promise<string> {
+  try {
+    await assertPrivateDirectory(attemptDirectory);
+    const entries = await readdir(attemptDirectory, { withFileTypes: true });
+    if (
+      entries.length !== 1 ||
+      !entries[0]?.isDirectory() ||
+      !SHA256_PATTERN.test(entries[0].name)
+    ) {
+      throw new Error();
+    }
+    const artifactDirectory = path.join(attemptDirectory, entries[0].name);
+    await assertFormalArtifactDirectory(artifactDirectory);
+    return artifactDirectory;
+  } catch {
+    throw new RunnerError("attempt_invalid", "attempt directory is invalid");
+  }
+}
+
+async function assertAttemptContainer(directory: string, artifactId: string): Promise<void> {
+  try {
+    await assertPrivateDirectory(directory);
+    const entries = await readdir(directory, { withFileTypes: true });
+    if (entries.length !== 1 || !entries[0]?.isDirectory() || entries[0].name !== artifactId) {
+      throw new Error();
+    }
+  } catch {
+    throw new RunnerError("attempt_invalid", "attempt directory is invalid");
+  }
+}
+
+async function assertFormalArtifactDirectory(directory: string): Promise<void> {
+  try {
+    await assertPrivateDirectory(directory);
+    const entries = await readdir(directory, { withFileTypes: true });
+    const names = entries.map((entry) => entry.name).sort();
+    const expectedNames = ["attempt.json", "document.json"];
+    if (
+      entries.some((entry) => !entry.isFile()) ||
+      names.length !== expectedNames.length ||
+      names.some((name, index) => name !== expectedNames[index])
+    ) {
+      throw new Error();
+    }
+  } catch {
+    throw new RunnerError("attempt_invalid", "attempt directory is invalid");
+  }
+}
+
+async function assertPrivateDirectory(directory: string): Promise<void> {
   let handle;
   try {
     const absolute = path.resolve(directory);
@@ -686,14 +927,8 @@ async function assertAttemptDirectory(directory: string): Promise<void> {
     ) {
       throw new Error();
     }
-    const entries = await readdir(absolute, { withFileTypes: true });
     const finalPathInfo = await lstat(absolute);
     if (finalPathInfo.isSymbolicLink() || !sameFile(info, finalPathInfo)) throw new Error();
-    const names = entries.map((entry) => entry.name).sort();
-    const expectedNames = ["attempt.json", "document.json"];
-    if (names.length !== expectedNames.length || names.some((name, index) => name !== expectedNames[index])) {
-      throw new Error();
-    }
   } catch {
     throw new RunnerError("attempt_invalid", "attempt directory is invalid");
   } finally {
@@ -845,6 +1080,8 @@ function parseAttemptManifest(
   assertKeys(manifest, [
     "attemptVersion",
     "attemptIdentityVersion",
+    "artifactIdentityVersion",
+    "artifactId",
     "attemptKey",
     "attemptId",
     "runId",
@@ -866,10 +1103,12 @@ function parseAttemptManifest(
   if (
     manifest.attemptVersion !== ATTEMPT_VERSION ||
     manifest.attemptIdentityVersion !== ATTEMPT_IDENTITY_VERSION ||
+    manifest.artifactIdentityVersion !== ARTIFACT_IDENTITY_VERSION ||
     manifest.bundleVersion !== 1
   ) invalid();
   const attemptKey = requiredSafeLabel(manifest.attemptKey);
   const attemptId = requiredDigest(manifest.attemptId);
+  requiredDigest(manifest.artifactId);
   const runId = requiredDigest(manifest.runId);
   if (computeAttemptIdentity({ runId, attemptKey }).attemptId !== attemptId) {
     throw new RunnerError("attempt_identity_mismatch", "attempt instance identity is invalid");

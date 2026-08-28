@@ -92,6 +92,8 @@ export type ComparisonResultCore = {
   scoringRevision: string;
   identity: {
     attemptId: string;
+    artifactIdentityVersion: number;
+    artifactId: string;
     runId: string;
     caseInputIdentityDigest: string;
     executionBundleDigest: string;
@@ -216,6 +218,8 @@ export async function compareAttempt(options: CompareAttemptOptions): Promise<Co
     scoringRevision,
     identity: {
       attemptId: attempt.manifest.attemptId,
+      artifactIdentityVersion: attempt.manifest.artifactIdentityVersion,
+      artifactId: attempt.manifest.artifactId,
       runId: attempt.manifest.runId,
       caseInputIdentityDigest: attempt.manifest.caseInputIdentity.digest,
       executionBundleDigest: attempt.manifest.bundleManifestDigest,

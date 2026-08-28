@@ -176,9 +176,11 @@ confidential storage and is passed to a local checkout of the public harness.
    transport.
 6. The selected provider returns structured data or a classified failure.
 7. The runner canonicalizes, sanitizes when required, schema-validates, and publishes the attempt by
-   no-replace linking its fully validated manifest from the private same-filesystem `.claim-<nonce>/`
-   staging area to `attempt.json`; the final link changes the claimed attempt directory directly to its
-   exact two-file reader shape, and source cleanup is best effort.
+   deriving a post-sanitization artifact identity from the attempt ID, formal-document digest, and
+   ordered value-free sanitizer finding tuples. It creates that digest-named child beneath the
+   provider-before-work attempt claim, then no-replace links the fully validated manifest from the
+   private same-filesystem `.claim-<nonce>/` staging area to the child `attempt.json`. The final link
+   is the visibility point for the exact two-file artifact; source cleanup is best effort.
 8. Comparison and reports derive results without mutating bundle or attempt input.
 9. Only anonymized aggregate facts may be copied to a public Issue.
 
