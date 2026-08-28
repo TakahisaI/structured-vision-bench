@@ -4,10 +4,10 @@
 
 This repository-internal transport consists of a single-thread, single-turn protocol core and its
 isolated one-shot process client. The protocol core remains independent of process, filesystem,
-credentials, approval, and runner state. The combined transport is not a Provider, login client,
-credential adapter, autonomous coding agent, or general app-server client. One-shot approval and
-Provider integration are Issue #20, CLI selection is Issue #17, and sanitizer-required execution is
-Issue #18.
+credentials, approval, and runner state. A separate public Provider wrapper binds this transport to
+one consumer-owned approval attestation. The combined transport is not a login client, credential
+adapter, autonomous coding agent, or general app-server client. CLI selection is Issue #17, and
+sanitizer-required execution is Issue #18.
 
 The client uses the documented app-server messages and exactly one ephemeral thread with one turn.
 Protocol-core tests use a deterministic in-memory connection. Process contract tests start only a
@@ -59,8 +59,9 @@ inputs. Bundle identity, case ID, document kind, provenance, approval, sanitizer
 truth, comparison, past attempts, and digests are not serialized to app-server. The only path is the
 empty canonical workspace supplied by the process client.
 
-Issue #20 owns the approval boundary that is allowed to call this client. The client does not accept
-or serialize approval, sanitizer requirement, case identity, provenance, truth, or comparison data.
+The Provider wrapper owns the approval boundary that is allowed to call this client. The process
+client does not accept or serialize approval, sanitizer requirement, case identity, provenance,
+truth, or comparison data.
 
 The thread is marked ephemeral; this is a data-minimization request, not an assertion about
 upstream persistence. The private approval gate remains the owner of persistence, retention,
@@ -117,7 +118,33 @@ below supplies the enforceable no-host-tool connection.
 
 The final agent-message text is strict JSON and is parsed inside the client. Raw model text,
 response values, paths, and process diagnostics are never copied into normal errors or result
-metadata. The future Provider wrapper and runner perform authoritative output-schema validation.
+metadata. The runner performs authoritative output-schema validation.
+
+## Approval-bound Provider
+
+`createCodexAppServerProvider()` exposes the fixed provider ID and route `codex-app-server`,
+implementation identity `codex-app-server-provider-v1`, and process protocol identity
+`codex-app-server-isolation-v1`. It requires a consumer-owned `revalidateTransport` function. That
+function receives only the frozen approval v1 attestation and abort signal; it owns the private
+account, endpoint, persistence, runtime, and scope checks and must settle its work when aborted.
+The public Provider compares the returned attestation exactly but does not interpret those private
+identities.
+
+The runner gate remains canonical. After it succeeds, the Provider revalidates the attestation in
+`prepareTransport()` and records an authorization for exactly the next `invoke()` on that Provider
+instance. Starting any later prepare invalidates the previous authorization. Invoke consumes the
+authorization before validation, requires an exact context approval and sanitizer-requirement
+match, then revalidates once more immediately before starting app-server. Missing, denied, expired,
+changed, reused, or sanitizer/policy-required authorization fails before process start and before
+any of the four input callbacks. A later prepare aborts and waits for any in-flight invocation and
+its process/workspace cleanup before it can authorize another invocation.
+
+Only the four extraction callbacks and requested model/effort/null max-tokens setting cross from
+the Provider into the process client. Approval, case and bundle identities, provenance, sanitizer
+requirement, paths, truth, comparison, and prior attempts do not. The Provider returns only the
+strict document and model, effort, usage, and stop-reason metadata supplied by the pinned protocol,
+plus the unchanged approval attestation for runner audit comparison. It performs no retry,
+parallel invocation, or fallback.
 
 ## Metadata
 
@@ -129,8 +156,8 @@ The transport result contains only values exposed by the fixed protocol:
 - unavailable stop reason as null.
 
 Missing optional effort, usage, or stop-reason values are not synthesized. A missing required model
-is a protocol failure. Issue #20 carries the CLI and generated-protocol identities into provider,
-approval, run, and attempt identity.
+is a protocol failure. The Provider carries its fixed implementation and isolation-protocol
+identities into approval, run, and attempt identity.
 
 ## Limits
 
