@@ -20,7 +20,7 @@ The public synthetic entry point is:
 ```bash
 svbench run \
   --bundle <bundle-directory> \
-  --provider mock \
+  --provider mock|command|codex-app-server \
   [--model <id>] \
   [--effort <level>] \
   [--max-tokens <n>] \
@@ -29,6 +29,12 @@ svbench run \
   [--approval required|optional --approval-command <executable> <approval identity options>] \
   [--json]
 ```
+
+The `codex-app-server` selection additionally requires an absolute `--provider-command`, an explicit
+model, and an applied command approval configuration. Its fixed protocol does not accept non-null
+maximum tokens, and policy-required runs are not enabled. The complete transport and synthetic
+manual-smoke boundary is specified in
+[`docs/codex-app-server-transport-v1.md`](codex-app-server-transport-v1.md#cli-selection-and-synthetic-smoke).
 
 `--attempt-key` is a caller-owned safe label (`[A-Za-z0-9._-]`, 1–64 characters) and defaults to
 `single`. `--attempt-root` defaults to `attempts` below the current working directory. A successful
