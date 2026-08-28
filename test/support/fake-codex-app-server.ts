@@ -275,10 +275,15 @@ async function runProtocol(overrides: ReadonlyMap<string, string>): Promise<void
         id: "synthetic-final",
         type: "agentMessage",
         text: JSON.stringify(
-          mode === "provider-success" || mode === "provider-success-no-usage"
+          mode === "provider-success" ||
+            mode === "provider-success-no-usage" ||
+            mode === "provider-sanitizer-raw"
             ? {
                 documentKind: "synthetic_invoice",
-                invoiceNumber: "INV-SYNTH-PROVIDER",
+                invoiceNumber:
+                  mode === "provider-sanitizer-raw"
+                    ? "SYNTHETIC-RAW-PROVIDER-ONLY"
+                    : "INV-SYNTH-PROVIDER",
                 issuedAt: "2031-02-03",
                 currency: "JPY",
                 lines: [

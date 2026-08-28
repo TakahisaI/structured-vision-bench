@@ -468,8 +468,6 @@ function snapshotApproval(value: unknown): ApprovalResponse {
 function assertUsableApproval(approval: ApprovalResponse): void {
   if (
     !approval.approved ||
-    approval.sanitizerRequired ||
-    approval.policyRequired ||
     (approval.expiresAt !== undefined &&
       approval.expiresAt !== null &&
       Date.parse(approval.expiresAt) <= Date.now())

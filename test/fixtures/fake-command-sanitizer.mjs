@@ -142,6 +142,24 @@ if (mode === "spawn-marker") {
       }];
       process.stdout.write(JSON.stringify(value));
     }
+  } else if (mode === "redact-provider-marker") {
+    const value = response(request);
+    if (
+      request.document.invoiceNumber !== "SYNTHETIC-RAW-PROVIDER-ONLY" ||
+      request.policyEnvelope.policy.syntheticRule !== "replace-invoice-number"
+    ) {
+      process.exitCode = 8;
+    } else {
+      value.sanitizedDocument = {
+        ...request.document,
+        invoiceNumber: "INV-SYNTH-SANITIZED",
+      };
+      process.stdout.write(JSON.stringify(value));
+    }
+  } else if (mode === "provider-raw-error") {
+    process.stderr.write(String(request.document.invoiceNumber));
+    process.stderr.write(String(request.policyEnvelope.policy.syntheticMarker));
+    process.exitCode = 9;
   } else if (mode === "raw-error") {
     process.stderr.write(String(request.document.syntheticRawMarker));
     process.stderr.write(String(request.policyEnvelope.policy.syntheticPolicyMarker));

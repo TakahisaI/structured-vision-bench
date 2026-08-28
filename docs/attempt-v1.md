@@ -32,7 +32,8 @@ svbench run \
 
 The `codex-app-server` selection additionally requires an absolute `--provider-command`, an explicit
 model, and an applied command approval configuration. Its fixed protocol does not accept non-null
-maximum tokens, and policy-required runs are not enabled. The complete transport and synthetic
+maximum tokens. Policy-required runs additionally require the target-bound sanitizer configuration
+described below. The complete transport and synthetic
 manual-smoke boundary is specified in
 [`docs/codex-app-server-transport-v1.md`](codex-app-server-transport-v1.md#cli-selection-and-synthetic-smoke).
 
