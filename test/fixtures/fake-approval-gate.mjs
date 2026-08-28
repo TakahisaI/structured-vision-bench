@@ -45,6 +45,7 @@ if (mode === "nonzero") {
     (mode !== "scope" ||
       (request.documentKind === "synthetic_invoice" && request.phase === "development")) &&
     (mode !== "request-boundary" || boundaryIsSafe) &&
+    (mode !== "codex-stable" || boundaryIsSafe) &&
     (mode !== "env" || environmentIsSafe) &&
     (mode !== "cwd" || privateWorkingDirectoryIsSafe) &&
     (mode !== "literal-arg" || literalArgumentIsSafe);
@@ -67,8 +68,12 @@ if (mode === "nonzero") {
     sanitizerRequired: request.sanitizerRequirement.sanitizerRequired,
     policyRequired: request.sanitizerRequirement.policyRequired,
     sanitizerRequirementReason: request.sanitizerRequirement.sanitizerRequirementReason,
-    checkedAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    checkedAt:
+      mode === "codex-stable" ? "2020-01-01T00:00:00.000Z" : new Date().toISOString(),
+    expiresAt:
+      mode === "codex-stable"
+        ? "2099-01-01T00:00:00.000Z"
+        : new Date(Date.now() + 60_000).toISOString(),
     ...(approved ? {} : { reasonCode: "synthetic_denied" }),
   };
   if (mode === "mismatch-scope") response.approvedScopeDigest = "f".repeat(64);

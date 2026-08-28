@@ -38,7 +38,7 @@ export const DEFAULT_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 384 * 1024 * 1024;
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
 const MAX_STDERR_BYTES = 1024 * 1024;
-const MAX_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
+export const MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
 const PRIVATE_TEMP_PARENT = "/tmp";
 const MAX_ARGUMENTS = 8;
 const MAX_ARGUMENT_BYTES = 4096;
@@ -260,7 +260,7 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
     timeoutMs > 15 * 60_000 ||
     !Number.isSafeInteger(outputLimitBytes) ||
     outputLimitBytes < 1024 ||
-    outputLimitBytes > MAX_OUTPUT_LIMIT_BYTES
+    outputLimitBytes > MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES
   ) {
     throw new Error();
   }

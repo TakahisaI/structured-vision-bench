@@ -111,6 +111,10 @@ environment values are snapshotted only after that guard. It waits for the leade
 live same-group members, and workspace cleanup on abort; restricted procfs entries unrelated to the
 same-owner child group cannot bypass leader-close waiting. A later prepare invalidates the prior
 one-shot authorization. Policy-required runs remain deferred to Issue #18.
+The public CLI selects this boundary explicitly as `codex-app-server`, requires an absolute
+isolation-capable executable, explicit model, and applied command approval, and fixes all Provider
+and protocol identity labels. It rejects non-null maximum tokens and policy-required runs before
+runner execution.
 The protocol lifecycle and fixed identity are in
 [`docs/codex-app-server-transport-v1.md`](codex-app-server-transport-v1.md).
 

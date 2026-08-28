@@ -8,6 +8,13 @@ import {
 } from "../comparison/compare.js";
 import { createMockProvider } from "../provider/mock.js";
 import {
+  createCodexAppServerProvider,
+  type CodexAppServerTransportRevalidator,
+} from "../provider/codex-app-server-provider.js";
+import {
+  MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES,
+} from "../provider/codex-app-server-process.js";
+import {
   COMMAND_PROVIDER_OPERATION_ENV,
   COMMAND_PROVIDER_REQUEST_DIRECTORY_ENV,
   createCommandProvider,
@@ -15,6 +22,10 @@ import {
   type CommandProviderOptions,
 } from "../provider/command.js";
 import { RunnerError } from "../runner/errors.js";
+import {
+  createCommandApprovalGate,
+  DEFAULT_APPROVAL_OUTPUT_LIMIT_BYTES,
+} from "../runner/approval.js";
 import {
   createCommandSanitizer,
   MAX_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES,
@@ -33,15 +44,28 @@ import {
 import { BundleValidationError } from "../bundle/validate-bundle.js";
 import type {
   ApprovalSettings,
+  ApprovalGate,
+  ApprovalRequest,
+  ApprovalResponse,
   Provider,
   SanitizerSettings,
 } from "../runner/types.js";
 
 const RUN_USAGE =
-  "usage: svbench run --bundle <bundle-directory> --provider mock|command [--phase <label>] [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--provider-command <absolute-executable> <command provider identity options>] [--approval required|optional --approval-command <executable> <approval identity options>] [--sanitizer required --sanitizer-command <absolute-executable> <sanitizer identity and policy options>] [--json]";
+  "usage: svbench run --bundle <bundle-directory> --provider mock|command|codex-app-server [--phase <label>] [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--provider-command <absolute-executable> <provider options>] [--approval required|optional --approval-command <executable> <approval identity options>] [--sanitizer required --sanitizer-command <absolute-executable> <sanitizer identity and policy options>] [--json]";
 const COMPARE_USAGE =
   "usage: svbench compare --bundle <bundle-directory> --attempt <attempt-directory> [--rescore --rescore-reason <code>] [--json]";
 const asJson = process.argv.slice(2).includes("--json");
+const CODEX_APP_SERVER_EFFORTS = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
 
 type RunArguments = {
   bundle: string;
@@ -61,6 +85,11 @@ type RunArguments = {
 type ParsedSanitizerSettings = Omit<SanitizerSettings, "policyEnvelopeBytes"> & {
   policyPath: string;
 };
+
+type ParsedApprovalPlan = Readonly<{
+  settings: ApprovalSettings | undefined;
+  revalidateTransport: CodexAppServerTransportRevalidator | undefined;
+}>;
 
 type CompareArguments = {
   bundle: string;
@@ -254,17 +283,13 @@ function parseRunArguments(): RunArguments {
     values.phase === undefined
       ? DEFAULT_EXECUTION_PHASE
       : requiredSafeLabel(values.phase);
-  const provider = parseProvider({
-    kind: values.provider,
-    executable: values["provider-command"],
-    argv: values["provider-arg"],
-    envAllowlist: values["provider-env"],
-    providerId: values["provider-id"],
-    route: values["provider-route"],
-    implementationVersion: values["provider-version"],
-    outputLimitBytes: values["provider-output-limit"],
-  });
+  const model = optionalNonEmptyString(values.model);
+  const effort = optionalNonEmptyString(values.effort);
   const maxTokens = parseMaxTokens(values["max-tokens"]);
+  const providerTimeoutMs =
+    values["provider-timeout-ms"] === undefined
+      ? undefined
+      : parseTimeoutMs(values["provider-timeout-ms"]);
   const attemptRoot =
     typeof values["attempt-root"] === "string" && values["attempt-root"].length > 0
       ? values["attempt-root"]
@@ -288,36 +313,58 @@ function parseRunArguments(): RunArguments {
     requirementReason: values["requirement-reason"],
     requirementDecisionDigest: values["requirement-decision-digest"],
   });
-  const approval = parseCommandApproval({
-    mode: values.approval,
-    executable: values["approval-command"],
-    argv: values["approval-arg"],
-    envAllowlist: values["approval-env"],
-    gateId: values["approval-gate-id"],
-    snapshotDigest: values["approval-snapshot-digest"],
-    runtimeBindingIdentity: values["approval-runtime-identity"],
-    runtimeBindingDigest: values["approval-runtime-digest"],
-    approvedScopeIdentity: values["approval-scope-identity"],
-    approvedScopeDigest: values["approval-scope-digest"],
-    phase: values["approval-phase"],
-    timeoutMs: values["approval-timeout-ms"],
-    outputLimitBytes: values["approval-output-limit"],
-  }, sanitizerPlan.requirement);
-  if (approval?.phase !== undefined && approval.phase !== phase) throw new Error();
+  const approvalPlan = parseCommandApproval(
+    {
+      mode: values.approval,
+      executable: values["approval-command"],
+      argv: values["approval-arg"],
+      envAllowlist: values["approval-env"],
+      gateId: values["approval-gate-id"],
+      snapshotDigest: values["approval-snapshot-digest"],
+      runtimeBindingIdentity: values["approval-runtime-identity"],
+      runtimeBindingDigest: values["approval-runtime-digest"],
+      approvedScopeIdentity: values["approval-scope-identity"],
+      approvedScopeDigest: values["approval-scope-digest"],
+      phase: values["approval-phase"],
+      timeoutMs: values["approval-timeout-ms"],
+      outputLimitBytes: values["approval-output-limit"],
+    },
+    sanitizerPlan.requirement,
+  );
+  if (approvalPlan.settings?.phase !== undefined && approvalPlan.settings.phase !== phase) {
+    throw new Error();
+  }
+  const provider = parseProvider(
+    {
+      kind: values.provider,
+      executable: values["provider-command"],
+      argv: values["provider-arg"],
+      envAllowlist: values["provider-env"],
+      providerId: values["provider-id"],
+      route: values["provider-route"],
+      implementationVersion: values["provider-version"],
+      outputLimitBytes: values["provider-output-limit"],
+    },
+    {
+      model,
+      effort,
+      maxTokens,
+      timeoutMs: providerTimeoutMs,
+      revalidateTransport: approvalPlan.revalidateTransport,
+      sanitizerRequired: sanitizerPlan.requirement.decision.sanitizerRequired,
+    },
+  );
   return {
     bundle: values.bundle,
     provider,
     phase,
-    model: optionalNonEmptyString(values.model),
-    effort: optionalNonEmptyString(values.effort),
+    model,
+    effort,
     maxTokens,
     attemptKey: parseAttemptKey(values["attempt-key"]),
     attemptRoot,
-    providerTimeoutMs:
-      values["provider-timeout-ms"] === undefined
-        ? undefined
-        : parseTimeoutMs(values["provider-timeout-ms"]),
-    approval,
+    providerTimeoutMs,
+    approval: approvalPlan.settings,
     sanitizerRequirement: sanitizerPlan.requirement,
     sanitizer: sanitizerPlan.settings,
   };
@@ -332,6 +379,13 @@ function parseProvider(input: {
   route: string | undefined;
   implementationVersion: string | undefined;
   outputLimitBytes: string | undefined;
+}, run: {
+  model: string | null;
+  effort: string | null;
+  maxTokens: number | null;
+  timeoutMs: number | undefined;
+  revalidateTransport: CodexAppServerTransportRevalidator | undefined;
+  sanitizerRequired: boolean;
 }): Provider {
   const hasCommandConfiguration = Object.entries(input).some(
     ([key, value]) => key !== "kind" && value !== undefined,
@@ -339,6 +393,50 @@ function parseProvider(input: {
   if (input.kind === "mock") {
     if (hasCommandConfiguration) throw new Error();
     return createMockProvider();
+  }
+  if (input.kind === "codex-app-server") {
+    if (
+      input.executable === undefined ||
+      !path.isAbsolute(input.executable) ||
+      input.providerId !== undefined ||
+      input.route !== undefined ||
+      input.implementationVersion !== undefined ||
+      run.revalidateTransport === undefined ||
+      run.model === null ||
+      run.maxTokens !== null ||
+      run.sanitizerRequired ||
+      (run.effort !== null && !CODEX_APP_SERVER_EFFORTS.has(run.effort))
+    ) {
+      throw new Error();
+    }
+    requiredSafeLabel(run.model);
+    const executableArguments = input.argv ?? [];
+    const envAllowlist = input.envAllowlist ?? [];
+    if (
+      executableArguments.length > 8 ||
+      executableArguments.some(
+        (value) => Buffer.byteLength(value, "utf8") > 4096 || value.includes("\0"),
+      ) ||
+      envAllowlist.length > 64
+    ) {
+      throw new Error();
+    }
+    return createCodexAppServerProvider({
+      process: {
+        executable: input.executable,
+        executableArguments,
+        envAllowlist,
+        ...(run.timeoutMs === undefined ? {} : { timeoutMs: run.timeoutMs }),
+        ...(input.outputLimitBytes === undefined
+          ? {}
+          : {
+              outputLimitBytes: parseCodexAppServerOutputLimit(
+                input.outputLimitBytes,
+              ),
+            }),
+      },
+      revalidateTransport: run.revalidateTransport,
+    });
   }
   if (input.kind !== "command" || input.executable === undefined) throw new Error();
   if (
@@ -386,32 +484,38 @@ function parseProvider(input: {
   return createCommandProvider(options);
 }
 
-function parseCommandApproval(input: {
-  mode: string | undefined;
-  executable: string | undefined;
-  argv: string[] | undefined;
-  envAllowlist: string[] | undefined;
-  gateId: string | undefined;
-  snapshotDigest: string | undefined;
-  runtimeBindingIdentity: string | undefined;
-  runtimeBindingDigest: string | undefined;
-  approvedScopeIdentity: string | undefined;
-  approvedScopeDigest: string | undefined;
-  phase: string | undefined;
-  timeoutMs: string | undefined;
-  outputLimitBytes: string | undefined;
-}, sanitizerRequirement: SanitizerRequirementSettings): ApprovalSettings | undefined {
+function parseCommandApproval(
+  input: {
+    mode: string | undefined;
+    executable: string | undefined;
+    argv: string[] | undefined;
+    envAllowlist: string[] | undefined;
+    gateId: string | undefined;
+    snapshotDigest: string | undefined;
+    runtimeBindingIdentity: string | undefined;
+    runtimeBindingDigest: string | undefined;
+    approvedScopeIdentity: string | undefined;
+    approvedScopeDigest: string | undefined;
+    phase: string | undefined;
+    timeoutMs: string | undefined;
+    outputLimitBytes: string | undefined;
+  },
+  sanitizerRequirement: SanitizerRequirementSettings,
+): ParsedApprovalPlan {
   const hasConfiguration = Object.entries(input).some(
     ([key, value]) => key !== "mode" && value !== undefined,
   );
   if (input.mode === undefined) {
     if (hasConfiguration) throw new Error();
-    return undefined;
+    return { settings: undefined, revalidateTransport: undefined };
   }
   if (input.mode !== "required" && input.mode !== "optional") throw new Error();
   if (input.executable === undefined) {
     if (input.mode === "required" || hasConfiguration) throw new Error();
-    return { required: false };
+    return {
+      settings: { required: false },
+      revalidateTransport: undefined,
+    };
   }
   if (
     input.executable.length === 0 ||
@@ -431,12 +535,28 @@ function parseCommandApproval(input: {
     throw new Error();
   }
   const requirement = sanitizerRequirement.decision;
-  return {
-    required: input.mode === "required",
+  const timeoutMs =
+    input.timeoutMs === undefined ? undefined : parseTimeoutMs(input.timeoutMs);
+  const outputLimitBytes =
+    input.outputLimitBytes === undefined
+      ? DEFAULT_APPROVAL_OUTPUT_LIMIT_BYTES
+      : parseApprovalOutputLimit(input.outputLimitBytes);
+  const gateId = requiredSafeLabel(input.gateId);
+  const commandGate = createCommandApprovalGate({
     executable: input.executable,
     argv,
     envAllowlist,
-    expectedGateId: requiredSafeLabel(input.gateId),
+    outputLimitBytes,
+    gateId,
+  });
+  const bridge = createApprovalRevalidationBridge(
+    commandGate,
+    timeoutMs ?? 30_000,
+  );
+  const settings: ApprovalSettings = {
+    required: input.mode === "required",
+    gate: bridge.gate,
+    expectedGateId: gateId,
     expectedProtocolVersion: 1,
     snapshotDigest: requiredDigest(input.snapshotDigest),
     runtimeBindingIdentity: requiredSafeLabel(input.runtimeBindingIdentity),
@@ -452,13 +572,48 @@ function parseCommandApproval(input: {
     expectedSanitizerRequired: requirement.sanitizerRequired,
     expectedPolicyRequired: requirement.policyRequired,
     expectedSanitizerRequirementReason: requirement.sanitizerRequirementReason,
-    ...(input.timeoutMs === undefined
-      ? {}
-      : { timeoutMs: parseTimeoutMs(input.timeoutMs) }),
-    ...(input.outputLimitBytes === undefined
-      ? {}
-      : { outputLimitBytes: parseApprovalOutputLimit(input.outputLimitBytes) }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   };
+  return { settings, revalidateTransport: bridge.revalidateTransport };
+}
+
+function createApprovalRevalidationBridge(
+  commandGate: ApprovalGate,
+  timeoutMs: number,
+): Readonly<{
+  gate: ApprovalGate;
+  revalidateTransport: CodexAppServerTransportRevalidator;
+}> {
+  let request: ApprovalRequest | undefined;
+  const gate = Object.freeze({
+    id: commandGate.id,
+    protocolVersion: commandGate.protocolVersion,
+    async approve(
+      requestValue: ApprovalRequest,
+      signal?: AbortSignal,
+    ): Promise<ApprovalResponse> {
+      request = requestValue;
+      return commandGate.approve(requestValue, signal);
+    },
+  });
+  const revalidateTransport: CodexAppServerTransportRevalidator = async (
+    _approval,
+    signal,
+  ) => {
+    if (request === undefined || signal?.aborted) throw new Error();
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    const timer = setTimeout(abort, timeoutMs);
+    try {
+      return await commandGate.approve(request, controller.signal);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    }
+  };
+  return Object.freeze({ gate, revalidateTransport });
 }
 
 function parseCommandSanitizer(input: {
@@ -657,6 +812,14 @@ function parseApprovalOutputLimit(value: string): number {
 function parseProviderOutputLimit(value: string): number {
   const parsed = parsePositiveSafeInteger(value);
   if (parsed > MAX_COMMAND_PROVIDER_OUTPUT_LIMIT_BYTES) throw new Error();
+  return parsed;
+}
+
+function parseCodexAppServerOutputLimit(value: string): number {
+  const parsed = parsePositiveSafeInteger(value);
+  if (parsed < 1024 || parsed > MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES) {
+    throw new Error();
+  }
   return parsed;
 }
 

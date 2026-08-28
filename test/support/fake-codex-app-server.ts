@@ -275,7 +275,7 @@ async function runProtocol(overrides: ReadonlyMap<string, string>): Promise<void
         id: "synthetic-final",
         type: "agentMessage",
         text: JSON.stringify(
-          mode === "provider-success"
+          mode === "provider-success" || mode === "provider-success-no-usage"
             ? {
                 documentKind: "synthetic_invoice",
                 invoiceNumber: "INV-SYNTH-PROVIDER",
@@ -300,18 +300,20 @@ async function runProtocol(overrides: ReadonlyMap<string, string>): Promise<void
       };
       send(itemEvent("started", { ...finalItem, text: "" }));
       send(itemEvent("completed", finalItem));
-      send({
-        method: "thread/tokenUsage/updated",
-        params: {
-          threadId: "synthetic-thread",
-          turnId: "synthetic-turn",
-          tokenUsage: {
-            total: usage(),
-            last: usage(),
-            modelContextWindow: 1024,
+      if (mode !== "provider-success-no-usage") {
+        send({
+          method: "thread/tokenUsage/updated",
+          params: {
+            threadId: "synthetic-thread",
+            turnId: "synthetic-turn",
+            tokenUsage: {
+              total: usage(),
+              last: usage(),
+              modelContextWindow: 1024,
+            },
           },
-        },
-      });
+        });
+      }
       send({
         method: "turn/completed",
         params: {

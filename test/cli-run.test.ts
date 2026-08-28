@@ -36,6 +36,9 @@ const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
 const FAKE_APPROVAL_GATE = path.resolve("test/fixtures/fake-approval-gate.mjs");
 const FAKE_COMMAND_PROVIDER = path.resolve("test/fixtures/fake-command-provider.mjs");
 const FAKE_COMMAND_SANITIZER = path.resolve("test/fixtures/fake-command-sanitizer.mjs");
+const FAKE_CODEX_APP_SERVER = path.resolve(
+  ".tmp/build/test/support/fake-codex-app-server.js",
+);
 const IMAGE_SHA256 = "dda43d98857bc0977a1bdc67e8005428c3af95ca73cddda69c9e8737eee03cc9";
 
 test("fails closed before opening sanitizer policies on Windows", async () => {
@@ -110,6 +113,35 @@ function approvalArguments(mode = "request-boundary"): string[] {
     "--approval-scope-digest",
     "c".repeat(64),
     "--approval-phase",
+    "development",
+  ];
+}
+
+function codexAppServerArguments(
+  mode: string,
+  capture: string,
+  timeoutMs = 5_000,
+): string[] {
+  return [
+    "--provider",
+    "codex-app-server",
+    "--provider-command",
+    process.execPath,
+    "--provider-arg",
+    FAKE_CODEX_APP_SERVER,
+    "--provider-arg",
+    mode,
+    "--provider-arg",
+    capture,
+    "--provider-arg",
+    path.join(path.dirname(capture), "synthetic-canary"),
+    "--provider-timeout-ms",
+    String(timeoutMs),
+    "--model",
+    "synthetic-model",
+    "--effort",
+    "medium",
+    "--phase",
     "development",
   ];
 }
@@ -323,6 +355,241 @@ test("runs the policy-free command provider from the public CLI", async () => {
     assert.equal(attempt.manifest.run.protocolVersion, "command-provider-v1");
     assert.equal(attempt.manifest.approval.applied, true);
     assert.equal(attempt.manifest.sanitizer, undefined);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("runs one approval-bound Codex app-server attempt from the public CLI", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-codex-"));
+  const attempts = path.join(temporary, "attempts");
+  const capture = path.join(temporary, "capture.jsonl");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "run",
+        "--bundle",
+        FIXTURE,
+        ...codexAppServerArguments("provider-success", capture),
+        "--attempt-root",
+        attempts,
+        ...approvalArguments("codex-stable"),
+        "--json",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stdout);
+    assert.equal(result.stderr, "");
+    const summary = JSON.parse(result.stdout) as { attemptId: string };
+    const attempt = await readAttempt(path.join(attempts, summary.attemptId));
+    assert.equal(attempt.manifest.run.providerId, "codex-app-server");
+    assert.equal(attempt.manifest.run.route, "codex-app-server");
+    assert.equal(
+      attempt.manifest.run.implementationVersion,
+      "codex-app-server-provider-v1",
+    );
+    assert.equal(
+      attempt.manifest.run.protocolVersion,
+      "codex-app-server-isolation-v1",
+    );
+    assert.deepEqual(attempt.manifest.run.requested, {
+      model: "synthetic-model",
+      effort: "medium",
+      maxTokens: null,
+    });
+    assert.deepEqual(attempt.manifest.run.responded, {
+      model: "synthetic-model",
+      effort: "medium",
+      usage: {
+        available: true,
+        inputTokens: 11,
+        outputTokens: 7,
+        totalTokens: 18,
+      },
+      stopReason: null,
+    });
+    assert.equal(attempt.manifest.approval.applied, true);
+
+    const records = await readJsonLines(capture);
+    const threadStart = records.find((record) => record.threadStart !== undefined);
+    const turnStart = records.find((record) => record.turnStart !== undefined);
+    assert.ok(threadStart);
+    assert.ok(turnStart);
+    const hostedWire = JSON.stringify([threadStart, turnStart]);
+    for (const prohibited of [
+      "synthetic-invoice-basic",
+      "synthetic-cli-gate",
+      "synthetic-runtime",
+      "synthetic-scope",
+      "cli_policy_not_required",
+    ]) {
+      assert.equal(hostedWire.includes(prohibited), false, prohibited);
+    }
+    const thread = object(threadStart.threadStart);
+    const turn = object(turnStart.turnStart);
+    assert.equal(thread.model, "synthetic-model");
+    assert.equal(typeof thread.baseInstructions, "string");
+    assert.equal(turn.model, "synthetic-model");
+    assert.equal(turn.effort, "medium");
+    assert.equal(typeof turn.outputSchema, "object");
+    assert.equal(array(turn.input).length, 2);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("keeps unavailable Codex app-server usage metadata unknown", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-codex-"));
+  const attempts = path.join(temporary, "attempts");
+  const capture = path.join(temporary, "capture.jsonl");
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "run",
+        "--bundle",
+        FIXTURE,
+        ...codexAppServerArguments("provider-success-no-usage", capture),
+        "--attempt-root",
+        attempts,
+        ...approvalArguments("codex-stable"),
+        "--json",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stdout);
+    const summary = JSON.parse(result.stdout) as { attemptId: string };
+    const attempt = await readAttempt(path.join(attempts, summary.attemptId));
+    assert.deepEqual(attempt.manifest.run.responded.usage, { available: false });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("fails Codex app-server CLI runs before transport when approval is unusable", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-codex-"));
+  try {
+    const cases = [
+      { mode: "deny", expected: "approval_denied" },
+      { mode: "mismatch-scope", expected: "approval_response_invalid" },
+      { mode: "hang", expected: "approval_timeout", timeout: "100" },
+    ];
+    for (const [index, entry] of cases.entries()) {
+      const attempts = path.join(temporary, `attempts-${index}`);
+      const capture = path.join(temporary, `capture-${index}.jsonl`);
+      const approval = approvalArguments(entry.mode);
+      if (entry.timeout !== undefined) {
+        approval.push("--approval-timeout-ms", entry.timeout);
+      }
+      const result = await runCliWithin(
+        [
+          "run",
+          "--bundle",
+          FIXTURE,
+          ...codexAppServerArguments("provider-success", capture),
+          "--attempt-root",
+          attempts,
+          ...approval,
+          "--json",
+        ],
+        3_000,
+      );
+      assert.equal(result.status, 1, result.stdout);
+      assert.equal(
+        (JSON.parse(result.stdout) as { error: { code: string } }).error.code,
+        entry.expected,
+      );
+      await assert.rejects(readFile(capture), /ENOENT/u);
+      await assert.rejects(readdir(attempts), /ENOENT/u);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("rejects incomplete Codex app-server CLI configuration before runner execution", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-codex-"));
+  try {
+    const capture = path.join(temporary, "capture.jsonl");
+    const base = codexAppServerArguments("provider-success", capture);
+    const invalid = [
+      base,
+      [...base, ...approvalArguments("codex-stable"), "--max-tokens", "1"],
+      [...base, ...approvalArguments("codex-stable"), "--provider-id", "synthetic"],
+      base
+        .map((value) => (value === process.execPath ? "./synthetic-codex" : value))
+        .concat(approvalArguments("codex-stable")),
+    ];
+    for (const [index, arguments_] of invalid.entries()) {
+      const attempts = path.join(temporary, `invalid-attempts-${index}`);
+      const result = spawnSync(
+        process.execPath,
+        [
+          CLI,
+          "run",
+          "--bundle",
+          path.join(temporary, "missing-bundle"),
+          ...arguments_,
+          "--attempt-root",
+          attempts,
+          "--json",
+        ],
+        { encoding: "utf8" },
+      );
+      assert.equal(result.status, 2, result.stdout);
+      assert.equal(
+        (JSON.parse(result.stdout) as { error: { code: string } }).error.code,
+        "invalid_arguments",
+      );
+      await assert.rejects(readdir(attempts), /ENOENT/u);
+    }
+    await assert.rejects(readFile(capture), /ENOENT/u);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("distinguishes Codex app-server transport and document failures from success", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-codex-"));
+  try {
+    const cases = [
+      { mode: "hang", code: "provider_timeout" },
+      { mode: "crash", code: "provider_failed" },
+      { mode: "version-mismatch", code: "provider_failed" },
+      { mode: "malformed", code: "provider_failed" },
+      { mode: "success", code: "provider_document_schema_invalid" },
+    ];
+    for (const [index, entry] of cases.entries()) {
+      const { mode } = entry;
+      const attempts = path.join(temporary, `attempts-${index}`);
+      const capture = path.join(temporary, `capture-${index}.jsonl`);
+      const result = await runCliWithin(
+        [
+          "run",
+          "--bundle",
+          FIXTURE,
+          ...codexAppServerArguments(mode, capture, mode === "hang" ? 200 : 5_000),
+          "--attempt-root",
+          attempts,
+          ...approvalArguments("codex-stable"),
+          "--json",
+        ],
+        4_000,
+      );
+      assert.equal(result.status, 1, `${mode}: ${result.stdout}`);
+      const code = (JSON.parse(result.stdout) as { error: { code: string } }).error.code;
+      assert.equal(code, entry.code);
+      const attemptEntries = await readdir(attempts).catch(
+        (error: unknown) => {
+          if (objectWithCode(error).code === "ENOENT") return [];
+          throw error;
+        },
+      );
+      assert.deepEqual(attemptEntries, [], mode);
+    }
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -939,4 +1206,29 @@ async function runCliWithin(
       resolve({ status, stdout, stderr });
     });
   });
+}
+
+async function readJsonLines(file: string): Promise<Record<string, unknown>[]> {
+  return (await readFile(file, "utf8"))
+    .trim()
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+function object(value: unknown): Record<string, unknown> {
+  assert.equal(typeof value, "object");
+  assert.notEqual(value, null);
+  assert.equal(Array.isArray(value), false);
+  return value as Record<string, unknown>;
+}
+
+function array(value: unknown): unknown[] {
+  assert.ok(Array.isArray(value));
+  return value;
+}
+
+function objectWithCode(value: unknown): { code?: string } {
+  if (value === null || typeof value !== "object") return {};
+  return value as { code?: string };
 }

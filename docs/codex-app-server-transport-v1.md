@@ -160,6 +160,48 @@ strict document and model, effort, usage, and stop-reason metadata supplied by t
 plus the unchanged approval attestation for runner audit comparison. It performs no retry,
 parallel invocation, or fallback.
 
+## CLI selection and synthetic smoke
+
+`svbench run` selects this Provider only with `--provider codex-app-server`. The selection requires
+`--provider-command` to name an absolute isolation-capable executable, at least one explicit
+`--model`, and a command approval configuration from approval v1. `--provider-arg` and
+`--provider-env` are repeatable bounded process-prefix and environment-name settings. The Provider
+ID, route, implementation version, Codex CLI version, isolation protocol, and hosted protocol are
+fixed by the implementation rather than caller options. `--effort` is optional and limited to the
+fixed supported effort labels. The hosted contract has no maximum-token field, so a non-null
+`--max-tokens` is invalid for this Provider. Policy-required CLI runs remain deferred and fail before
+runner execution.
+
+Automated CLI coverage uses only the synthetic bundle, deterministic fake approval command, and
+fake app-server. A maintainer manual smoke may use an upstream-supported logged-in process boundary,
+but only with the checked-in fictional invoice image and a consumer-owned approval command that
+revalidates the exact selected runtime. A representative command shape is:
+
+```bash
+node scripts/svbench.mjs run \
+  --bundle fixtures/synthetic/invoice-basic \
+  --provider codex-app-server \
+  --provider-command "$SVBENCH_CODEX_EXECUTABLE" \
+  --model synthetic-smoke-model \
+  --effort medium \
+  --attempt-root .tmp/synthetic-codex-smoke-attempts \
+  --approval required \
+  --approval-command "$SVBENCH_APPROVAL_EXECUTABLE" \
+  --approval-gate-id synthetic-smoke-gate \
+  --approval-snapshot-digest aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --approval-runtime-identity synthetic-smoke-runtime \
+  --approval-runtime-digest bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --approval-scope-identity synthetic-smoke-scope \
+  --approval-scope-digest cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --approval-phase development \
+  --json
+```
+
+Both executable variables must resolve to absolute paths. The app-server executable must satisfy the
+isolation prelude below; the unmodified pinned Codex release does not. Smoke output stays under
+`.tmp`, uses no confidential corpus content, and must never be committed or attached to an Issue,
+pull request, log, or Actions artifact.
+
 ## Metadata
 
 The transport result contains only values exposed by the fixed protocol:
