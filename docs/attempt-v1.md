@@ -38,9 +38,9 @@ manual-smoke boundary is specified in
 
 `--attempt-key` is a caller-owned safe label (`[A-Za-z0-9._-]`, 1–64 characters) and defaults to
 `single`. `--attempt-root` defaults to `attempts` below the current working directory. A successful
-run creates a child directory named by the derived attempt identity. The CLI prints the case,
-attempt-key, attempt, and run identities, never the model document, input contents, local absolute
-paths, or provider diagnostics.
+run creates an attempt-identity child containing one artifact-identity child. The CLI prints the
+case, attempt-key, attempt, artifact, and run identities, never the model document, input contents,
+local absolute paths, or provider diagnostics.
 
 Command approval options and their exact request/response boundary are specified in
 [`docs/approval-v1.md`](approval-v1.md). Incomplete CLI approval options are invalid arguments and do
@@ -273,8 +273,9 @@ A finalized attempt contains only:
 
 ```text
 <attempt-root>/<attempt-id>/
-├── attempt.json
-└── document.json
+└── <artifact-id>/
+    ├── attempt.json
+    └── document.json
 ```
 
 `attempt.json` conforms to [`schemas/attempt-v1.schema.json`](../schemas/attempt-v1.schema.json).
