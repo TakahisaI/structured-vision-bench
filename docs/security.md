@@ -204,9 +204,11 @@ or secret-shaped text.
 
 Missing usage, model, effort, or stop-reason metadata is represented as unavailable, never zero or a
 request-derived guess. Provider metadata and sanitizer findings are accepted only as bounded safe
-labels; a non-null persisted finding path must exactly match the consumer's bounded pointer
-allowlist. Full-segment wildcards remain rejected until Issue #45 enables them on top of the
-independently anchored artifact identity introduced by Issue #47. The canonical exact pointers and their digest are persisted and bound into the run
+labels; a non-null persisted finding path must match the consumer's bounded pointer allowlist. The
+allowlist may contain exact pointers or one full-segment array wildcard. The runner resolves the
+wildcard only against an actual pre-sanitization array and accepts one canonical, in-range concrete
+index; numeric object members and multi-segment expansion are rejected. The canonical patterns and
+their digest are persisted and bound into the run
 sanitizer identity, so the untrusted attempt reader rejects both a changed path and a coordinated
 allowlist/digest change.
 Allowlist strings containing isolated UTF-16 surrogates fail configuration preflight before external

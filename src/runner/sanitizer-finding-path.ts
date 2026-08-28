@@ -1,3 +1,5 @@
+import type { JsonValue } from "../bundle/json.js";
+
 export const MAX_SANITIZER_FINDING_PATH_LENGTH = 1024;
 export const MAX_SANITIZER_FINDING_PATH_PATTERNS = 100;
 
@@ -11,9 +13,10 @@ export function snapshotSanitizerFindingPathPatterns(value: unknown): readonly s
   const patterns: string[] = [];
   const seen = new Set<string>();
   for (const pattern of value) {
+    const segments = isBoundedJsonPointer(pattern) ? pointerSegments(pattern) : [];
     if (
       !isBoundedJsonPointer(pattern) ||
-      pointerSegments(pattern).includes("*") ||
+      segments.filter((segment) => segment === "*").length > 1 ||
       seen.has(pattern)
     ) {
       throw new Error();
@@ -33,20 +36,94 @@ export function isSanitizerFindingPath(value: unknown): value is string {
   );
 }
 
-/** Matches only a consumer-owned exact pointer. */
+/** Matches an exact pointer or one array wildcard against the pre-sanitization document. */
 export function sanitizerFindingPathIsAllowed(
   path: string,
   patterns: readonly string[],
+  document: JsonValue,
 ): boolean {
-  return isSanitizerFindingPath(path) && patterns.includes(path);
+  if (!isSanitizerFindingPath(path)) return false;
+  const pathSegments = pointerSegments(path);
+  return patterns.some((pattern) => {
+    if (pattern === path) return true;
+    const patternSegments = pointerSegments(pattern);
+    return (
+      wildcardPatternMatchesPath(pathSegments, patternSegments) &&
+      wildcardIndexExistsInDocument(document, pathSegments, patternSegments)
+    );
+  });
 }
 
-/** Re-checks a persisted path against the committed consumer patterns. */
+/** Re-checks a persisted path shape against committed patterns without rediscovering document data. */
 export function sanitizerFindingPathMatchesPatterns(
   path: string,
   patterns: readonly string[],
 ): boolean {
-  return sanitizerFindingPathIsAllowed(path, patterns);
+  if (!isSanitizerFindingPath(path)) return false;
+  const pathSegments = pointerSegments(path);
+  return patterns.some((pattern) => {
+    if (pattern === path) return true;
+    return wildcardPatternMatchesPath(pathSegments, pointerSegments(pattern));
+  });
+}
+
+function wildcardPatternMatchesPath(
+  pathSegments: readonly string[],
+  patternSegments: readonly string[],
+): boolean {
+  if (pathSegments.length !== patternSegments.length) return false;
+  const wildcardIndex = patternSegments.indexOf("*");
+  if (
+    wildcardIndex < 0 ||
+    patternSegments.lastIndexOf("*") !== wildcardIndex ||
+    !isCanonicalArrayIndex(pathSegments[wildcardIndex]!)
+  ) {
+    return false;
+  }
+  return patternSegments.every(
+    (segment, index) => segment === "*" || segment === pathSegments[index],
+  );
+}
+
+function wildcardIndexExistsInDocument(
+  document: JsonValue,
+  pathSegments: readonly string[],
+  patternSegments: readonly string[],
+): boolean {
+  let current: JsonValue = document;
+  for (let index = 0; index < pathSegments.length; index += 1) {
+    const pathSegment = pathSegments[index]!;
+    if (patternSegments[index] === "*") {
+      if (!Array.isArray(current) || !isCanonicalArrayIndex(pathSegment)) return false;
+      const arrayIndex = Number(pathSegment);
+      if (arrayIndex >= current.length) return false;
+      return true;
+    }
+    const member = decodePointerSegment(pathSegment);
+    if (Array.isArray(current)) {
+      if (!isCanonicalArrayIndex(pathSegment)) return false;
+      const arrayIndex = Number(pathSegment);
+      if (arrayIndex >= current.length) return false;
+      current = current[arrayIndex]!;
+    } else if (
+      current !== null &&
+      typeof current === "object" &&
+      Object.hasOwn(current, member)
+    ) {
+      current = current[member]!;
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isCanonicalArrayIndex(value: string): boolean {
+  return /^(?:0|[1-9][0-9]*)$/u.test(value) && Number(value) <= 0xffff_ffff - 1;
+}
+
+function decodePointerSegment(value: string): string {
+  return value.replaceAll("~1", "/").replaceAll("~0", "~");
 }
 
 function isBoundedJsonPointer(value: unknown): value is string {
