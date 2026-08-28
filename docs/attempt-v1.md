@@ -114,9 +114,10 @@ summary is written to stdout; human mode writes failures to stderr.
 8. **Sanitization and binding.** When the consumer decision requires sanitization, the sanitizer must
    return a sanitized document plus the exact current identity, policy digest/version, target identity
    digest, and policy binding digest. Findings are reduced to bounded value-free codes/classifications;
-   paths are either null or bounded pointers exactly matched by the consumer's snapshotted
-   finding-path allowlist. Full-segment wildcards are rejected until Issue #45 enables their
-   structural matching on the post-sanitization artifact identity introduced by Issue #47. The canonical allowlist and its digest are persisted, and the run
+   paths are either null or bounded concrete pointers matched by the consumer's snapshotted
+   finding-path allowlist. The allowlist accepts exact pointers or one full-segment `*`; the runner
+   matches that wildcard to one canonical in-range index of an actual array in the
+   pre-sanitization document. The canonical allowlist and its digest are persisted, and the run
    sanitizer binding commits that digest together with the policy binding. When
    sanitization is not required, the strict canonical provider document becomes the formal document
    and no sanitizer/policy/target-binding block is emitted.
@@ -291,8 +292,8 @@ It records:
 - approval status, gate/protocol/snapshot/runtime/scope/phase metadata and the complete mirrored
   consumer requirement attestation;
 - when sanitizer is required, sanitizer status/version, policy digests, policy binding identity/
-  binding digest, finding-path allowlist version/digest/canonical exact pointers, and bounded
-  value-free findings;
+  binding digest, finding-path allowlist version/digest/canonical exact or single-wildcard patterns,
+  and bounded concrete value-free findings;
 - passed stage records for approval, provider, parse, and schema validation, plus policy-target
   preflight/sanitizer/target binding only when sanitizer is required;
 - post-sanitization artifact identity version/digest, exact stored `document.json` digest, and timing.
@@ -311,9 +312,11 @@ artifact-child identity changes, consumer-decision changes, and sanitizer policy
 decision from `documentKind`; without it, the stored decision digest and shape are still checked. It
 hashes the exact stored document bytes, not a reserialized value. It also recomputes the
 finding-path allowlist digest and run sanitizer binding. It rejects any non-null finding that does
-not exactly match the committed pointers before returning an attempt to comparison. A coordinated
-path plus allowlist/digest change fails the recomputed run identity. Finding tuple and document
-digest changes are also committed by artifact identity; changing those fields and the manifest's
+not match a committed exact or single-wildcard pattern shape before returning an attempt to
+comparison. Wildcard indices were already checked against the pre-sanitization document before
+publication. A changed path that still matches the same wildcard changes artifact identity; a
+coordinated path plus allowlist/digest change also fails the recomputed run identity. Finding tuple
+and document digest changes are also committed by artifact identity; changing those fields and the manifest's
 artifact ID together still fails against the digest-named child directory.
 
 The reader recognizes only an attempt-ID directory containing one artifact-ID child with the final

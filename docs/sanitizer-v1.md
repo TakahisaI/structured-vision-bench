@@ -80,26 +80,28 @@ fields; `findings` is the only optional field:
 Unknown or missing fields, duplicate JSON members, invalid UTF-8, trailing payloads, identity
 mismatch, and malformed findings fail closed. Findings contain only bounded safe
 codes/classifications, severity, a hard-gate boolean, and an optional JSON Pointer. A non-null path
-is persisted only when it exactly matches a consumer-owned `allowedFindingPathPatterns` entry.
-Entries and response paths are ordinary bounded RFC 6901 pointers and may not contain a full `*`
-segment. `null` is always permitted. Missing exact allowlist coverage, unsafe pointers, and malformed
-patterns fail closed without echoing the path. Array wildcard authorization is a separate contract
-tracked by Issue #45 because concrete indices are known only after provider execution and require an
-independently anchored post-sanitization artifact identity.
+is persisted only when it matches a consumer-owned `allowedFindingPathPatterns` entry. A pattern may
+be an exact bounded RFC 6901 pointer or contain one full-segment `*`. A response path is always
+concrete and never contains a full-segment wildcard. The wildcard matches exactly one canonical
+array index segment only when the corresponding pre-sanitization location is an actual array and the
+index is in range. It never authorizes a numeric object member, leading-zero index, out-of-range
+index, or multiple path segments. `null` is always
+permitted. Missing coverage, unsafe pointers, and malformed patterns fail closed without echoing the
+path.
 
 A successful sanitizer manifest records the canonical sorted patterns, allowlist version, and
 domain-separated allowlist digest. The run sanitizer binding commits both that digest and the
 target-bound policy binding digest. `readAttempt()` recomputes these commitments and requires every
-non-null finding path to exactly match the committed allowlist. Changing a path alone fails exact
-matching; changing the allowlist and its digest changes the recomputed run identity. This metadata
-contains consumer-authorized exact pointers only, never a document member discovered outside the
-allowlist or a document value. After sanitization, artifact identity v1 additionally commits the
+non-null finding path to match the committed exact or single-wildcard pattern shape. The reader does
+not rediscover the confidential pre-sanitization document; the runner performs that structural check
+before publication. Changing the allowlist and its digest changes the recomputed run identity. This
+metadata contains consumer-authorized patterns and concrete value-free finding paths, never a
+document value. After sanitization, artifact identity v1 additionally commits the
 formal-document digest, sanitizer identity/binding, and ordered canonical
 `(code, severity, classification, hardGate, path)` tuples. The manifest records that identity, while
 the digest-named artifact child directory supplies the external anchor used by `readAttempt()`.
 Coordinated changes to a finding tuple and the manifest identity are rejected while the child
-basename remains fixed. Issue #45 may therefore enable full-segment array wildcard matching without
-relying on a self-contained manifest digest.
+basename remains fixed.
 
 Programmatic and CLI allowlist patterns must contain only Unicode scalar values. An isolated UTF-16
 surrogate is rejected during configuration preflight, before approval, provider input access, or

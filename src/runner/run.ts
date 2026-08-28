@@ -1603,6 +1603,7 @@ async function executeSanitizer(
     const findings = normalizeFindings(
       response.findings,
       settings.allowedFindingPathPatterns ?? [],
+      sanitizerDocument,
     );
     return {
       document: sanitizedDocument,
@@ -1632,6 +1633,7 @@ async function executeSanitizer(
 function normalizeFindings(
   findings: SanitizerFinding[] | undefined,
   allowedFindingPathPatterns?: readonly string[],
+  preSanitizationDocument?: JsonValue,
 ): SanitizerFinding[] {
   if (findings === undefined) return [];
   if (!Array.isArray(findings) || findings.length > 100) {
@@ -1659,10 +1661,12 @@ function normalizeFindings(
         (typeof finding.path !== "string" ||
           !isSanitizerFindingPath(finding.path) ||
           (allowedFindingPathPatterns !== undefined &&
-            !sanitizerFindingPathIsAllowed(
-              finding.path,
-              allowedFindingPathPatterns,
-            ))))
+            (preSanitizationDocument === undefined ||
+              !sanitizerFindingPathIsAllowed(
+                finding.path,
+                allowedFindingPathPatterns,
+                preSanitizationDocument,
+              )))))
     ) {
       throw new RunnerError("sanitizer_response_invalid", "sanitizer findings are invalid");
     }

@@ -1823,6 +1823,13 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
             hardGate: false,
             path: "/items/0/note",
           },
+          {
+            code: "synthetic-array-field-second",
+            severity: "warning",
+            classification: "synthetic-redaction",
+            hardGate: false,
+            path: "/items/1/note",
+          },
         ],
       };
     },
@@ -1838,7 +1845,11 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         lines: [],
         totalAmount: 0,
         forbiddenRawField: "SYNTHETIC-RAW-VALUE",
-        items: [{ note: "SYNTHETIC-ARRAY-RAW-VALUE" }],
+        items: [
+          { note: "SYNTHETIC-ARRAY-RAW-VALUE-A" },
+          { note: "SYNTHETIC-ARRAY-RAW-VALUE-B" },
+        ],
+        numericObject: { "0": { note: "SYNTHETIC-OBJECT-RAW-VALUE" } },
       },
     });
     const sanitizerSettings = {
@@ -1855,7 +1866,8 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
       allowedFindingPathPatterns: [
         "/forbiddenRawField",
         "/invoiceNumber",
-        "/items/0/note",
+        "/items/*/note",
+        "/numericObject/*/note",
       ],
     } as const;
     let invalidConfigurationProviderCalls = 0;
@@ -1895,7 +1907,8 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
     assert.deepEqual(sanitizerManifest.allowedFindingPathPatterns, [
       "/forbiddenRawField",
       "/invoiceNumber",
-      "/items/0/note",
+      "/items/*/note",
+      "/numericObject/*/note",
     ]);
     assert.equal(
       sanitizerManifest.findingPathAllowlistDigest,
@@ -1923,10 +1936,25 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         hardGate: false,
         path: "/items/0/note",
       },
+      {
+        code: "synthetic-array-field-second",
+        severity: "warning",
+        classification: "synthetic-redaction",
+        hardGate: false,
+        path: "/items/1/note",
+      },
     ]);
     assert.equal(attempt.manifest.artifactIdentityVersion, 1);
     assert.equal(attempt.manifest.artifactId, result.artifactId);
     assert.equal(path.basename(attempt.artifactDirectory), result.artifactId);
+    const wildcardAttemptSchema = parseJson(
+      decodeUtf8Strict(
+        await readFile("schemas/attempt-v1.schema.json"),
+        "attempt schema",
+      ),
+      "attempt schema",
+    );
+    assert.deepEqual(validateJsonSchema(wildcardAttemptSchema, attempt.manifest), []);
     assert.equal(isJsonObject(attempt.document) && "forbiddenRawField" in attempt.document, false);
     const storedAttempt = Buffer.concat([
       await readFile(path.join(result.artifactDirectory, "attempt.json")),
@@ -1990,6 +2018,30 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         ...validResponse,
         findings: [
           {
+            code: "synthetic-numeric-object-member",
+            severity: "warning",
+            classification: "synthetic-redaction",
+            hardGate: false,
+            path: "/numericObject/0/note",
+          },
+        ],
+      },
+      {
+        ...validResponse,
+        findings: [
+          {
+            code: "synthetic-out-of-range-index",
+            severity: "warning",
+            classification: "synthetic-redaction",
+            hardGate: false,
+            path: "/items/2/note",
+          },
+        ],
+      },
+      {
+        ...validResponse,
+        findings: [
+          {
             code: "synthetic-unallowlisted-path",
             severity: "warning",
             classification: "synthetic-redaction",
@@ -2016,7 +2068,21 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         runBundle({
           bundleDirectory: bundle,
           attemptRoot: path.join(temporary, `invalid-response-${index}`),
-          provider: createMockProvider(),
+          provider: createMockProvider({
+            document: {
+              documentKind: "synthetic_invoice",
+              invoiceNumber: "SYNTHETIC-001",
+              issuedAt: "2026-01-01",
+              currency: "JPY",
+              lines: [],
+              totalAmount: 0,
+              items: [
+                { note: "SYNTHETIC-ARRAY-RAW-VALUE-A" },
+                { note: "SYNTHETIC-ARRAY-RAW-VALUE-B" },
+              ],
+              numericObject: { "0": { note: "SYNTHETIC-OBJECT-RAW-VALUE" } },
+            },
+          }),
           sanitizerRequirement: syntheticRequirement(true),
           sanitizer: {
             ...sanitizerSettings,
@@ -2136,24 +2202,28 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
     );
     const coordinatedTamperedManifest = JSON.parse(
       await readFile(coordinatedTamperedManifestPath, "utf8"),
-    ) as {
+    ) as AttemptManifest;
+    coordinatedTamperedManifest.sanitizer!.findings[1]!.path = "/items/999/note";
+    coordinatedTamperedManifest.artifactId = computeArtifactIdentity({
+      attemptId: coordinatedTamperedManifest.attemptId,
+      documentSha256: coordinatedTamperedManifest.document.sha256,
       sanitizer: {
-        allowedFindingPathPatterns: string[];
-        findingPathAllowlistDigest: string;
-        findings: Array<{ path: string | null }>;
-      };
-    };
-    coordinatedTamperedManifest.sanitizer.findings[1]!.path =
-      "/items/999/note";
-    coordinatedTamperedManifest.sanitizer.allowedFindingPathPatterns =
-      coordinatedTamperedManifest.sanitizer.allowedFindingPathPatterns.map(
-        (pattern) =>
-          pattern === "/items/0/note" ? "/items/999/note" : pattern,
-      );
-    coordinatedTamperedManifest.sanitizer.findingPathAllowlistDigest =
-      computeSanitizerFindingPathAllowlistDigest(
-        coordinatedTamperedManifest.sanitizer.allowedFindingPathPatterns,
-      );
+        id: coordinatedTamperedManifest.sanitizer!.id!,
+        protocolVersion: 1,
+        bindingDigest: computeSanitizerExecutionBindingDigest({
+          policyBindingDigest: coordinatedTamperedManifest.sanitizer!.policyBindingDigest!,
+          findingPathAllowlistDigest:
+            coordinatedTamperedManifest.sanitizer!.findingPathAllowlistDigest,
+        }),
+        findings: coordinatedTamperedManifest.sanitizer!.findings.map((finding) => ({
+          code: finding.code,
+          severity: finding.severity,
+          classification: finding.classification,
+          hardGate: finding.hardGate,
+          path: finding.path ?? null,
+        })),
+      },
+    }).artifactId;
     await writeFile(
       coordinatedTamperedManifestPath,
       `${JSON.stringify(coordinatedTamperedManifest)}\n`,
@@ -2178,10 +2248,10 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
     const tupleTamperedManifest = JSON.parse(
       await readFile(tupleTamperedManifestPath, "utf8"),
     ) as AttemptManifest;
-    const firstPath = tupleTamperedManifest.sanitizer!.findings[0]!.path ?? null;
-    tupleTamperedManifest.sanitizer!.findings[0]!.path =
-      tupleTamperedManifest.sanitizer!.findings[1]!.path ?? null;
-    tupleTamperedManifest.sanitizer!.findings[1]!.path = firstPath;
+    const firstPath = tupleTamperedManifest.sanitizer!.findings[1]!.path ?? null;
+    tupleTamperedManifest.sanitizer!.findings[1]!.path =
+      tupleTamperedManifest.sanitizer!.findings[2]!.path ?? null;
+    tupleTamperedManifest.sanitizer!.findings[2]!.path = firstPath;
     tupleTamperedManifest.artifactId = computeArtifactIdentity({
       attemptId: tupleTamperedManifest.attemptId,
       documentSha256: tupleTamperedManifest.document.sha256,
