@@ -18,6 +18,7 @@ import {
   runCodexAppServerProcess,
   type CodexAppServerProcessOptions,
   type CodexAppServerProcessRequest,
+  type CodexAppServerProcessStartAuthorization,
   type LinuxProcessTable,
 } from "../src/provider/codex-app-server-process.js";
 import { MAX_PROVIDER_INPUT_BYTES } from "../src/bundle/validate-bundle.js";
@@ -170,6 +171,142 @@ test("runs one fixed app-server process in an isolated empty workspace", async (
       restoreEnvironment("SVBENCH_PARENT_CANARY", previousParent);
       restoreEnvironment("SVBENCH_ALLOWED_CANARY", previousAllowed);
     }
+  });
+});
+
+test("snapshots hostile start-authorization entries before validating them", async (context) => {
+  await context.test("does not recopy a name that changes after validation", async () => {
+    await withFixture("success", async ({ options, capture }) => {
+      let nameReads = 0;
+      const entry = new Proxy<[string, string]>(
+        ["SVBENCH_ALLOWED_CANARY", "synthetic-runtime-a"],
+        {
+          get(target, property, receiver) {
+            if (property === "0") {
+              nameReads += 1;
+              return nameReads === 1 ? "SVBENCH_ALLOWED_CANARY" : "NODE_OPTIONS";
+            }
+            return Reflect.get(target, property, receiver) as unknown;
+          },
+        },
+      );
+      const result = await runCodexAppServerProcess(
+        { ...options, envAllowlist: ["SVBENCH_ALLOWED_CANARY"] },
+        request(readCounter()),
+        undefined,
+        async () => ({
+          allowedEnvironment: [entry],
+          finalize() {
+            return undefined;
+          },
+        }),
+      );
+
+      assert.equal(result.respondedModel, "synthetic-model");
+      assert.equal(nameReads, 1);
+      const boundary = (await readCapture(capture)).find(
+        (record) => record.phase === "app-server",
+      );
+      assert.ok(boundary);
+      assert.equal(boundary.allowedCanary, "synthetic-runtime-a");
+      assert.equal(stringArray(boundary.environmentKeys).includes("NODE_OPTIONS"), false);
+    });
+  });
+
+  await context.test("does not recopy a value that changes after validation", async () => {
+    await withFixture("success", async ({ options, capture }) => {
+      let valueReads = 0;
+      const entry = new Proxy<[string, string]>(
+        ["SVBENCH_ALLOWED_CANARY", "synthetic-runtime-a"],
+        {
+          get(target, property, receiver) {
+            if (property === "1") {
+              valueReads += 1;
+              return valueReads === 1 ? "synthetic-runtime-a" : "synthetic-runtime-b";
+            }
+            return Reflect.get(target, property, receiver) as unknown;
+          },
+        },
+      );
+      const result = await runCodexAppServerProcess(
+        { ...options, envAllowlist: ["SVBENCH_ALLOWED_CANARY"] },
+        request(readCounter()),
+        undefined,
+        async () => ({
+          allowedEnvironment: [entry],
+          finalize() {
+            return undefined;
+          },
+        }),
+      );
+
+      assert.equal(result.respondedModel, "synthetic-model");
+      assert.equal(valueReads, 1);
+      const boundary = (await readCapture(capture)).find(
+        (record) => record.phase === "app-server",
+      );
+      assert.ok(boundary);
+      assert.equal(boundary.allowedCanary, "synthetic-runtime-a");
+    });
+  });
+});
+
+test("rejects a start finalizer that does not complete synchronously", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const reads = readCounter();
+    const delayed = {
+      allowedEnvironment: [],
+      async finalize() {
+        await Promise.resolve();
+        throw new Error("synthetic delayed authorization failure");
+      },
+    } as unknown as CodexAppServerProcessStartAuthorization;
+
+    await assert.rejects(
+      runCodexAppServerProcess(
+        options,
+        request(reads),
+        undefined,
+        async () => delayed,
+      ),
+      stableProcessError,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
+    assert.equal(
+      (await readCapture(capture)).some((record) => record.phase === "app-server"),
+      false,
+    );
+  });
+});
+
+test("rejects an internal abort requested by the synchronous finalizer", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const reads = readCounter();
+    const parent = new AbortController();
+
+    await assert.rejects(
+      runCodexAppServerProcess(
+        options,
+        request(reads),
+        parent.signal,
+        async () => ({
+          allowedEnvironment: [],
+          finalize() {
+            parent.abort();
+            return undefined;
+          },
+        }),
+      ),
+      stableProcessError,
+    );
+
+    assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
+    assert.equal(
+      (await readCapture(capture)).some((record) => record.phase === "app-server"),
+      false,
+    );
   });
 });
 

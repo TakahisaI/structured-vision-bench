@@ -5,6 +5,7 @@ import {
   runCodexAppServerProcess,
   type CodexAppServerProcessOptions,
   type CodexAppServerProcessRequest,
+  type CodexAppServerProcessStartAuthorization,
 } from "./codex-app-server-process.js";
 import type {
   ApprovalResponse,
@@ -137,10 +138,33 @@ export function createCodexAppServerProvider(
           options.process,
           request,
           controller.signal,
-          async (processSignal) => {
-            await revalidate(options, claimed.approval, processSignal);
+          async (processSignal): Promise<CodexAppServerProcessStartAuthorization> => {
             assertActive(processSignal);
+            const revalidated = snapshotApproval(
+              await options.revalidateTransport(claimed.approval, processSignal),
+            );
+            assertActive(processSignal);
+            assertUsableApproval(revalidated);
+            if (!approvalEqual(revalidated, claimed.approval)) throw new Error();
             if (claimed.generation !== generation) throw new Error();
+            const allowedEnvironment = snapshotAllowedEnvironment(
+              options.process.envAllowlist ?? [],
+            );
+            return Object.freeze({
+              allowedEnvironment,
+              finalize(): undefined {
+                assertActive(processSignal);
+                assertAllowedEnvironmentCurrent(
+                  allowedEnvironment,
+                  options.process.envAllowlist ?? [],
+                );
+                assertActive(processSignal);
+                assertUsableApproval(revalidated);
+                if (!approvalEqual(revalidated, claimed.approval)) throw new Error();
+                if (claimed.generation !== generation) throw new Error();
+                return undefined;
+              },
+            });
           },
         );
         return {
@@ -275,6 +299,27 @@ async function revalidate(
   assertUsableApproval(actual);
   if (!approvalEqual(actual, expected)) throw new Error();
   return actual;
+}
+
+function snapshotAllowedEnvironment(
+  allowlist: readonly string[],
+): readonly (readonly [string, string])[] {
+  const allowed: Array<readonly [string, string]> = [];
+  for (const name of allowlist) {
+    const value = process.env[name];
+    if (value !== undefined) allowed.push(Object.freeze([name, value]));
+  }
+  return Object.freeze(allowed);
+}
+
+function assertAllowedEnvironmentCurrent(
+  expected: readonly (readonly [string, string])[],
+  allowlist: readonly string[],
+): void {
+  const expectedByName = new Map(expected);
+  for (const name of allowlist) {
+    if (process.env[name] !== expectedByName.get(name)) throw new Error();
+  }
 }
 
 function snapshotInvocation(
@@ -413,6 +458,12 @@ function snapshotApproval(value: unknown): ApprovalResponse {
   ] as const;
   const optional = ["checkedAt", "expiresAt", "reasonCode"] as const;
   const allowed = new Set<string>([...required, ...optional]);
+  const hasCheckedAt = Object.hasOwn(approval, "checkedAt");
+  const hasExpiresAt = Object.hasOwn(approval, "expiresAt");
+  const hasReasonCode = Object.hasOwn(approval, "reasonCode");
+  const checkedAt = hasCheckedAt ? approval.checkedAt : undefined;
+  const expiresAt = hasExpiresAt ? approval.expiresAt : undefined;
+  const reasonCode = hasReasonCode ? approval.reasonCode : undefined;
   if (
     required.some((key) => !Object.hasOwn(approval, key)) ||
     Object.keys(approval).some((key) => !allowed.has(key)) ||
@@ -434,9 +485,9 @@ function snapshotApproval(value: unknown): ApprovalResponse {
     typeof approval.sanitizerRequired !== "boolean" ||
     typeof approval.policyRequired !== "boolean" ||
     !isSafeLabel(approval.sanitizerRequirementReason) ||
-    !isOptionalDateTime(approval.checkedAt) ||
-    !isOptionalDateTime(approval.expiresAt) ||
-    (approval.reasonCode !== undefined && !isSafeLabel(approval.reasonCode))
+    !isOptionalDateTime(checkedAt) ||
+    !isOptionalDateTime(expiresAt) ||
+    (reasonCode !== undefined && !isSafeLabel(reasonCode))
   ) {
     throw new Error();
   }
@@ -459,18 +510,21 @@ function snapshotApproval(value: unknown): ApprovalResponse {
     sanitizerRequired: approval.sanitizerRequired,
     policyRequired: approval.policyRequired,
     sanitizerRequirementReason: approval.sanitizerRequirementReason,
-    ...(Object.hasOwn(approval, "checkedAt") ? { checkedAt: approval.checkedAt } : {}),
-    ...(Object.hasOwn(approval, "expiresAt") ? { expiresAt: approval.expiresAt } : {}),
-    ...(Object.hasOwn(approval, "reasonCode") ? { reasonCode: approval.reasonCode } : {}),
+    ...(hasCheckedAt ? { checkedAt } : {}),
+    ...(hasExpiresAt ? { expiresAt } : {}),
+    ...(hasReasonCode ? { reasonCode } : {}),
   } as ApprovalResponse);
 }
 
 function assertUsableApproval(approval: ApprovalResponse): void {
+  const expiresAt = Object.hasOwn(approval, "expiresAt")
+    ? approval.expiresAt
+    : undefined;
   if (
     !approval.approved ||
-    (approval.expiresAt !== undefined &&
-      approval.expiresAt !== null &&
-      Date.parse(approval.expiresAt) <= Date.now())
+    (expiresAt !== undefined &&
+      expiresAt !== null &&
+      Date.parse(expiresAt) <= Date.now())
   ) {
     throw new Error();
   }
@@ -500,7 +554,11 @@ function approvalEqual(left: ApprovalResponse, right: ApprovalResponse): boolean
     "expiresAt",
     "reasonCode",
   ] as const;
-  return keys.every((key) => (left[key] ?? null) === (right[key] ?? null));
+  return keys.every((key) => {
+    const leftValue = Object.hasOwn(left, key) ? left[key] : null;
+    const rightValue = Object.hasOwn(right, key) ? right[key] : null;
+    return (leftValue ?? null) === (rightValue ?? null);
+  });
 }
 
 function requestedEqual(

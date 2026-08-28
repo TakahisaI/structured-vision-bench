@@ -112,9 +112,14 @@ export type CodexAppServerProcessOptions = Readonly<{
   outputLimitBytes?: number;
 }>;
 
+export type CodexAppServerProcessStartAuthorization = Readonly<{
+  allowedEnvironment: readonly (readonly [string, string])[];
+  finalize(): undefined;
+}>;
+
 export type CodexAppServerProcessStartGuard = (
   signal: AbortSignal,
-) => Promise<void>;
+) => Promise<CodexAppServerProcessStartAuthorization>;
 
 export type LinuxProcessTable = Readonly<{
   listProcessIds(): Promise<readonly string[]>;
@@ -560,7 +565,13 @@ async function runConnectedProcess(
   startGuard: CodexAppServerProcessStartGuard | undefined,
 ): Promise<CodexAppServerProtocolResult> {
   const controller = new AbortController();
-  const abort = (): void => controller.abort();
+  const guardController = startGuard === undefined ? undefined : new AbortController();
+  let abortRequested = false;
+  const abort = (): void => {
+    abortRequested = true;
+    controller.abort();
+    guardController?.abort();
+  };
   parentSignal?.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(abort, options.timeoutMs);
   let child: ChildProcessWithoutNullStreams | undefined;
@@ -577,13 +588,24 @@ async function runConnectedProcess(
   try {
     const arguments_ = appServerArguments(options, workspace);
     assertActive(parentSignal);
-    if (startGuard !== undefined) {
-      await startGuard(controller.signal);
-      assertActive(controller.signal);
-      assertActive(parentSignal);
+    let allowedEnvironment: readonly (readonly [string, string])[];
+    if (startGuard === undefined) {
+      allowedEnvironment = snapshotAllowedEnvironment(options.envAllowlist);
+    } else {
+      const authorization = snapshotStartAuthorization(
+        await startGuard(guardController!.signal),
+        options.envAllowlist,
+      );
+      const finalizerResult: unknown = authorization.finalize();
+      if (finalizerResult !== undefined) {
+        void Promise.resolve(finalizerResult).catch(() => undefined);
+        throw new Error();
+      }
+      if (abortRequested) throw new Error();
+      allowedEnvironment = authorization.allowedEnvironment;
     }
     const environment = snapshotSpawnEnvironment(
-      options.envAllowlist,
+      allowedEnvironment,
       workspace.environment,
     );
     child = spawn(options.executable, arguments_, {
@@ -816,19 +838,61 @@ async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Prom
 }
 
 function snapshotSpawnEnvironment(
-  allowlist: readonly string[],
+  allowed: readonly (readonly [string, string])[],
   privateEnvironment: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
   const environment = Object.create(null) as NodeJS.ProcessEnv;
-  for (const name of allowlist) {
-    const value = process.env[name];
-    if (value !== undefined) environment[name] = value;
-  }
+  for (const [name, value] of allowed) environment[name] = value;
   for (const name of Object.keys(privateEnvironment)) {
     const value = privateEnvironment[name];
     if (value !== undefined) environment[name] = value;
   }
   return environment;
+}
+
+function snapshotAllowedEnvironment(
+  allowlist: readonly string[],
+): readonly (readonly [string, string])[] {
+  const allowed: Array<readonly [string, string]> = [];
+  for (const name of allowlist) {
+    const value = process.env[name];
+    if (value !== undefined) allowed.push(Object.freeze([name, value]));
+  }
+  return Object.freeze(allowed);
+}
+
+function snapshotStartAuthorization(
+  value: CodexAppServerProcessStartAuthorization,
+  allowlist: readonly string[],
+): CodexAppServerProcessStartAuthorization {
+  if (value === null || typeof value !== "object") throw new Error();
+  const finalize = value.finalize;
+  const source = value.allowedEnvironment;
+  if (typeof finalize !== "function" || !Array.isArray(source)) throw new Error();
+  const allowedNames = new Set(allowlist);
+  const seen = new Set<string>();
+  const allowed: Array<readonly [string, string]> = [];
+  for (const entry of source) {
+    if (!Array.isArray(entry)) throw new Error();
+    const length = entry.length;
+    const name = entry[0];
+    const environmentValue = entry[1];
+    if (
+      length !== 2 ||
+      typeof name !== "string" ||
+      typeof environmentValue !== "string" ||
+      !allowedNames.has(name) ||
+      seen.has(name)
+    ) {
+      throw new Error();
+    }
+    seen.add(name);
+    allowed.push(Object.freeze([name, environmentValue]));
+  }
+  return Object.freeze({
+    allowedEnvironment: Object.freeze(allowed),
+    finalize: Function.prototype.bind.call(finalize, undefined),
+  });
 }
 
 async function waitForProcessGroupSettlement(processGroupId: number): Promise<void> {

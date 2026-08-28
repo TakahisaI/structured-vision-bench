@@ -146,13 +146,18 @@ match, then revalidates once more immediately before starting app-server. The pr
 the private workspace and writes the fixed model catalog before invoking that Provider-owned start
 guard. After the guard confirms the exact attestation, current generation, signal, and expiry, no
 asynchronous operation occurs before `spawn()`. Allowlisted environment values are also read only
-after the guard succeeds and are synchronously snapshotted for that immediate spawn. Missing,
-denied, expired, changed, or reused authorization fails before process start and before any of the
-four input callbacks. Sanitizer-required authorization must match the exact consumer decision but
-does not send policy or binding data to app-server; the runner applies the target-bound sanitizer
-after the strict document returns and before schema validation or publication. A later prepare
-aborts and waits for any in-flight invocation and its process/workspace cleanup before it can
-authorize another invocation.
+after the guard succeeds and are synchronously snapshotted for that immediate spawn. Missing, denied,
+expired, changed, or reused authorization fails before process start and before any of the four input
+callbacks. Approval snapshots and equality checks use only validated own data; inherited optional
+metadata and its getters are ignored. Sanitizer-required authorization must match the exact consumer
+decision but does not send policy or binding data to app-server; the runner applies the target-bound
+sanitizer after the strict document returns and before schema validation or publication. A later
+prepare aborts and waits for any in-flight invocation and its process/workspace cleanup before it can
+authorize another invocation. After the synchronous finalizer returns, the process client checks only
+its private primitive abort state before constructing the environment and spawning; it does not read
+consumer-reachable signal properties in that interval. The guard receives a dedicated relay signal,
+while timeout, cancellation, protocol, and input-read settlement retain a separate internal signal
+that consumer code never receives.
 
 Only the four extraction callbacks and requested model/effort/null max-tokens setting cross from
 the Provider into the process client. Approval, case and bundle identities, provenance, sanitizer
@@ -279,8 +284,16 @@ ambient temporary-directory variables, with separate empty workspace, home,
 the empty workspace, never a consumer repository, bundle directory, or their parent. The child
 environment starts empty. A caller may explicitly allowlist bounded environment names needed by an
 upstream-supported logged-in process boundary. Configuration snapshots and validates only those
-names; their values are read after the spawn guard and passed only to the immediately following
-spawn. The process client always replaces home, config, cache, path, and temporary-directory
+names. The final revalidation continuation captures their values into an immutable spawn
+authorization only after abort, usability, exact-identity, and generation checks succeed;
+prepare-only and failed revalidation paths do not read the values. After the process client awaits
+that authorization, it synchronously reads the current allowlisted values, then rechecks approval
+expiry, exact identity, generation, and abort state so time or side effects during the reads cannot
+cross the final boundary. The finalizer must return `undefined` synchronously; any other return is
+rejected before process start and any returned promise is settled without exposing its rejection. The client then
+builds the child environment and calls spawn without another callback or await. The process client
+always replaces home, config,
+cache, path, and temporary-directory
 variables with its private paths. It does not locate, read, copy, transform, refresh, or print a
 credential file.
 

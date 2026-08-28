@@ -349,6 +349,317 @@ test("snapshots allowlisted runtime environment after the spawn guard", async ()
   });
 });
 
+test("reads allowlisted runtime only after final approval succeeds", async (context) => {
+  for (const mode of ["prepare-only", "rejected-invoke"] as const) {
+    await context.test(mode, async () => {
+      await withFixture("provider-success", async ({ capture, options }) => {
+        const environmentName = "SVBENCH_ALLOWED_CANARY";
+        const originalEnvironment = process.env;
+        const previous = originalEnvironment[environmentName];
+        originalEnvironment[environmentName] = "synthetic-runtime-a";
+        let environmentReads = 0;
+        process.env = new Proxy(originalEnvironment, {
+          get(target, property, receiver) {
+            if (property === environmentName) environmentReads += 1;
+            return Reflect.get(target, property, receiver) as unknown;
+          },
+        });
+        try {
+          const direct = directInvocation();
+          let calls = 0;
+          const provider = createCodexAppServerProvider({
+            process: { ...options, envAllowlist: [environmentName] },
+            revalidateTransport: async (approval) => {
+              calls += 1;
+              if (mode === "rejected-invoke" && calls === 2) {
+                return { ...approval, runtimeBindingDigest: "f".repeat(64) };
+              }
+              return approval;
+            },
+          });
+
+          await provider.prepareTransport!(direct.approval);
+          if (mode === "rejected-invoke") {
+            await assert.rejects(
+              provider.invoke(direct.request, direct.context),
+              stableProviderFailure,
+            );
+            assert.deepEqual(direct.reads, {
+              image: 0,
+              schema: 0,
+              system: 0,
+              instruction: 0,
+            });
+          }
+
+          assert.equal(environmentReads, 0);
+          assert.equal(await appServerStarts(capture), 0);
+        } finally {
+          process.env = originalEnvironment;
+          restoreEnvironment(environmentName, previous);
+        }
+      });
+    });
+  }
+});
+
+test("rechecks approval expiry after the final runtime read", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const environmentName = "SVBENCH_ALLOWED_CANARY";
+    const originalEnvironment = process.env;
+    const previous = originalEnvironment[environmentName];
+    originalEnvironment[environmentName] = "synthetic-runtime-a";
+    const expiresAt = Date.now() + 500;
+    let environmentReads = 0;
+    process.env = new Proxy(originalEnvironment, {
+      get(target, property, receiver) {
+        if (property === environmentName) {
+          environmentReads += 1;
+          if (environmentReads === 2) {
+            Atomics.wait(
+              new Int32Array(new SharedArrayBuffer(4)),
+              0,
+              0,
+              Math.max(1, expiresAt - Date.now() + 1),
+            );
+          }
+        }
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    try {
+      const approval = {
+        ...syntheticApproval(),
+        expiresAt: new Date(expiresAt).toISOString(),
+      };
+      const direct = directInvocation(approval);
+      const provider = createCodexAppServerProvider({
+        process: { ...options, envAllowlist: [environmentName] },
+        revalidateTransport: async (actual) => actual,
+      });
+
+      await provider.prepareTransport!(direct.approval);
+      await assert.rejects(
+        provider.invoke(direct.request, direct.context),
+        stableProviderFailure,
+      );
+
+      assert.equal(environmentReads, 2);
+      assert.deepEqual(direct.reads, {
+        image: 0,
+        schema: 0,
+        system: 0,
+        instruction: 0,
+      });
+      assert.equal(await appServerStarts(capture), 0);
+    } finally {
+      process.env = originalEnvironment;
+      restoreEnvironment(environmentName, previous);
+    }
+  });
+});
+
+test("does not read a consumer-owned signal getter after final approval", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const expiresAt = Date.now() + 500;
+    const approval = {
+      ...syntheticApproval(),
+      expiresAt: new Date(expiresAt).toISOString(),
+    };
+    const direct = directInvocation(approval);
+    let calls = 0;
+    let abortedReads = 0;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual, signal) => {
+        calls += 1;
+        if (calls === 2) {
+          assert.ok(signal);
+          Object.defineProperty(signal, "aborted", {
+            configurable: true,
+            get() {
+              abortedReads += 1;
+              if (abortedReads === 4) {
+                Atomics.wait(
+                  new Int32Array(new SharedArrayBuffer(4)),
+                  0,
+                  0,
+                  Math.max(1, expiresAt - Date.now() + 1),
+                );
+              }
+              return false;
+            },
+          });
+        }
+        return actual;
+      },
+    });
+
+    await provider.prepareTransport!(direct.approval);
+    await provider.invoke(direct.request, direct.context);
+
+    assert.equal(abortedReads, 3);
+    assert.ok(Date.now() < expiresAt);
+    assert.deepEqual(direct.reads, {
+      image: 1,
+      schema: 1,
+      system: 1,
+      instruction: 1,
+    });
+    assert.equal(await appServerStarts(capture), 1);
+  });
+});
+
+test("consumer guard signal mutation cannot disable process cancellation", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const parent = new AbortController();
+    let calls = 0;
+    let abortedReads = 0;
+    let abortQueued = false;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual, signal) => {
+        calls += 1;
+        if (calls === 2) {
+          assert.ok(signal);
+          Object.defineProperties(signal, {
+            aborted: {
+              configurable: true,
+              get() {
+                abortedReads += 1;
+                if (abortedReads === 3 && !abortQueued) {
+                  abortQueued = true;
+                  queueMicrotask(() => parent.abort());
+                }
+                return false;
+              },
+            },
+            addEventListener: {
+              configurable: true,
+              value() {},
+            },
+          });
+        }
+        return actual;
+      },
+    });
+
+    await provider.prepareTransport!(direct.approval);
+    await assert.rejects(
+      provider.invoke(direct.request, direct.context, parent.signal),
+      stableProviderFailure,
+    );
+
+    assert.equal(abortQueued, true);
+    assert.equal(parent.signal.aborted, true);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.ok((await appServerStarts(capture)) <= 1);
+  });
+});
+
+test("does not execute inherited optional approval getters", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    let inheritedReads = 0;
+    const inherited = Object.create(Object.prototype, {
+      reasonCode: {
+        configurable: true,
+        get() {
+          inheritedReads += 1;
+          throw new Error("synthetic inherited approval getter");
+        },
+      },
+    }) as object;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (approval) => {
+        const response = { ...approval };
+        Object.setPrototypeOf(response, inherited);
+        return response;
+      },
+    });
+
+    await provider.prepareTransport!(direct.approval);
+    await provider.invoke(direct.request, direct.context);
+
+    assert.equal(inheritedReads, 0);
+    assert.deepEqual(direct.reads, {
+      image: 1,
+      schema: 1,
+      system: 1,
+      instruction: 1,
+    });
+    assert.equal(await appServerStarts(capture), 1);
+  });
+});
+
+test("rejects nested-microtask expiry and runtime drift before spawn", async (t) => {
+  for (const mode of ["expiry", "runtime"] as const) {
+    await t.test(mode, async () => {
+      await withFixture("provider-success", async ({ capture, options }) => {
+        const environmentName = "SVBENCH_ALLOWED_CANARY";
+        const previous = process.env[environmentName];
+        process.env[environmentName] = "synthetic-runtime-a";
+        try {
+          const expiry = Date.now() + 500;
+          const approval = {
+            ...syntheticApproval(),
+            ...(mode === "expiry"
+              ? { expiresAt: new Date(expiry).toISOString() }
+              : {}),
+          };
+          const direct = directInvocation(approval);
+          let calls = 0;
+          const provider = createCodexAppServerProvider({
+            process: { ...options, envAllowlist: [environmentName] },
+            revalidateTransport: async (actual) => {
+              calls += 1;
+              if (calls === 2) {
+                queueMicrotask(() => {
+                  queueMicrotask(() => {
+                    if (mode === "expiry") {
+                      Atomics.wait(
+                        new Int32Array(new SharedArrayBuffer(4)),
+                        0,
+                        0,
+                        Math.max(1, expiry - Date.now() + 1),
+                      );
+                    } else {
+                      process.env[environmentName] = "synthetic-runtime-b";
+                    }
+                  });
+                });
+              }
+              return actual;
+            },
+          });
+          await provider.prepareTransport!(direct.approval);
+          await assert.rejects(
+            provider.invoke(direct.request, direct.context),
+            stableProviderFailure,
+          );
+          assert.equal(calls, 2);
+          assert.deepEqual(direct.reads, {
+            image: 0,
+            schema: 0,
+            system: 0,
+            instruction: 0,
+          });
+          assert.equal(await appServerStarts(capture), 0);
+        } finally {
+          restoreEnvironment(environmentName, previous);
+        }
+      });
+    });
+  }
+});
+
 test("publishes one schema-valid policy-free runner attempt", async () => {
   await withFixture("provider-success", async ({ capture, options, root }) => {
     const requirement = syntheticRequirement();
