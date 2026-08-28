@@ -116,6 +116,11 @@ export type CodexAppServerProcessStartGuard = (
   signal: AbortSignal,
 ) => Promise<void>;
 
+export type LinuxProcessTable = Readonly<{
+  listProcessIds(): Promise<readonly string[]>;
+  readProcessStat(processId: string): Promise<string>;
+}>;
+
 type ValidatedOptions = Readonly<{
   executable: string;
   executableArguments: readonly string[];
@@ -613,8 +618,11 @@ async function runConnectedProcess(
       if (controller.signal.aborted) {
         await waitForInterruptGrace(close);
       }
-      await terminate();
-      await close;
+      if (close === undefined) {
+        await terminate();
+      } else {
+        await awaitProcessCleanup(terminate, close);
+      }
     }
     throw new Error();
   } finally {
@@ -841,13 +849,35 @@ async function processGroupHasLiveMember(processGroupId: number): Promise<boolea
     throw error;
   }
   if (process.platform !== "linux") return true;
-  for (const entry of await readdir("/proc", { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
+  return linuxProcessGroupHasLiveMember(processGroupId);
+}
+
+const DEFAULT_LINUX_PROCESS_TABLE: LinuxProcessTable = Object.freeze({
+  async listProcessIds(): Promise<readonly string[]> {
+    const processIds: string[] = [];
+    for (const entry of await readdir("/proc", { withFileTypes: true })) {
+      if (entry.isDirectory() && /^[1-9][0-9]*$/u.test(entry.name)) {
+        processIds.push(entry.name);
+      }
+    }
+    return processIds;
+  },
+  async readProcessStat(processId: string): Promise<string> {
+    return readFile(`/proc/${processId}/stat`, "utf8");
+  },
+});
+
+export async function linuxProcessGroupHasLiveMember(
+  processGroupId: number,
+  processTable: LinuxProcessTable = DEFAULT_LINUX_PROCESS_TABLE,
+): Promise<boolean> {
+  for (const processId of await processTable.listProcessIds()) {
     let source: string;
     try {
-      source = await readFile(`/proc/${entry.name}/stat`, "utf8");
+      source = await processTable.readProcessStat(processId);
     } catch (error) {
-      if (objectWithCode(error).code === "ENOENT") continue;
+      const code = objectWithCode(error).code;
+      if (code === "ENOENT" || code === "EACCES" || code === "EPERM") continue;
       throw error;
     }
     const stateOffset = source.lastIndexOf(") ");
@@ -862,6 +892,20 @@ async function processGroupHasLiveMember(processGroupId: number): Promise<boolea
     }
   }
   return false;
+}
+
+export async function awaitProcessCleanup(
+  terminate: () => Promise<void>,
+  close: Promise<unknown>,
+): Promise<void> {
+  let terminationError: unknown;
+  try {
+    await terminate();
+  } catch (error) {
+    terminationError = error;
+  }
+  await close;
+  if (terminationError !== undefined) throw terminationError;
 }
 
 async function waitForInterruptGrace(

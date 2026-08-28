@@ -108,7 +108,8 @@ The public Provider wrapper requires a consumer-owned revalidator, binds one exa
 attestation to only the next invocation, and revalidates again through a process start guard after
 private workspace/catalog preparation and immediately before app-server spawn. Allowlisted runtime
 environment values are snapshotted only after that guard. It waits for the leader close, absence of
-live same-group members, and workspace cleanup on abort. A later prepare invalidates the prior
+live same-group members, and workspace cleanup on abort; restricted procfs entries unrelated to the
+same-owner child group cannot bypass leader-close waiting. A later prepare invalidates the prior
 one-shot authorization. Policy-required runs remain deferred to Issue #18.
 The protocol lifecycle and fixed identity are in
 [`docs/codex-app-server-transport-v1.md`](codex-app-server-transport-v1.md).

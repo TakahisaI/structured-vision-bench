@@ -273,7 +273,9 @@ status zero. Success as well as protocol failure, crash, overflow, timeout, or c
 terminates the durable POSIX process group, waits until no live same-group member remains, waits for
 the leader close, zeroes materialized input copies, and removes the private root before the promise
 settles. Linux settlement enumerates process-group membership and treats only dead or zombie
-members as stopped; the other supported POSIX host waits for the group identity to disappear.
+members as stopped. Process entries hidden by procfs access controls are ignored because spawned
+same-owner group members remain readable; a probe failure cannot bypass the leader-close wait. The
+other supported POSIX host waits for the group identity to disappear.
 Abort leaves a bounded grace after the best-effort interrupt write before forced teardown.
 Automated tests use only a deterministic fake executable and synthetic canaries; they perform no
 login and call no model.
