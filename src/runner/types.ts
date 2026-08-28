@@ -259,6 +259,7 @@ export interface Sanitizer {
 export type SanitizerSettings = {
   required: boolean;
   sanitizer?: Sanitizer;
+  allowedFindingPathPatterns?: readonly string[];
   expectedSanitizerId?: string;
   expectedProtocolVersion?: 1;
   policyEnvelopeBytes?: Uint8Array;

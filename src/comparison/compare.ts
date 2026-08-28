@@ -109,7 +109,7 @@ export type ComparisonResultCore = {
         severity: string;
         classification: string;
         hardGate: boolean;
-        path: null;
+        path: string | null;
       }>;
     };
   };
@@ -236,7 +236,7 @@ export async function compareAttempt(options: CompareAttemptOptions): Promise<Co
                 severity: finding.severity,
                 classification: finding.classification,
                 hardGate: finding.hardGate,
-                path: null,
+                path: finding.path ?? null,
               })),
             },
     },

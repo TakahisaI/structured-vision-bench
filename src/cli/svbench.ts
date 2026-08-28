@@ -41,6 +41,7 @@ import {
   MAX_TIMEOUT_MS,
   runBundle,
 } from "../runner/run.js";
+import { snapshotSanitizerFindingPathPatterns } from "../runner/sanitizer-finding-path.js";
 import { BundleValidationError } from "../bundle/validate-bundle.js";
 import type {
   ApprovalSettings,
@@ -261,6 +262,7 @@ function parseRunArguments(): RunArguments {
       "sanitizer-binding-digest": { type: "string" },
       "sanitizer-timeout-ms": { type: "string" },
       "sanitizer-output-limit": { type: "string" },
+      "sanitizer-finding-path": { type: "string", multiple: true },
       "requirement-verifier-id": { type: "string" },
       "requirement-verifier-version": { type: "string" },
       "requirement-consumer-source-commit": { type: "string" },
@@ -307,6 +309,7 @@ function parseRunArguments(): RunArguments {
     policyBindingDigest: values["sanitizer-binding-digest"],
     timeoutMs: values["sanitizer-timeout-ms"],
     outputLimitBytes: values["sanitizer-output-limit"],
+    allowedFindingPathPatterns: values["sanitizer-finding-path"],
     requirementVerifierId: values["requirement-verifier-id"],
     requirementVerifierVersion: values["requirement-verifier-version"],
     requirementConsumerSourceCommit: values["requirement-consumer-source-commit"],
@@ -629,6 +632,7 @@ function parseCommandSanitizer(input: {
   policyBindingDigest: string | undefined;
   timeoutMs: string | undefined;
   outputLimitBytes: string | undefined;
+  allowedFindingPathPatterns: string[] | undefined;
   requirementVerifierId: string | undefined;
   requirementVerifierVersion: string | undefined;
   requirementConsumerSourceCommit: string | undefined;
@@ -696,6 +700,9 @@ function parseCommandSanitizer(input: {
       expectedCaseInputIdentityVersion: 1,
       expectedCaseInputIdentityDigest: caseInputIdentityDigest,
       expectedPolicyBindingDigest: policyBindingDigest,
+      allowedFindingPathPatterns: snapshotSanitizerFindingPathPatterns(
+        input.allowedFindingPathPatterns ?? [],
+      ),
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: parseTimeoutMs(input.timeoutMs) }),
     },
   };

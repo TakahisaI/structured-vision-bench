@@ -16,6 +16,8 @@ import {
   computeAttemptIdentity,
   computePolicyBindingDigest,
   computeRunIdentity,
+  computeSanitizerExecutionBindingDigest,
+  computeSanitizerFindingPathAllowlistDigest,
   computeSanitizerRequirementDigest,
   type CaseInputIdentity,
   type SanitizerRequirementCoreV1,
@@ -23,6 +25,11 @@ import {
   type SanitizerRequirementVerifier,
 } from "./identity.js";
 import { RunnerError } from "./errors.js";
+import {
+  isSanitizerFindingPath,
+  sanitizerFindingPathMatchesPatterns,
+  snapshotSanitizerFindingPathPatterns,
+} from "./sanitizer-finding-path.js";
 import type {
   ProviderUsage,
   RequestedExecutionSettings,
@@ -158,6 +165,9 @@ export type AttemptManifest = {
     policyTargetIdentityDigest: string | null;
     policyBindingIdentity: SanitizerPolicyBindingIdentity | null;
     policyBindingDigest: string | null;
+    findingPathAllowlistVersion: 1;
+    findingPathAllowlistDigest: string;
+    allowedFindingPathPatterns: string[];
     findings: SanitizerFinding[];
   };
   stages: {
@@ -924,9 +934,13 @@ function parseAttemptManifest(
       "policyTargetIdentityDigest",
       "policyBindingIdentity",
       "policyBindingDigest",
+      "findingPathAllowlistVersion",
+      "findingPathAllowlistDigest",
+      "allowedFindingPathPatterns",
       "findings",
     ]);
-    parseSanitizerFindings(sanitizerRecord.findings);
+    const findingPathPatterns = parseSanitizerFindingPathAllowlist(sanitizerRecord);
+    parseSanitizerFindings(sanitizerRecord.findings, findingPathPatterns);
     validateSanitizerBinding(sanitizerRecord, identity.digest);
     if (sanitizerRecord.required !== true || sanitizerRecord.applied !== true) invalid();
     sanitizer = sanitizerRecord as unknown as NonNullable<AttemptManifest["sanitizer"]>;
@@ -982,7 +996,15 @@ function parseAttemptManifest(
       "attempt approval phase is invalid",
     );
   }
-  const sanitizerBindingDigest = sanitizer === undefined ? null : nullableDigest(sanitizer.policyBindingDigest);
+  const sanitizerBindingDigest =
+    sanitizer === undefined
+      ? null
+      : computeSanitizerExecutionBindingDigest({
+          policyBindingDigest: requiredDigest(sanitizer.policyBindingDigest),
+          findingPathAllowlistDigest: requiredDigest(
+            sanitizer.findingPathAllowlistDigest,
+          ),
+        });
   parseStages(manifest.stages, sanitizerRequirement.sanitizerRequired);
   if (
     computeRunIdentity({
@@ -1367,7 +1389,32 @@ function parseApprovalMetadata(
   };
 }
 
-function parseSanitizerFindings(value: JsonValue | undefined): void {
+function parseSanitizerFindingPathAllowlist(
+  sanitizer: Record<string, JsonValue>,
+): readonly string[] {
+  if (sanitizer.findingPathAllowlistVersion !== 1) invalid();
+  const source = sanitizer.allowedFindingPathPatterns;
+  let patterns: readonly string[];
+  try {
+    patterns = snapshotSanitizerFindingPathPatterns(source);
+  } catch {
+    invalid();
+  }
+  if (!Array.isArray(source) || source.some((value, index) => value !== patterns[index])) invalid();
+  const digest = requiredDigest(sanitizer.findingPathAllowlistDigest);
+  if (computeSanitizerFindingPathAllowlistDigest(patterns) !== digest) {
+    throw new RunnerError(
+      "attempt_identity_mismatch",
+      "attempt sanitizer finding path binding is invalid",
+    );
+  }
+  return patterns;
+}
+
+function parseSanitizerFindings(
+  value: JsonValue | undefined,
+  allowedFindingPathPatterns: readonly string[],
+): void {
   if (!Array.isArray(value) || value.length > 100) invalid();
   for (const findingValue of value) {
     const finding = requiredObject(findingValue);
@@ -1382,7 +1429,13 @@ function parseSanitizerFindings(value: JsonValue | undefined): void {
     }
     requiredSafeLabel(finding.classification);
     if (typeof finding.hardGate !== "boolean") invalid();
-    if (finding.path !== null) invalid();
+    if (
+      finding.path !== null &&
+      (!isSanitizerFindingPath(finding.path) ||
+        !sanitizerFindingPathMatchesPatterns(finding.path, allowedFindingPathPatterns))
+    ) {
+      invalid();
+    }
   }
 }
 

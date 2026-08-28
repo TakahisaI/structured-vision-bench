@@ -189,17 +189,24 @@ or secret-shaped text.
 
 Missing usage, model, effort, or stop-reason metadata is represented as unavailable, never zero or a
 request-derived guess. Provider metadata and sanitizer findings are accepted only as bounded safe
-labels; persisted finding paths are null. A successful attempt contains only `attempt.json` and the
-formal `document.json` (the strict canonical provider document when sanitization is not required,
-otherwise sanitizer output). It never stores raw provider serialization, raw prompt/image contents,
-sanitizer policy contents/paths, endpoint/account identifiers, or failure tracebacks. When the
-consumer decision says sanitization is not required, sanitizer/policy/target-binding manifest blocks
-are absent rather than null-filled. Attempt readers reject symlinks, unknown fields or entries,
-non-private modes, digest changes, identity changes, and policy-binding changes.
+labels; a non-null persisted finding path must exactly match the consumer's bounded pointer
+allowlist. Full-segment wildcards are rejected until the independently anchored artifact identity in
+Issue #45 exists. The canonical exact pointers and their digest are persisted and bound into the run
+sanitizer identity, so the untrusted attempt reader rejects both a changed path and a coordinated
+allowlist/digest change.
+Allowlist strings containing isolated UTF-16 surrogates fail configuration preflight before external
+work. A successful attempt contains only `attempt.json`
+and the formal `document.json` (the strict canonical provider document when sanitization is not
+required, otherwise sanitizer output). It never stores raw provider serialization, raw prompt/image
+contents, sanitizer policy contents/paths, endpoint/account identifiers, or failure tracebacks. When
+the consumer decision says sanitization is not required, sanitizer/policy/target-binding manifest
+blocks are absent rather than null-filled. Attempt readers reject symlinks, unknown fields or
+entries, non-private modes, digest changes, identity changes, and policy-binding changes.
 
-Comparison output contains aggregate counts, stable warning codes, and declaration positions only;
-it does not contain truth values, extracted values, case IDs, comparison pointers, local paths, or
-raw sanitizer paths. Normal comparison requires the exact execution bundle digest. Explicit
+Comparison output contains aggregate counts, stable warning codes, declaration positions, and only
+the same value-free sanitizer paths already validated for the attempt. It does not contain truth
+values, extracted values, case IDs, comparison pointers, local paths, or unallowlisted sanitizer
+paths. Normal comparison requires the exact execution bundle digest. Explicit
 rescoring is separately requested and still fixes the case, provenance, four provider inputs,
 formal-document digest, and sanitizer identity. Comparison errors never echo mismatched values or
 digests.

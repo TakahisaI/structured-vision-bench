@@ -112,7 +112,7 @@ function response(request) {
       severity: "warning",
       classification: "synthetic-class",
       hardGate: false,
-      path: "/synthetic/private-path",
+      path: "/invoiceNumber",
     }],
   };
 }

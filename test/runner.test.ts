@@ -29,6 +29,8 @@ import {
   computeCaseInputIdentity,
   computePolicyBindingDigest,
   computeRunIdentity,
+  computeSanitizerExecutionBindingDigest,
+  computeSanitizerFindingPathAllowlistDigest,
   createSanitizerRequirementDecision,
   type SanitizerRequirementSettings,
 } from "../src/runner/identity.js";
@@ -228,6 +230,24 @@ test("policyBindingDigest uses the v1 fixed vector", () => {
       policyDigest: "bc57d67ac57d3947717e8a4858356af81969a2d5a2e533e4722be3fc4ca18569",
     }),
     "315fe3576fc69fda19be1d4e0338214f3c39a6a75506073a035cb6d6249a20cf",
+  );
+});
+
+test("sanitizer finding path binding uses the v1 fixed vectors", () => {
+  const allowlistDigest = computeSanitizerFindingPathAllowlistDigest([
+    "/items/0/note",
+    "/invoiceNumber",
+  ]);
+  assert.equal(
+    allowlistDigest,
+    "e60f82a3e0d5295e73b5a27ee53188a4d822c7603e2fc83c213ed68101cfafa4",
+  );
+  assert.equal(
+    computeSanitizerExecutionBindingDigest({
+      policyBindingDigest: "1".repeat(64),
+      findingPathAllowlistDigest: allowlistDigest,
+    }),
+    "dd5b6d507159718adde488784723aa331f8f845ed975127b5561771bf5fd5001",
   );
 });
 
@@ -1782,6 +1802,13 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
             hardGate: false,
             path: "/forbiddenRawField",
           },
+          {
+            code: "synthetic-array-field",
+            severity: "warning",
+            classification: "synthetic-redaction",
+            hardGate: false,
+            path: "/items/0/note",
+          },
         ],
       };
     },
@@ -1797,6 +1824,7 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         lines: [],
         totalAmount: 0,
         forbiddenRawField: "SYNTHETIC-RAW-VALUE",
+        items: [{ note: "SYNTHETIC-ARRAY-RAW-VALUE" }],
       },
     });
     const sanitizerSettings = {
@@ -1810,7 +1838,34 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
       expectedCaseInputIdentityVersion: 1,
       expectedCaseInputIdentityDigest: identity.digest,
       expectedPolicyBindingDigest: policyBindingDigest,
+      allowedFindingPathPatterns: [
+        "/forbiddenRawField",
+        "/invoiceNumber",
+        "/items/0/note",
+      ],
     } as const;
+    let invalidConfigurationProviderCalls = 0;
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: path.join(temporary, "invalid-finding-path-configuration"),
+        provider: createMockProvider({
+          onInvoke: () => {
+            invalidConfigurationProviderCalls += 1;
+          },
+        }),
+        sanitizer: {
+          ...sanitizerSettings,
+          allowedFindingPathPatterns: [
+            `/${String.fromCharCode(0xd800)}`,
+          ],
+        },
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError &&
+        error.code === "sanitizer_configuration_invalid",
+    );
+    assert.equal(invalidConfigurationProviderCalls, 0);
     const result = await runBundle({
       bundleDirectory: bundle,
       attemptRoot: attempts,
@@ -1822,6 +1877,18 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
     const sanitizerManifest = attempt.manifest.sanitizer;
     assert.ok(sanitizerManifest);
     assert.equal(sanitizerManifest.applied, true);
+    assert.equal(sanitizerManifest.findingPathAllowlistVersion, 1);
+    assert.deepEqual(sanitizerManifest.allowedFindingPathPatterns, [
+      "/forbiddenRawField",
+      "/invoiceNumber",
+      "/items/0/note",
+    ]);
+    assert.equal(
+      sanitizerManifest.findingPathAllowlistDigest,
+      computeSanitizerFindingPathAllowlistDigest(
+        sanitizerManifest.allowedFindingPathPatterns,
+      ),
+    );
     assert.deepEqual(sanitizerManifest.policyBindingIdentity, {
       caseInputIdentityDigest: identity.digest,
       policyVersion: 1,
@@ -1833,7 +1900,14 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         severity: "warning",
         classification: "synthetic-redaction",
         hardGate: false,
-        path: null,
+        path: "/forbiddenRawField",
+      },
+      {
+        code: "synthetic-array-field",
+        severity: "warning",
+        classification: "synthetic-redaction",
+        hardGate: false,
+        path: "/items/0/note",
       },
     ]);
     assert.equal(isJsonObject(attempt.document) && "forbiddenRawField" in attempt.document, false);
@@ -1895,6 +1969,30 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
           },
         ],
       },
+      {
+        ...validResponse,
+        findings: [
+          {
+            code: "synthetic-unallowlisted-path",
+            severity: "warning",
+            classification: "synthetic-redaction",
+            hardGate: false,
+            path: "/provider-member-value",
+          },
+        ],
+      },
+      {
+        ...validResponse,
+        findings: [
+          {
+            code: "synthetic-wildcard-response-path",
+            severity: "warning",
+            classification: "synthetic-redaction",
+            hardGate: false,
+            path: "/items/*/note",
+          },
+        ],
+      },
     ];
     for (const [index, invalidResponse] of invalidResponses.entries()) {
       await assert.rejects(
@@ -1913,7 +2011,9 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
           },
         }),
         (error: unknown) =>
-          error instanceof RunnerError && error.code === "sanitizer_response_invalid",
+          error instanceof RunnerError &&
+          error.code === "sanitizer_response_invalid" &&
+          !error.message.includes("provider-member-value"),
       );
     }
     const mutableResponse: typeof validResponse & { findings: SanitizerFinding[] } = {
@@ -1924,7 +2024,7 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
           severity: "warning" as const,
           classification: "synthetic-redaction",
           hardGate: false,
-          path: "/synthetic",
+          path: "/invoiceNumber",
         },
       ],
     };
@@ -1963,9 +2063,91 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         severity: "warning",
         classification: "synthetic-redaction",
         hardGate: false,
-        path: null,
+        path: "/invoiceNumber",
       },
     ]);
+    const changedAllowlist = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      attemptKey: "dev-003",
+      provider,
+      sanitizer: {
+        ...sanitizerSettings,
+        allowedFindingPathPatterns: [
+          ...sanitizerSettings.allowedFindingPathPatterns,
+          "/synthetic/additional",
+        ],
+      },
+    });
+    assert.notEqual(changedAllowlist.runId, result.runId);
+
+    const tamperedParent = path.join(temporary, "tampered-attempts");
+    const tamperedAttempt = path.join(tamperedParent, result.attemptId);
+    await mkdir(tamperedParent);
+    await cp(result.attemptDirectory, tamperedAttempt, { recursive: true });
+    const tamperedManifestPath = path.join(tamperedAttempt, "attempt.json");
+    const tamperedManifest = JSON.parse(
+      await readFile(tamperedManifestPath, "utf8"),
+    ) as { sanitizer: { findings: Array<{ path: string | null }> } };
+    tamperedManifest.sanitizer.findings[0]!.path = "/synthetic/private-member";
+    await writeFile(tamperedManifestPath, `${JSON.stringify(tamperedManifest)}\n`, {
+      mode: 0o600,
+    });
+    await assert.rejects(
+      readAttempt(tamperedAttempt),
+      (error: unknown) =>
+        error instanceof RunnerError &&
+        error.code === "attempt_invalid" &&
+        !error.message.includes("private-member"),
+    );
+    const coordinatedTamperedParent = path.join(
+      temporary,
+      "coordinated-tampered-attempts",
+    );
+    const coordinatedTamperedAttempt = path.join(
+      coordinatedTamperedParent,
+      result.attemptId,
+    );
+    await mkdir(coordinatedTamperedParent);
+    await cp(result.attemptDirectory, coordinatedTamperedAttempt, {
+      recursive: true,
+    });
+    const coordinatedTamperedManifestPath = path.join(
+      coordinatedTamperedAttempt,
+      "attempt.json",
+    );
+    const coordinatedTamperedManifest = JSON.parse(
+      await readFile(coordinatedTamperedManifestPath, "utf8"),
+    ) as {
+      sanitizer: {
+        allowedFindingPathPatterns: string[];
+        findingPathAllowlistDigest: string;
+        findings: Array<{ path: string | null }>;
+      };
+    };
+    coordinatedTamperedManifest.sanitizer.findings[1]!.path =
+      "/items/999/note";
+    coordinatedTamperedManifest.sanitizer.allowedFindingPathPatterns =
+      coordinatedTamperedManifest.sanitizer.allowedFindingPathPatterns.map(
+        (pattern) =>
+          pattern === "/items/0/note" ? "/items/999/note" : pattern,
+      );
+    coordinatedTamperedManifest.sanitizer.findingPathAllowlistDigest =
+      computeSanitizerFindingPathAllowlistDigest(
+        coordinatedTamperedManifest.sanitizer.allowedFindingPathPatterns,
+      );
+    await writeFile(
+      coordinatedTamperedManifestPath,
+      `${JSON.stringify(coordinatedTamperedManifest)}\n`,
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      readAttempt(coordinatedTamperedAttempt),
+      (error: unknown) =>
+        error instanceof RunnerError &&
+        error.code === "attempt_identity_mismatch" &&
+        !error.message.includes("999"),
+    );
     await assert.rejects(
       runBundle({
         bundleDirectory: bundle,
