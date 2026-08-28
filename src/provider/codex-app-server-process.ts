@@ -845,11 +845,18 @@ async function processGroupHasLiveMember(processGroupId: number): Promise<boolea
   try {
     process.kill(-processGroupId, 0);
   } catch (error) {
-    if (objectWithCode(error).code === "ESRCH") return false;
-    throw error;
+    return processGroupProbeFailureIndicatesLive(error);
   }
   if (process.platform !== "linux") return true;
   return linuxProcessGroupHasLiveMember(processGroupId);
+}
+
+/** @internal Classifies the POSIX signal-zero process-group probe without weakening cleanup. */
+export function processGroupProbeFailureIndicatesLive(error: unknown): boolean {
+  const code = objectWithCode(error).code;
+  if (code === "ESRCH") return false;
+  if (code === "EPERM") return true;
+  throw error;
 }
 
 const DEFAULT_LINUX_PROCESS_TABLE: LinuxProcessTable = Object.freeze({

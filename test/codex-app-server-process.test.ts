@@ -14,6 +14,7 @@ import {
   DEFAULT_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES,
   awaitProcessCleanup,
   linuxProcessGroupHasLiveMember,
+  processGroupProbeFailureIndicatesLive,
   runCodexAppServerProcess,
   type CodexAppServerProcessOptions,
   type CodexAppServerProcessRequest,
@@ -40,6 +41,15 @@ const PROHIBITED_HOSTED_KEYS = [
   "sanitizerRequirement",
   "truth",
 ];
+
+test("keeps waiting when a POSIX process-group probe reports EPERM", () => {
+  assert.equal(processGroupProbeFailureIndicatesLive(errorWithCode("EPERM")), true);
+  assert.equal(processGroupProbeFailureIndicatesLive(errorWithCode("ESRCH")), false);
+  assert.throws(
+    () => processGroupProbeFailureIndicatesLive(errorWithCode("EACCES")),
+    (error: unknown) => objectWithCode(error).code === "EACCES",
+  );
+});
 
 test("ignores inaccessible unrelated entries while inspecting Linux process groups", async () => {
   const states = new Map([
