@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import fsPromises from "node:fs/promises";
 
 import { RunnerError } from "../runner/errors.js";
 import { MAX_SANITIZER_POLICY_BYTES } from "../runner/sanitizer.js";
@@ -11,9 +11,9 @@ export async function readPrivateSanitizerPolicy(
   assertSanitizerPolicyPlatformSupported(process.platform);
   const flags =
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let handle: Awaited<ReturnType<typeof fsPromises.open>> | undefined;
   try {
-    handle = await open(file, flags);
+    handle = await fsPromises.open(file, flags);
     const metadata = await handle.stat();
     if (
       !metadata.isFile() ||

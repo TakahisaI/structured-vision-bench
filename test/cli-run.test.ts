@@ -12,9 +12,10 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import fsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { mock } from "node:test";
 
 import { readAttempt } from "../src/runner/attempt.js";
 import { MAX_TIMEOUT_MS } from "../src/runner/run.js";
@@ -28,7 +29,7 @@ import {
   MAX_SANITIZER_POLICY_BYTES,
 } from "../src/runner/sanitizer.js";
 import { MAX_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES } from "../src/runner/command-sanitizer.js";
-import { assertSanitizerPolicyPlatformSupported } from "../src/cli/sanitizer-policy.js";
+import { readPrivateSanitizerPolicy } from "../src/cli/sanitizer-policy.js";
 
 const CLI = path.join(".tmp", "build", "src", "cli", "svbench.js");
 const FIXTURE = path.resolve("fixtures/synthetic/invoice-basic");
@@ -37,15 +38,32 @@ const FAKE_COMMAND_PROVIDER = path.resolve("test/fixtures/fake-command-provider.
 const FAKE_COMMAND_SANITIZER = path.resolve("test/fixtures/fake-command-sanitizer.mjs");
 const IMAGE_SHA256 = "dda43d98857bc0977a1bdc67e8005428c3af95ca73cddda69c9e8737eee03cc9";
 
-test("fails closed before opening sanitizer policies on Windows", () => {
+test("fails closed before opening sanitizer policies on Windows", async () => {
   const syntheticPath = "synthetic-policy-path";
-  assert.throws(
-    () => assertSanitizerPolicyPlatformSupported("win32"),
+  const openSpy = mock.method(fsPromises, "open", async () => {
+    throw new Error("synthetic open must not run");
+  });
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  assert.ok(platformDescriptor);
+  let pending: Promise<Buffer>;
+  try {
+    Object.defineProperty(process, "platform", {
+      ...platformDescriptor,
+      value: "win32",
+    });
+    pending = readPrivateSanitizerPolicy(syntheticPath);
+  } finally {
+    Object.defineProperty(process, "platform", platformDescriptor);
+    openSpy.mock.restore();
+  }
+  await assert.rejects(
+    pending,
     (error: unknown) =>
       error instanceof Error &&
       error.message === "sanitizer policy is unreadable" &&
       !error.message.includes(syntheticPath),
   );
+  assert.equal(openSpy.mock.callCount(), 0);
 });
 
 function commandProviderArguments(mode = "success"): string[] {

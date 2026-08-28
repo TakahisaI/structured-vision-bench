@@ -82,6 +82,19 @@ type ThreadState = {
 
 type ProtocolReceiveBudget = { remainingBytes: number };
 
+type ActiveItemType = "userMessage" | "reasoning" | "agentMessage";
+
+type TurnAccumulator = {
+  finalText: string | undefined;
+  usage: ProtocolUsage | undefined;
+  userMessageSeen: boolean;
+  finalItem: JsonValue | undefined;
+  activeItems: Map<string, ActiveItemType>;
+  result:
+    | Omit<CodexAppServerProtocolResult, "stopReason">
+    | undefined;
+};
+
 /** Runs the pinned one-thread, one-turn app-server message state machine. */
 export async function runCodexAppServerProtocol(
   connectionValue: CodexAppServerProtocolConnection,
@@ -196,6 +209,8 @@ export async function runCodexAppServerProtocol(
         if (turnId !== undefined && turnId !== knownTurnId) throw new Error();
         turnId = knownTurnId;
       },
+      thread,
+      turnInput,
       receiveBudget,
       signal,
     );
@@ -206,7 +221,7 @@ export async function runCodexAppServerProtocol(
       turnId,
       thread,
       turnInput,
-      turnStart.buffered,
+      turnStart.accumulator,
       turnStart.messageCount,
       receiveBudget,
       signal,
@@ -355,131 +370,156 @@ async function consumeTurn(
   turnId: string,
   thread: { respondedModel: string | null; effectiveEffort: string | null },
   expectedUserContent: JsonValue[],
-  initialMessages: Record<string, JsonValue>[],
+  accumulator: TurnAccumulator,
   initialMessageCount: number,
   receiveBudget: ProtocolReceiveBudget,
   signal: AbortSignal | undefined,
 ): Promise<Omit<CodexAppServerProtocolResult, "stopReason">> {
-  let finalText: string | undefined;
-  let usage: ProtocolUsage | undefined;
-  let userMessageSeen = false;
-  let finalItem: JsonValue | undefined;
   let eventCount = initialMessageCount;
-  const buffered = [...initialMessages];
-  const activeItems = new Map<
-    string,
-    "userMessage" | "reasoning" | "agentMessage"
-  >();
   for (;;) {
-    let message = buffered.shift();
-    if (message === undefined) {
-      eventCount += 1;
-      if (eventCount > MAX_PROTOCOL_EVENTS) throw new Error();
-      message = await nextMessage(connection, receiveBudget, signal);
-    }
-    if (Object.hasOwn(message, "id")) throw new Error();
-    const method = message.method;
-    const params = requiredObject(message.params);
-    if (method === "turn/completed") {
-      if (params.threadId !== threadId || activeItems.size !== 0) throw new Error();
-      const turn = validateTurnSnapshot(params.turn, "completed", "summary");
-      if (
-        turn.id !== turnId ||
-        finalText === undefined ||
-        finalItem === undefined ||
-        !userMessageSeen
-      ) {
-        throw new Error();
-      }
-      if (buffered.length !== 0) throw new Error();
-      if (!jsonEqual(turn.items, [finalItem])) throw new Error();
-      if (Buffer.byteLength(finalText, "utf8") > MAX_FINAL_DOCUMENT_BYTES) {
-        throw new Error();
-      }
-      return {
-        document: normalizeJsonValue(
-          parseJson(finalText, "codex app-server result"),
-          "codex app-server result",
-          MAX_FINAL_DOCUMENT_BYTES,
-        ),
-        respondedModel: thread.respondedModel,
-        effectiveEffort: thread.effectiveEffort,
-        usage:
-          usage === undefined
-            ? { available: false }
-            : {
-                available: true,
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                totalTokens: usage.totalTokens,
-              },
-      };
-    }
-    if (method === "thread/status/changed") {
-      if (params.threadId !== threadId) throw new Error();
-      validateThreadStatus(params.status);
-      continue;
-    }
-    if (method === "item/started") {
-      assertTurnIdentity(params, threadId, turnId);
-      nonnegativeInteger(params.startedAtMs);
-      const snapshot = validateSafeItem(params.item, expectedUserContent);
-      const item = requiredObject(snapshot);
-      const itemId = safeLabel(item.id);
-      const itemType = safeItemType(item.type);
-      if (itemType !== "userMessage" && !userMessageSeen) throw new Error();
-      if (itemType === "userMessage" && userMessageSeen) throw new Error();
-      if (activeItems.has(itemId) || activeItems.size >= MAX_ACTIVE_ITEMS) {
-        throw new Error();
-      }
-      activeItems.set(itemId, itemType);
-      continue;
-    }
-    if (method === "item/completed") {
-      assertTurnIdentity(params, threadId, turnId);
-      nonnegativeInteger(params.completedAtMs);
-      const snapshot = validateSafeItem(params.item, expectedUserContent);
-      const item = requiredObject(snapshot);
-      const itemId = safeLabel(item.id);
-      const itemType = safeItemType(item.type);
-      const started = activeItems.get(itemId);
-      if (started === undefined || started !== itemType) {
-        throw new Error();
-      }
-      activeItems.delete(itemId);
-      if (itemType === "userMessage") {
-        if (userMessageSeen) throw new Error();
-        userMessageSeen = true;
-        continue;
-      }
-      if (itemType === "reasoning") continue;
-      if (
-        typeof item.text !== "string" ||
-        (item.phase !== null && item.phase !== "final_answer") ||
-        finalText !== undefined
-      ) {
-        throw new Error();
-      }
-      finalText = item.text;
-      finalItem = snapshot;
-      continue;
-    }
-    if (method === "thread/tokenUsage/updated") {
-      assertTurnIdentity(params, threadId, turnId);
-      const tokenUsage = requiredObject(params.tokenUsage);
-      assertRequiredKeys(tokenUsage, ["total", "last", "modelContextWindow"]);
-      usage = snapshotProtocolUsage(tokenUsage.total);
-      snapshotProtocolUsage(tokenUsage.last);
-      if (
-        tokenUsage.modelContextWindow !== null &&
-        !isTokenCount(tokenUsage.modelContextWindow)
-      ) {
-        throw new Error();
-      }
-      continue;
-    }
+    if (accumulator.result !== undefined) return accumulator.result;
+    eventCount += 1;
+    if (eventCount > MAX_PROTOCOL_EVENTS) throw new Error();
+    const message = await nextMessage(connection, receiveBudget, signal);
+    applyTurnNotification(
+      accumulator,
+      message,
+      threadId,
+      turnId,
+      thread,
+      expectedUserContent,
+    );
+  }
+}
+
+function createTurnAccumulator(): TurnAccumulator {
+  return {
+    finalText: undefined,
+    usage: undefined,
+    userMessageSeen: false,
+    finalItem: undefined,
+    activeItems: new Map(),
+    result: undefined,
+  };
+}
+
+function applyTurnNotification(
+  accumulator: TurnAccumulator,
+  message: Record<string, JsonValue>,
+  threadId: string,
+  turnId: string,
+  thread: { respondedModel: string | null; effectiveEffort: string | null },
+  expectedUserContent: JsonValue[],
+): void {
+  if (accumulator.result !== undefined || Object.hasOwn(message, "id")) {
     throw new Error();
   }
+  const method = message.method;
+  const params = requiredObject(message.params);
+  if (method === "turn/completed") {
+    if (params.threadId !== threadId || accumulator.activeItems.size !== 0) {
+      throw new Error();
+    }
+    const turn = validateTurnSnapshot(params.turn, "completed", "summary");
+    if (
+      turn.id !== turnId ||
+      accumulator.finalText === undefined ||
+      accumulator.finalItem === undefined ||
+      !accumulator.userMessageSeen ||
+      !jsonEqual(turn.items, [accumulator.finalItem]) ||
+      Buffer.byteLength(accumulator.finalText, "utf8") > MAX_FINAL_DOCUMENT_BYTES
+    ) {
+      throw new Error();
+    }
+    accumulator.result = {
+      document: normalizeJsonValue(
+        parseJson(accumulator.finalText, "codex app-server result"),
+        "codex app-server result",
+        MAX_FINAL_DOCUMENT_BYTES,
+      ),
+      respondedModel: thread.respondedModel,
+      effectiveEffort: thread.effectiveEffort,
+      usage:
+        accumulator.usage === undefined
+          ? { available: false }
+          : {
+              available: true,
+              inputTokens: accumulator.usage.inputTokens,
+              outputTokens: accumulator.usage.outputTokens,
+              totalTokens: accumulator.usage.totalTokens,
+            },
+    };
+    return;
+  }
+  if (method === "thread/status/changed") {
+    if (params.threadId !== threadId) throw new Error();
+    validateThreadStatus(params.status);
+    return;
+  }
+  if (method === "item/started") {
+    assertTurnIdentity(params, threadId, turnId);
+    nonnegativeInteger(params.startedAtMs);
+    const snapshot = validateSafeItem(params.item, expectedUserContent);
+    const item = requiredObject(snapshot);
+    const itemId = safeLabel(item.id);
+    const itemType = safeItemType(item.type);
+    if (itemType !== "userMessage" && !accumulator.userMessageSeen) {
+      throw new Error();
+    }
+    if (itemType === "userMessage" && accumulator.userMessageSeen) {
+      throw new Error();
+    }
+    if (
+      accumulator.activeItems.has(itemId) ||
+      accumulator.activeItems.size >= MAX_ACTIVE_ITEMS
+    ) {
+      throw new Error();
+    }
+    accumulator.activeItems.set(itemId, itemType);
+    return;
+  }
+  if (method === "item/completed") {
+    assertTurnIdentity(params, threadId, turnId);
+    nonnegativeInteger(params.completedAtMs);
+    const snapshot = validateSafeItem(params.item, expectedUserContent);
+    const item = requiredObject(snapshot);
+    const itemId = safeLabel(item.id);
+    const itemType = safeItemType(item.type);
+    const started = accumulator.activeItems.get(itemId);
+    if (started === undefined || started !== itemType) throw new Error();
+    accumulator.activeItems.delete(itemId);
+    if (itemType === "userMessage") {
+      if (accumulator.userMessageSeen) throw new Error();
+      accumulator.userMessageSeen = true;
+      return;
+    }
+    if (itemType === "reasoning") return;
+    if (
+      typeof item.text !== "string" ||
+      (item.phase !== null && item.phase !== "final_answer") ||
+      accumulator.finalText !== undefined
+    ) {
+      throw new Error();
+    }
+    accumulator.finalText = item.text;
+    accumulator.finalItem = snapshot;
+    return;
+  }
+  if (method === "thread/tokenUsage/updated") {
+    assertTurnIdentity(params, threadId, turnId);
+    const tokenUsage = requiredObject(params.tokenUsage);
+    assertRequiredKeys(tokenUsage, ["total", "last", "modelContextWindow"]);
+    accumulator.usage = snapshotProtocolUsage(tokenUsage.total);
+    snapshotProtocolUsage(tokenUsage.last);
+    if (
+      tokenUsage.modelContextWindow !== null &&
+      !isTokenCount(tokenUsage.modelContextWindow)
+    ) {
+      throw new Error();
+    }
+    return;
+  }
+  throw new Error();
 }
 
 function validateInitializeResponse(message: Record<string, JsonValue>): void {
@@ -569,17 +609,19 @@ async function collectTurnStart(
   connection: CodexAppServerProtocolConnection,
   threadId: string,
   onTurnId: (turnId: string) => void,
+  thread: { respondedModel: string | null; effectiveEffort: string | null },
+  expectedUserContent: JsonValue[],
   receiveBudget: ProtocolReceiveBudget,
   signal: AbortSignal | undefined,
 ): Promise<{
   turnId: string;
-  buffered: Record<string, JsonValue>[];
+  accumulator: TurnAccumulator;
   messageCount: number;
 }> {
   let responseTurnId: string | undefined;
   let startedTurnId: string | undefined;
   let statusSeen = false;
-  const buffered: Record<string, JsonValue>[] = [];
+  const accumulator = createTurnAccumulator();
   for (let count = 1; count <= MAX_PROTOCOL_EVENTS; count += 1) {
     const message = await nextMessage(connection, receiveBudget, signal);
     if (Object.hasOwn(message, "id")) {
@@ -602,7 +644,14 @@ async function collectTurnStart(
         onTurnId(startedTurnId);
       } else {
         if (startedTurnId === undefined) throw new Error();
-        buffered.push(message);
+        applyTurnNotification(
+          accumulator,
+          message,
+          threadId,
+          startedTurnId,
+          thread,
+          expectedUserContent,
+        );
       }
     }
     if (
@@ -612,7 +661,7 @@ async function collectTurnStart(
     ) {
       return {
         turnId: responseTurnId,
-        buffered,
+        accumulator,
         messageCount: count,
       };
     }
@@ -900,26 +949,46 @@ async function receive(
   if (
     received === null ||
     typeof received !== "object" ||
-    Array.isArray(received) ||
-    !Number.isSafeInteger(received.byteLength) ||
-    received.byteLength < 1
+    Array.isArray(received)
+  ) {
+    throw new Error();
+  }
+  const byteLengthProperty = Object.getOwnPropertyDescriptor(
+    received,
+    "byteLength",
+  );
+  const messageProperty = Object.getOwnPropertyDescriptor(received, "message");
+  if (
+    byteLengthProperty === undefined ||
+    !("value" in byteLengthProperty) ||
+    messageProperty === undefined ||
+    !("value" in messageProperty)
+  ) {
+    throw new Error();
+  }
+  const reportedByteLength = byteLengthProperty.value as unknown;
+  if (
+    !Number.isSafeInteger(reportedByteLength) ||
+    typeof reportedByteLength !== "number" ||
+    reportedByteLength < 1 ||
+    reportedByteLength > receiveBudget.remainingBytes
   ) {
     throw new Error();
   }
   const snapshot = normalizeJsonValue(
-    received.message,
+    messageProperty.value,
     "codex app-server message",
     Math.min(
       CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES,
       receiveBudget.remainingBytes,
     ),
   );
-  const byteLength = Math.max(
-    received.byteLength,
+  const chargedBytes = Math.max(
+    reportedByteLength,
     Buffer.byteLength(JSON.stringify(snapshot), "utf8"),
   );
-  if (byteLength > receiveBudget.remainingBytes) throw new Error();
-  receiveBudget.remainingBytes -= byteLength;
+  if (chargedBytes > receiveBudget.remainingBytes) throw new Error();
+  receiveBudget.remainingBytes -= chargedBytes;
   return snapshot;
 }
 

@@ -312,7 +312,11 @@ test("rejects missing required nullable generated-schema fields", async () => {
 });
 
 test("bounds active item lifecycles and aggregate received bytes", async () => {
-  for (const mode of ["active-item-flood", "aggregate-byte-flood"]) {
+  for (const mode of [
+    "active-item-flood",
+    "startup-active-item-flood",
+    "aggregate-byte-flood",
+  ]) {
     const connection = new SyntheticConnection(mode);
     await assert.rejects(
       runCodexAppServerProtocol(connection, request()),
@@ -321,6 +325,35 @@ test("bounds active item lifecycles and aggregate received bytes", async () => {
     );
     assert.equal(connection.closed, true, mode);
   }
+});
+
+test("snapshots untrusted receive envelopes before normalizing messages", async () => {
+  const underReported = await runCodexAppServerProtocol(
+    new UnderReportingConnection(),
+    request(),
+  );
+  assert.deepEqual(underReported.document, syntheticDocument());
+
+  const overReported = new OverReportingConnection();
+  await assert.rejects(
+    runCodexAppServerProtocol(overReported, request()),
+    /codex app-server protocol failed/u,
+  );
+  assert.equal(overReported.messageReads, 0);
+
+  const byteLengthGetter = new ByteLengthGetterConnection();
+  await assert.rejects(
+    runCodexAppServerProtocol(byteLengthGetter, request()),
+    /codex app-server protocol failed/u,
+  );
+  assert.equal(byteLengthGetter.byteLengthReads, 0);
+
+  const messageGetter = new MessageGetterConnection();
+  await assert.rejects(
+    runCodexAppServerProtocol(messageGetter, request()),
+    /codex app-server protocol failed/u,
+  );
+  assert.equal(messageGetter.messageReads, 0);
 });
 
 test("accepts every fixed turn-start response race while preserving status order", async () => {
@@ -546,6 +579,15 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
         this.enqueue(notification);
         this.enqueue(itemStartedWith(userItem));
         this.enqueue(response);
+      } else if (this.mode === "startup-active-item-flood") {
+        this.enqueue(status);
+        this.enqueue(notification);
+        this.enqueue(itemStartedWith(userItem));
+        this.enqueue(itemCompletedWith(userItem));
+        for (let index = 0; index < 17; index += 1) {
+          this.enqueue(itemStartedWith(reasoningItem(`synthetic-reasoning-${index}`)));
+        }
+        return;
       } else if (this.mode === "timeout") {
         this.enqueue(status);
         this.enqueue(notification);
@@ -779,6 +821,93 @@ class RequiredKeyDeletingConnection extends SyntheticConnection {
       this.deleted = true;
     }
     return { ...received, message: snapshot };
+  }
+}
+
+class UnderReportingConnection extends SyntheticConnection {
+  constructor() {
+    super("success");
+  }
+
+  override async receive(): Promise<CodexAppServerProtocolReceivedMessage | undefined> {
+    const received = await super.receive();
+    return received === undefined ? undefined : { ...received, byteLength: 1 };
+  }
+}
+
+class OverReportingConnection extends SyntheticConnection {
+  messageReads = 0;
+
+  constructor() {
+    super("success");
+  }
+
+  override async receive(): Promise<CodexAppServerProtocolReceivedMessage | undefined> {
+    const received = await super.receive();
+    if (received === undefined) return undefined;
+    const message = {};
+    Object.defineProperty(message, "synthetic", {
+      enumerable: true,
+      get: () => {
+        this.messageReads += 1;
+        return "synthetic";
+      },
+    });
+    return {
+      message: message as JsonValue,
+      byteLength: CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES * 4 + 1,
+    };
+  }
+}
+
+class ByteLengthGetterConnection extends SyntheticConnection {
+  byteLengthReads = 0;
+
+  constructor() {
+    super("success");
+  }
+
+  override async receive(): Promise<CodexAppServerProtocolReceivedMessage | undefined> {
+    const received = await super.receive();
+    if (received === undefined) return undefined;
+    const envelope = { message: received.message } as {
+      message: JsonValue;
+      byteLength: number;
+    };
+    Object.defineProperty(envelope, "byteLength", {
+      enumerable: true,
+      get: () => {
+        this.byteLengthReads += 1;
+        return this.byteLengthReads === 1 ? 1 : Number.NaN;
+      },
+    });
+    return envelope;
+  }
+}
+
+class MessageGetterConnection extends SyntheticConnection {
+  messageReads = 0;
+
+  constructor() {
+    super("success");
+  }
+
+  override async receive(): Promise<CodexAppServerProtocolReceivedMessage | undefined> {
+    const received = await super.receive();
+    if (received === undefined) return undefined;
+    const envelope = { byteLength: received.byteLength } as {
+      message: JsonValue;
+      byteLength: number;
+    };
+    Object.defineProperty(envelope, "message", {
+      enumerable: true,
+      get: () => {
+        this.messageReads += 1;
+        envelope.byteLength = Number.NaN;
+        return received.message;
+      },
+    });
+    return envelope;
   }
 }
 

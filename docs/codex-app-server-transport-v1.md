@@ -145,7 +145,13 @@ approval, run, and attempt identity.
 
 Workspace path, image bytes, text inputs, metadata labels, final document text, each normalized
 protocol message, cumulative received message bytes, event count, and active item count are bounded.
-The cumulative receive budget is 512 MiB. Protocol value and total-output bounds include sixfold
+Receive envelopes must expose the message and reported byte length as own data properties. The
+reported length is snapshotted once and an over-budget report is rejected before the message value
+is normalized; each message is charged at the greater of its reported and normalized encoded size.
+The cumulative receive budget is 512 MiB. The 16-item active limit applies as soon as a turn-started
+notification supplies the turn identity, including while the turn/start response is pending. During
+that race the state machine retains only validated lifecycle state, with active items represented by
+bounded IDs and types rather than buffered item values. Protocol value and total-output bounds include sixfold
 JSON control-character escaping, base64 expansion, the user-message envelope, repeated lifecycle
 items, and a maximum-sized final document. The process client adds executable, argv, environment,
 JSONL line, stdout, and stderr limits. Neither layer locates, reads, copies, migrates, refreshes, or
