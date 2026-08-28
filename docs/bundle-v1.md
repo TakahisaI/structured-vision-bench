@@ -296,9 +296,11 @@ Bundle files are input and remain unchanged for the lifetime of a measurement. A
 separate directory with its own manifest and digests. The Issue #2 runner stages provider inputs
 outside the bundle, derives a caller-keyed attempt identity from the stable run identity, exclusively
 claims the attempt-identity directory, validates the formal document
-(sanitizer output when configured), and writes `attempt.json.pending` to a private same-filesystem
+(sanitizer output when configured), derives a post-sanitization artifact identity, creates the
+digest-named child below the claim, and writes `attempt.json.pending` to a private same-filesystem
 `.claim-<nonce>/` staging directory before publishing it by no-replace hard link as `attempt.json`.
-The final link is the visibility point for the exact two-file attempt shape; source cleanup is best
+The final link inside the artifact child is the visibility point for the exact two-file artifact;
+source cleanup is best
 effort. The runner bounds each staged provider input to 16 MiB; this is an operational runner limit
 and does not change bundle-v1 source-file validation.
 Failed runs and directories without the final manifest do not become formal attempts.

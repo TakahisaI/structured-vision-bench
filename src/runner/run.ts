@@ -386,6 +386,8 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     return {
       phase,
       attemptDirectory: claim.attemptDirectory,
+      artifactDirectory: artifact.artifactDirectory,
+      artifactId: artifact.artifactId,
       attemptId: attemptIdentity.attemptId,
       runId,
       attemptKey: attemptIdentity.attemptKey,

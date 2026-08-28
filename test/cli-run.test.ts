@@ -238,6 +238,7 @@ test("runs a synthetic mock bundle through the public CLI", async () => {
       caseId: string;
       attemptKey: string;
       attemptId: string;
+      artifactId: string;
       runId: string;
     };
     assert.equal(summary.ok, true);
@@ -245,12 +246,14 @@ test("runs a synthetic mock bundle through the public CLI", async () => {
     assert.equal(summary.caseId, "synthetic-invoice-basic");
     assert.equal(summary.attemptKey, "single");
     assert.match(summary.attemptId, /^[a-f0-9]{64}$/u);
+    assert.match(summary.artifactId, /^[a-f0-9]{64}$/u);
     assert.match(summary.runId, /^[a-f0-9]{64}$/u);
     assert.notEqual(summary.runId, summary.attemptId);
     const attempt = await readAttempt(path.join(attempts, summary.attemptId));
     assert.equal(attempt.manifest.attemptIdentityVersion, 1);
     assert.equal(attempt.manifest.attemptKey, "single");
     assert.equal(attempt.manifest.attemptId, summary.attemptId);
+    assert.equal(attempt.manifest.artifactId, summary.artifactId);
     assert.equal(attempt.manifest.runId, summary.runId);
     assert.equal(attempt.manifest.run.requested.model, "mock-v1");
     assert.equal(attempt.manifest.run.requested.effort, "low");
@@ -284,7 +287,7 @@ test("prints the attempt key in the human success summary", async () => {
     assert.equal(result.stderr, "");
     assert.match(
       result.stdout,
-      /^run complete: synthetic-invoice-basic \(phase development, key human-001, attempt [a-f0-9]{64}, run [a-f0-9]{64}\)\n$/u,
+      /^run complete: synthetic-invoice-basic \(phase development, key human-001, attempt [a-f0-9]{64}, artifact [a-f0-9]{64}, run [a-f0-9]{64}\)\n$/u,
     );
   } finally {
     await rm(temporary, { recursive: true, force: true });

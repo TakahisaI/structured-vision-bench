@@ -87,6 +87,8 @@ test("compares a complete match and renders value-free Markdown", async () => {
     assert.equal(result.warnings.length, 0);
     assert.match(result.scoringRevision, /^[a-f0-9]{64}$/u);
     assert.match(result.resultDigest, /^[a-f0-9]{64}$/u);
+    assert.equal(result.identity.artifactIdentityVersion, 1);
+    assert.match(result.identity.artifactId, /^[a-f0-9]{64}$/u);
     const { resultDigest: _resultDigest, ...core } = result;
     assert.equal(computeComparisonResultDigest(core), result.resultDigest);
     const reordered = Object.fromEntries(Object.entries(core).reverse()) as ComparisonResultCore;

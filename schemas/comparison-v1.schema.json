@@ -30,6 +30,8 @@
       "additionalProperties": false,
       "required": [
         "attemptId",
+        "artifactIdentityVersion",
+        "artifactId",
         "runId",
         "caseInputIdentityDigest",
         "executionBundleDigest",
@@ -42,6 +44,12 @@
       ],
       "properties": {
         "attemptId": {
+          "$ref": "#/$defs/digest"
+        },
+        "artifactIdentityVersion": {
+          "const": 1
+        },
+        "artifactId": {
           "$ref": "#/$defs/digest"
         },
         "runId": {

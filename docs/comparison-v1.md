@@ -45,8 +45,9 @@ reason without `--rescore`, is an invalid CLI argument.
 
 ## Identity boundary
 
-`readAttempt()` first verifies the immutable two-file attempt, attempt/run identities, exact stored
-document digest, requirement decision, and sanitizer policy binding. The scoring bundle then passes
+`readAttempt()` first verifies the attempt-ID parent, its sole artifact-ID child, the immutable
+two-file artifact, attempt/run/artifact identities, exact stored document digest, requirement
+decision, and sanitizer policy binding. The scoring bundle then passes
 the complete bundle validator before comparison.
 
 Normal mode requires all of these values to match:
@@ -62,7 +63,7 @@ those scoring inputs may change. A prepared image, schema, system, instruction, 
 provenance change requires a new provider attempt.
 
 The result records execution and scoring bundle digests separately, the four provider-input
-identities, attempt/run/case-input identities, exact formal document digest, sanitizer identity and
+identities, attempt/run/artifact/case-input identities, exact formal document digest, sanitizer identity and
 value-free findings, and the explicit rescore reason.
 
 ## Classification and aggregation

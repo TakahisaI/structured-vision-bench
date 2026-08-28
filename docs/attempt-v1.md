@@ -38,9 +38,9 @@ manual-smoke boundary is specified in
 
 `--attempt-key` is a caller-owned safe label (`[A-Za-z0-9._-]`, 1–64 characters) and defaults to
 `single`. `--attempt-root` defaults to `attempts` below the current working directory. A successful
-run creates a child directory named by the derived attempt identity. The CLI prints the case,
-attempt-key, attempt, and run identities, never the model document, input contents, local absolute
-paths, or provider diagnostics.
+run creates an attempt-identity child containing one artifact-identity child. The CLI prints the
+case, attempt-key, attempt, artifact, and run identities, never the model document, input contents,
+local absolute paths, or provider diagnostics.
 
 Command approval options and their exact request/response boundary are specified in
 [`docs/approval-v1.md`](approval-v1.md). Incomplete CLI approval options are invalid arguments and do
@@ -115,23 +115,25 @@ summary is written to stdout; human mode writes failures to stderr.
    return a sanitized document plus the exact current identity, policy digest/version, target identity
    digest, and policy binding digest. Findings are reduced to bounded value-free codes/classifications;
    paths are either null or bounded pointers exactly matched by the consumer's snapshotted
-   finding-path allowlist. Full-segment wildcards are rejected; their post-sanitization identity
-   design is tracked by Issue #45. The canonical allowlist and its digest are persisted, and the run
+   finding-path allowlist. Full-segment wildcards are rejected until Issue #45 enables their
+   structural matching on the post-sanitization artifact identity introduced by Issue #47. The canonical allowlist and its digest are persisted, and the run
    sanitizer binding commits that digest together with the policy binding. When
    sanitization is not required, the strict canonical provider document becomes the formal document
    and no sanitizer/policy/target-binding block is emitted.
 9. **Schema validation.** Only the formal canonical document is validated against the preflighted
    bundle output schema. A schema mismatch is a classified failure and cannot create an attempt.
-10. **Atomic finalization.** The formal document is serialized to `document.json.part`, its exact
-    bytes are hashed, and a no-replace hard link publishes it as `document.json` inside the claimed
-    directory. The matching manifest is written to the private same-filesystem staging path
+10. **Atomic finalization.** The formal document is serialized and hashed. Artifact identity v1 is
+    then derived from the attempt ID, exact formal-document digest, sanitizer identity/binding, and
+    ordered value-free finding tuples. The runner creates the private child
+    `<attempt-root>/<attempt-id>/<artifact-id>/`; a no-replace hard link publishes the complete
+    document as its `document.json`. The matching manifest is written to the private same-filesystem staging path
     `<attempt-root>/.claim-<owner-nonce>/attempt.json.pending` and self-validated together with the
     document while the private owner marker is present. Before publication, final-claim cleanup may
     remove only files owned by the claim, only when the claim owner is proven, and only while
-    `attempt.json` does not exist. The owner marker is then removed and a no-replace hard link
-    publishes the complete external pending manifest as `attempt.json`. That final link is the
-    one-syscall visibility point: the claimed attempt directory changes directly from `document.json` to
-    the exact final two-file shape. Removing the
+    child `attempt.json` does not exist. The owner marker is then removed and a no-replace hard link
+    publishes the complete external pending manifest as the child `attempt.json`. That final link is
+    the one-syscall visibility point for the exact final two-file artifact. The attempt-ID parent has
+    exactly one artifact-ID child after successful publication. Removing the
     external pending source is a separate post-publication best-effort cleanup, keyed by its recorded
     file identity, and cannot turn a published attempt into a failure.
 
@@ -211,6 +213,26 @@ same run and key derives the same destination and is rejected as `attempt_exists
 invocation. `attemptKey`, `attemptId`, and `runId` are runner metadata and are not added to provider,
 approval, or sanitizer requests.
 
+### Post-sanitization artifact identity
+
+The provider-before-work claim remains `<attempt-root>/<attemptId>`, preserving duplicate rejection
+for the same run/key. Successful output is stored below that claim in `<artifactId>/`. Artifact
+identity v1 is domain-separated SHA-256 over the exact `attemptId`, the exact `document.json` digest,
+an explicit sanitizer-absent/present tag, and—when present—the sanitizer ID, protocol version,
+execution binding digest, finding count, and every ordered canonical finding tuple:
+
+```text
+(code, severity, classification, hardGate, path-null-or-value)
+```
+
+Each field uses the identity module's length-prefixed encoding; null path has an explicit presence
+tag. No document value, policy content, secret, or local path enters this tuple. The manifest records
+`artifactIdentityVersion: 1` and `artifactId`, while the digest-named child directory is the
+manifest-external anchor. `readAttempt()` recomputes the identity and requires both the manifest and
+child basename to match. Recomputing a manifest digest after changing a finding tuple therefore
+cannot preserve the external directory identity. Renaming the directory by an adversarial same-UID
+process is outside the same portable threat model as replacement of the attempt root itself.
+
 ### Consumer sanitizer requirement
 
 Every run carries a consumer-owned `sanitizerRequirement` decision. The consumer supplies a verifier
@@ -251,8 +273,9 @@ A finalized attempt contains only:
 
 ```text
 <attempt-root>/<attempt-id>/
-├── attempt.json
-└── document.json
+└── <artifact-id>/
+    ├── attempt.json
+    └── document.json
 ```
 
 `attempt.json` conforms to [`schemas/attempt-v1.schema.json`](../schemas/attempt-v1.schema.json).
@@ -272,7 +295,7 @@ It records:
   value-free findings;
 - passed stage records for approval, provider, parse, and schema validation, plus policy-target
   preflight/sanitizer/target binding only when sanitizer is required;
-- exact stored `document.json` digest and timing.
+- post-sanitization artifact identity version/digest, exact stored `document.json` digest, and timing.
 
 Unknown model, effort, token usage, or stop-reason metadata is `null`/unavailable; it is never
 invented from a request. The manifest contains no raw provider response bytes/text, prompt text, image
@@ -283,16 +306,19 @@ findings never persist a path outside the consumer-owned allowlist.
 `readAttempt()` treats the files as untrusted. It rejects symlinks, size violations, invalid strict
 JSON, unknown manifest fields or directory entries, non-private modes, document digest changes, case
 identity changes, attempt key/ID changes, run identity changes, attempt-directory name mismatches,
-consumer-decision changes, and sanitizer policy-binding changes. Pass the consumer verifier in
+artifact-child identity changes, consumer-decision changes, and sanitizer policy-binding changes. Pass the consumer verifier in
 `readAttempt(path, { requirementVerifier })` to rederive the
 decision from `documentKind`; without it, the stored decision digest and shape are still checked. It
 hashes the exact stored document bytes, not a reserialized value. It also recomputes the
 finding-path allowlist digest and run sanitizer binding. It rejects any non-null finding that does
 not exactly match the committed pointers before returning an attempt to comparison. A coordinated
-path plus allowlist/digest change fails the recomputed run identity.
+path plus allowlist/digest change fails the recomputed run identity. Finding tuple and document
+digest changes are also committed by artifact identity; changing those fields and the manifest's
+artifact ID together still fails against the digest-named child directory.
 
-The reader recognizes only a directory containing the final `attempt.json` and `document.json` as a
-published attempt. A directory containing only `document.json`, the owner marker, or neither
+The reader recognizes only an attempt-ID directory containing one artifact-ID child with the final
+`attempt.json` and `document.json` as a published attempt. A child containing only `document.json`,
+or a claim directory containing the owner marker or neither
 manifest is an unpublished claim and is rejected as an attempt. Each external `.claim-<nonce>`
 staging directory belongs to one attempt claim and is never part of a formal attempt; staging
 directories are not shared between attempt invocations. The runner uses a no-follow attempt root

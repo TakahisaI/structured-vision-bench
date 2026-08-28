@@ -292,6 +292,8 @@ export type RunBundleOptions = {
 export type RunResult = {
   phase: string;
   attemptDirectory: string;
+  artifactDirectory: string;
+  artifactId: string;
   attemptId: string;
   runId: string;
   attemptKey: string;

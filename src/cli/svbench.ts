@@ -191,12 +191,13 @@ async function executeRun(runArguments: RunArguments): Promise<void> {
         caseId: result.caseId,
         attemptKey: result.attemptKey,
         attemptId: result.attemptId,
+        artifactId: result.artifactId,
         runId: result.runId,
       }),
     );
   } else {
     console.log(
-      `run complete: ${result.caseId} (phase ${result.phase}, key ${result.attemptKey}, attempt ${result.attemptId}, run ${result.runId})`,
+      `run complete: ${result.caseId} (phase ${result.phase}, key ${result.attemptKey}, attempt ${result.attemptId}, artifact ${result.artifactId}, run ${result.runId})`,
     );
   }
 }

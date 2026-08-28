@@ -25,6 +25,7 @@ import { validateJsonSchema } from "../src/bundle/schema-validator.js";
 import { createMockProvider } from "../src/provider/mock.js";
 import { isAbortSettlingCommandProvider } from "../src/provider/command.js";
 import {
+  computeArtifactIdentity,
   computeAttemptIdentity,
   computeCaseInputIdentity,
   computePolicyBindingDigest,
@@ -37,8 +38,10 @@ import {
 import {
   claimAttemptDirectory,
   cleanupAttemptClaim,
+  encodeAttemptDocument,
   readAttempt,
   writeAttemptFiles,
+  type AttemptManifest,
 } from "../src/runner/attempt.js";
 import { createCommandApprovalGate } from "../src/runner/approval.js";
 import { createCommandSanitizer } from "../src/runner/command-sanitizer.js";
@@ -345,7 +348,7 @@ test("run identity changes when requested execution settings change", () => {
     requestedModel: "mock-v1",
     requestedEffort: "medium",
     maxTokens: 512,
-  } as const;
+  } satisfies JsonValue;
   const run = computeRunIdentity(base);
   assert.match(run, /^[a-f0-9]{64}$/u);
   assert.equal(computeRunIdentity(base), run);
@@ -530,28 +533,38 @@ test("cleanup does not remove files it did not create", async () => {
   }
 });
 
-test("does not replace a pre-existing document in a claimed directory", async () => {
+test("does not replace a pre-existing document in a predicted artifact directory", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
   const bundle = path.join(temporary, "bundle");
   const attempts = path.join(temporary, "attempts");
   const existingDocument = Buffer.from("synthetic pre-existing document\n", "utf8");
+  const document = {
+    documentKind: "synthetic_invoice",
+    invoiceNumber: "SYNTHETIC-001",
+    issuedAt: "2026-01-01",
+    currency: "JPY",
+    lines: [],
+    totalAmount: 0,
+  } satisfies JsonValue;
+  let predictedArtifactDirectory: string | undefined;
   const provider: Provider = {
     id: "pre-existing-document",
     route: "synthetic",
     invoke: async () => {
       const [attemptId] = await readdir(attempts);
-      await writeFile(path.join(attempts, attemptId!, "document.json"), existingDocument, {
+      const documentSha256 = encodeAttemptDocument(document).sha256;
+      const artifactId = computeArtifactIdentity({
+        attemptId: attemptId!,
+        documentSha256,
+        sanitizer: null,
+      }).artifactId;
+      predictedArtifactDirectory = path.join(attempts, attemptId!, artifactId);
+      await mkdir(predictedArtifactDirectory, { mode: 0o700 });
+      await writeFile(path.join(predictedArtifactDirectory, "document.json"), existingDocument, {
         mode: 0o600,
       });
       return {
-        rawDocument: {
-          documentKind: "synthetic_invoice",
-          invoiceNumber: "SYNTHETIC-001",
-          issuedAt: "2026-01-01",
-          currency: "JPY",
-          lines: [],
-          totalAmount: 0,
-        },
+        rawDocument: document,
       };
     },
   };
@@ -561,9 +574,9 @@ test("does not replace a pre-existing document in a claimed directory", async ()
       runBundle({ bundleDirectory: bundle, attemptRoot: attempts, provider }),
       (error: unknown) => error instanceof RunnerError && error.code === "attempt_write_failed",
     );
-    const [attemptId] = await readdir(attempts);
+    assert.ok(predictedArtifactDirectory);
     assert.deepEqual(
-      await readFile(path.join(attempts, attemptId!, "document.json")),
+      await readFile(path.join(predictedArtifactDirectory, "document.json")),
       existingDocument,
     );
   } finally {
@@ -602,7 +615,8 @@ test("claims the final attempt directory before provider work", async () => {
   try {
     await cp(FIXTURE, bundle, { recursive: true });
     const result = await runBundle({ bundleDirectory: bundle, attemptRoot: attempts, provider });
-    assert.deepEqual((await readdir(result.attemptDirectory)).sort(), ["attempt.json", "document.json"]);
+    assert.deepEqual(await readdir(result.attemptDirectory), [result.artifactId]);
+    assert.deepEqual((await readdir(result.artifactDirectory)).sort(), ["attempt.json", "document.json"]);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -792,8 +806,8 @@ test("runs the mock provider and writes a readable sanitized attempt", async () 
     if (isJsonObject(attempt.document)) {
       assert.equal(attempt.document.documentKind, "synthetic_invoice");
     }
-    assert.equal(await readFile(path.join(result.attemptDirectory, "attempt.json"), "utf8") !== "", true);
-    const persistedManifestPath = path.join(result.attemptDirectory, "attempt.json");
+    assert.equal(await readFile(path.join(result.artifactDirectory, "attempt.json"), "utf8") !== "", true);
+    const persistedManifestPath = path.join(result.artifactDirectory, "attempt.json");
     const persistedManifest = JSON.parse(await readFile(persistedManifestPath, "utf8")) as {
       sanitizerRequirement: { sanitizerRequirementReason: string };
     };
@@ -979,7 +993,7 @@ test("keeps provenance commit constraints aligned between the attempt schema and
       attemptRoot: attempts,
       provider: createMockProvider(),
     });
-    const manifestPath = path.join(result.attemptDirectory, "attempt.json");
+    const manifestPath = path.join(result.artifactDirectory, "attempt.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
       provenance: { harnessCommit: string | null; sourceCommit: string | null };
     };
@@ -1118,10 +1132,10 @@ test("makes the final link immediately readable and ignores pending-manifest cle
         },
       },
     );
-    assert.deepEqual(observedNames, ["attempt.json", "document.json"]);
+    assert.deepEqual(observedNames, [initial.artifactId]);
     assert.equal(readableDuringCleanup, true);
     assert.equal(pendingSourcePresent, true);
-    assert.deepEqual((await readdir(initial.attemptDirectory)).sort(), ["attempt.json", "document.json"]);
+    assert.deepEqual(await readdir(initial.attemptDirectory), [initial.artifactId]);
     assert.ok(stagingDirectoryName);
     assert.match(stagingDirectoryName, /^\.claim-[0-9a-f-]{36}$/u);
     assert.deepEqual((await readdir(attempts)).sort(), [
@@ -1170,7 +1184,7 @@ test("removes a failed pre-publication claim so the same run can be retried", as
     const retryClaim = await claimAttemptDirectory(initial.attemptDirectory);
     await writeAttemptFiles(retryClaim, manifest, saved.document, async () => true);
     await cleanupAttemptClaim(retryClaim, async () => true);
-    assert.deepEqual((await readdir(initial.attemptDirectory)).sort(), ["attempt.json", "document.json"]);
+    assert.deepEqual(await readdir(initial.attemptDirectory), [initial.artifactId]);
     await readAttempt(initial.attemptDirectory);
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -1910,10 +1924,13 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         path: "/items/0/note",
       },
     ]);
+    assert.equal(attempt.manifest.artifactIdentityVersion, 1);
+    assert.equal(attempt.manifest.artifactId, result.artifactId);
+    assert.equal(path.basename(attempt.artifactDirectory), result.artifactId);
     assert.equal(isJsonObject(attempt.document) && "forbiddenRawField" in attempt.document, false);
     const storedAttempt = Buffer.concat([
-      await readFile(path.join(result.attemptDirectory, "attempt.json")),
-      await readFile(path.join(result.attemptDirectory, "document.json")),
+      await readFile(path.join(result.artifactDirectory, "attempt.json")),
+      await readFile(path.join(result.artifactDirectory, "document.json")),
     ]).toString("utf8");
     assert.equal(storedAttempt.includes("SYNTHETIC-RAW-VALUE"), false);
     for (const stage of Object.values(attempt.manifest.stages)) {
@@ -2085,7 +2102,7 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
     const tamperedAttempt = path.join(tamperedParent, result.attemptId);
     await mkdir(tamperedParent);
     await cp(result.attemptDirectory, tamperedAttempt, { recursive: true });
-    const tamperedManifestPath = path.join(tamperedAttempt, "attempt.json");
+    const tamperedManifestPath = path.join(tamperedAttempt, result.artifactId, "attempt.json");
     const tamperedManifest = JSON.parse(
       await readFile(tamperedManifestPath, "utf8"),
     ) as { sanitizer: { findings: Array<{ path: string | null }> } };
@@ -2114,6 +2131,7 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
     });
     const coordinatedTamperedManifestPath = path.join(
       coordinatedTamperedAttempt,
+      result.artifactId,
       "attempt.json",
     );
     const coordinatedTamperedManifest = JSON.parse(
@@ -2147,6 +2165,54 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         error instanceof RunnerError &&
         error.code === "attempt_identity_mismatch" &&
         !error.message.includes("999"),
+    );
+    const tupleTamperedParent = path.join(temporary, "tuple-tampered-attempts");
+    const tupleTamperedAttempt = path.join(tupleTamperedParent, result.attemptId);
+    await mkdir(tupleTamperedParent);
+    await cp(result.attemptDirectory, tupleTamperedAttempt, { recursive: true });
+    const tupleTamperedManifestPath = path.join(
+      tupleTamperedAttempt,
+      result.artifactId,
+      "attempt.json",
+    );
+    const tupleTamperedManifest = JSON.parse(
+      await readFile(tupleTamperedManifestPath, "utf8"),
+    ) as AttemptManifest;
+    const firstPath = tupleTamperedManifest.sanitizer!.findings[0]!.path ?? null;
+    tupleTamperedManifest.sanitizer!.findings[0]!.path =
+      tupleTamperedManifest.sanitizer!.findings[1]!.path ?? null;
+    tupleTamperedManifest.sanitizer!.findings[1]!.path = firstPath;
+    tupleTamperedManifest.artifactId = computeArtifactIdentity({
+      attemptId: tupleTamperedManifest.attemptId,
+      documentSha256: tupleTamperedManifest.document.sha256,
+      sanitizer: {
+        id: tupleTamperedManifest.sanitizer!.id!,
+        protocolVersion: 1,
+        bindingDigest: computeSanitizerExecutionBindingDigest({
+          policyBindingDigest: tupleTamperedManifest.sanitizer!.policyBindingDigest!,
+          findingPathAllowlistDigest:
+            tupleTamperedManifest.sanitizer!.findingPathAllowlistDigest,
+        }),
+        findings: tupleTamperedManifest.sanitizer!.findings.map((finding) => ({
+          code: finding.code,
+          severity: finding.severity,
+          classification: finding.classification,
+          hardGate: finding.hardGate,
+          path: finding.path ?? null,
+        })),
+      },
+    }).artifactId;
+    await writeFile(
+      tupleTamperedManifestPath,
+      `${JSON.stringify(tupleTamperedManifest)}\n`,
+      { mode: 0o600 },
+    );
+    await assert.rejects(
+      readAttempt(tupleTamperedAttempt),
+      (error: unknown) =>
+        error instanceof RunnerError &&
+        error.code === "attempt_identity_mismatch" &&
+        !error.message.includes("items"),
     );
     await assert.rejects(
       runBundle({
@@ -2911,7 +2977,7 @@ test("reader hashes the exact stored document bytes and rejects identity tamperi
       attemptRoot: attempts,
       provider: createMockProvider(),
     });
-    const documentPath = path.join(result.attemptDirectory, "document.json");
+    const documentPath = path.join(result.artifactDirectory, "document.json");
     const originalDocument = await readFile(documentPath);
     await writeFile(documentPath, Buffer.concat([originalDocument, Buffer.from(" \n", "utf8")]));
     await assert.rejects(
@@ -2923,7 +2989,7 @@ test("reader hashes the exact stored document bytes and rejects identity tamperi
         error.code === "attempt_document_digest_mismatch",
     );
     await writeFile(documentPath, originalDocument);
-    const manifestPath = path.join(result.attemptDirectory, "attempt.json");
+    const manifestPath = path.join(result.artifactDirectory, "attempt.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
       caseInputIdentity: { digest: string };
     };
@@ -2942,6 +3008,49 @@ test("reader hashes the exact stored document bytes and rejects identity tamperi
   }
 });
 
+test("reader rejects coordinated document and manifest artifact identity tampering", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const result = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: attempts,
+      provider: createMockProvider(),
+    });
+    const documentPath = path.join(result.artifactDirectory, "document.json");
+    const manifestPath = path.join(result.artifactDirectory, "attempt.json");
+    const changedDocument = Buffer.from(
+      `${JSON.stringify({
+        documentKind: "synthetic_invoice",
+        invoiceNumber: "SYNTHETIC-CHANGED",
+        issuedAt: "2026-01-01",
+        currency: "JPY",
+        lines: [],
+        totalAmount: 0,
+      }, null, 2)}\n`,
+      "utf8",
+    );
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as AttemptManifest;
+    manifest.document.sha256 = createHash("sha256").update(changedDocument).digest("hex");
+    manifest.artifactId = computeArtifactIdentity({
+      attemptId: manifest.attemptId,
+      documentSha256: manifest.document.sha256,
+      sanitizer: null,
+    }).artifactId;
+    await writeFile(documentPath, changedDocument);
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await assert.rejects(
+      readAttempt(result.attemptDirectory),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "attempt_identity_mismatch",
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("reader rejects attempt identity tampering and directory-name mismatch", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
   const bundle = path.join(temporary, "bundle");
@@ -2954,7 +3063,7 @@ test("reader rejects attempt identity tampering and directory-name mismatch", as
       attemptKey: "synthetic-reader",
       provider: createMockProvider(),
     });
-    const manifestPath = path.join(result.attemptDirectory, "attempt.json");
+    const manifestPath = path.join(result.artifactDirectory, "attempt.json");
     const originalManifest = await readFile(manifestPath);
     const manifest = JSON.parse(originalManifest.toString("utf8")) as {
       attemptKey: string;
@@ -3011,7 +3120,7 @@ test("rejects extra attempt files and invalid timestamps", async () => {
         error.code === "attempt_invalid",
     );
     await rm(path.join(result.attemptDirectory, "raw-provider-output.txt"));
-    const manifestPath = path.join(result.attemptDirectory, "attempt.json");
+    const manifestPath = path.join(result.artifactDirectory, "attempt.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
       timing: { finishedAt: string };
     };
@@ -3052,7 +3161,7 @@ test("rejects tampering with approval and provider run identity metadata", async
         runtimeBindingDigest,
       }),
     });
-    const manifestPath = path.join(result.attemptDirectory, "attempt.json");
+    const manifestPath = path.join(result.artifactDirectory, "attempt.json");
     const original = await readFile(manifestPath, "utf8");
     type IdentityManifest = {
       approval: {
@@ -3140,9 +3249,11 @@ test("publishes attempts with private directory and file permissions", async () 
     });
     assert.equal((await stat(attempts)).mode & 0o777, 0o700);
     assert.equal((await stat(result.attemptDirectory)).mode & 0o777, 0o700);
-    assert.equal((await stat(path.join(result.attemptDirectory, "attempt.json"))).mode & 0o777, 0o600);
-    assert.equal((await stat(path.join(result.attemptDirectory, "document.json"))).mode & 0o777, 0o600);
-    assert.deepEqual((await readdir(result.attemptDirectory)).sort(), ["attempt.json", "document.json"]);
+    assert.equal((await stat(result.artifactDirectory)).mode & 0o777, 0o700);
+    assert.equal((await stat(path.join(result.artifactDirectory, "attempt.json"))).mode & 0o777, 0o600);
+    assert.equal((await stat(path.join(result.artifactDirectory, "document.json"))).mode & 0o777, 0o600);
+    assert.deepEqual(await readdir(result.attemptDirectory), [result.artifactId]);
+    assert.deepEqual((await readdir(result.artifactDirectory)).sort(), ["attempt.json", "document.json"]);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -3150,8 +3261,9 @@ test("publishes attempts with private directory and file permissions", async () 
 
 test("does not treat pending or manifestless claim directories as formal attempts", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
-  const pending = path.join(temporary, "pending");
-  const manifestless = path.join(temporary, "manifestless");
+  const pending = path.join(temporary, "a".repeat(64));
+  const manifestless = path.join(temporary, "b".repeat(64));
+  const manifestlessArtifact = path.join(manifestless, "c".repeat(64));
   try {
     await mkdir(pending, { mode: 0o700 });
     await writeFile(path.join(pending, ".attempt-owner.pending"), `${"0".repeat(36)}\n`, {
@@ -3165,7 +3277,8 @@ test("does not treat pending or manifestless claim directories as formal attempt
     );
 
     await mkdir(manifestless, { mode: 0o700 });
-    await writeFile(path.join(manifestless, "document.json"), "{}\n", { mode: 0o600 });
+    await mkdir(manifestlessArtifact, { mode: 0o700 });
+    await writeFile(path.join(manifestlessArtifact, "document.json"), "{}\n", { mode: 0o600 });
     await assert.rejects(
       readAttempt(manifestless),
       (error: unknown) => error instanceof RunnerError && error.code === "attempt_invalid",
@@ -3178,14 +3291,16 @@ test("does not treat pending or manifestless claim directories as formal attempt
 test("rejects a FIFO attempt manifest without blocking", async () => {
   if (process.platform === "win32") return;
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
-  const attemptDirectory = path.join(temporary, "attempt");
-  const fifo = path.join(attemptDirectory, "attempt.json");
+  const attemptDirectory = path.join(temporary, "d".repeat(64));
+  const artifactDirectory = path.join(attemptDirectory, "e".repeat(64));
+  const fifo = path.join(artifactDirectory, "attempt.json");
   try {
     await mkdir(attemptDirectory, { mode: 0o700 });
+    await mkdir(artifactDirectory, { mode: 0o700 });
     const maker = spawn("mkfifo", [fifo], { stdio: "ignore" });
     const [makerCode] = (await once(maker, "close")) as [number | null];
     assert.equal(makerCode, 0);
-    await writeFile(path.join(attemptDirectory, "document.json"), "{}\n", { mode: 0o600 });
+    await writeFile(path.join(artifactDirectory, "document.json"), "{}\n", { mode: 0o600 });
     const script = [
       `import { readAttempt } from ${JSON.stringify(path.resolve(".tmp/build/src/runner/attempt.js"))};`,
       "try { await readAttempt(process.argv[1]); process.exitCode = 0; } catch { process.exitCode = 1; }",
@@ -4198,7 +4313,7 @@ test("claims an attempt directory before invoking a concurrent provider", async 
     assert.equal(providerCalls, 1);
     releaseFirst();
     const first = await firstRun;
-    assert.deepEqual((await readdir(first.attemptDirectory)).sort(), ["attempt.json", "document.json"]);
+    assert.deepEqual(await readdir(first.attemptDirectory), [first.artifactId]);
   } finally {
     releaseFirst();
     await rm(temporary, { recursive: true, force: true });
@@ -4236,7 +4351,7 @@ test("does not let concurrent runs delete each other's staging files", async () 
     assert.equal(providerCalls, 2);
     assert.notEqual(results[0]!.runId, results[1]!.runId);
     for (const result of results) {
-      assert.deepEqual((await readdir(result.attemptDirectory)).sort(), [
+      assert.deepEqual((await readdir(result.artifactDirectory)).sort(), [
         "attempt.json",
         "document.json",
       ]);

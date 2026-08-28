@@ -7,6 +7,8 @@
   "required": [
     "attemptVersion",
     "attemptIdentityVersion",
+    "artifactIdentityVersion",
+    "artifactId",
     "attemptKey",
     "attemptId",
     "runId",
@@ -30,6 +32,12 @@
     },
     "attemptIdentityVersion": {
       "const": 1
+    },
+    "artifactIdentityVersion": {
+      "const": 1
+    },
+    "artifactId": {
+      "$ref": "#/$defs/digest"
     },
     "attemptKey": {
       "type": "string",
