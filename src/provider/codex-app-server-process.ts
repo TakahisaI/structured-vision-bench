@@ -15,6 +15,7 @@ import {
   CODEX_APP_SERVER_CLI_VERSION,
   runCodexAppServerProtocol,
   type CodexAppServerProtocolConnection,
+  type CodexAppServerProtocolReceivedMessage,
   type CodexAppServerProtocolResult,
 } from "./codex-app-server.js";
 import type { RequestedExecutionSettings } from "../runner/types.js";
@@ -574,7 +575,7 @@ async function runConnectedProcess(
       terminate,
     );
     const ready = await raceAbort(processConnection.receive(), controller.signal);
-    assertIsolationReady(ready);
+    assertIsolationReady(ready?.message);
     const request = await prepareRequest(controller.signal);
     const result = await runCodexAppServerProtocol(
       processConnection,
@@ -680,7 +681,7 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
     }
   }
 
-  async receive(): Promise<JsonValue | undefined> {
+  async receive(): Promise<CodexAppServerProtocolReceivedMessage | undefined> {
     for (;;) {
       if (this.failed) throw new Error();
       let chunk = this.unread;
@@ -711,14 +712,17 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
       }
       try {
         const line = this.pending.subarray(0, this.pendingBytes);
-        return normalizeJsonValue(
-          parseJson(
-            decodeUtf8Strict(line, "codex app-server message"),
+        return {
+          message: normalizeJsonValue(
+            parseJson(
+              decodeUtf8Strict(line, "codex app-server message"),
+              "codex app-server message",
+            ),
             "codex app-server message",
+            MAX_JSONL_LINE_BYTES,
           ),
-          "codex app-server message",
-          MAX_JSONL_LINE_BYTES,
-        );
+          byteLength: this.pendingBytes + 1,
+        };
       } finally {
         this.pending.fill(0, 0, this.pendingBytes);
         this.pendingBytes = 0;

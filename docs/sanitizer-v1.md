@@ -120,7 +120,11 @@ The required options are:
 
 `--sanitizer-timeout-ms` and `--sanitizer-output-limit` override bounded defaults. The policy path
 is opened as a bounded, no-follow, non-blocking regular file and must not be group/other accessible
-on Unix. It is local configuration and is never written to an attempt or diagnostic.
+on supported Unix platforms. Windows is fail-closed for sanitizer policy reads because Node's
+portable open flags do not provide the required no-follow and non-blocking guarantees there. A
+future Windows implementation requires a native reparse-point-safe, device-namespace-safe open
+boundary before this restriction can be removed. The path is local configuration and is never
+written to an attempt or diagnostic.
 
 CI and automated tests use only a fake local sanitizer, fictional policies, and synthetic documents.
 They never start a real provider, login flow, or consumer sanitizer.
