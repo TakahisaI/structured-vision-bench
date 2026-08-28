@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   createCommandSanitizer,
+  consumeCommandSanitizerFailureCode,
   isAbortSettlingCommandSanitizer,
 } from "../src/runner/command-sanitizer.js";
 import { RunnerError } from "../src/runner/errors.js";
@@ -57,6 +58,26 @@ test("validates and snapshots command sanitizer configuration", () => {
       sanitizerId: "synthetic-command-sanitizer",
     },
     { executable: process.execPath, sanitizerId: "not safe" },
+    {
+      executable: process.execPath,
+      sanitizerId: "synthetic-command-sanitizer",
+      allowedFailureCodes: "synthetic_policy_blocked",
+    },
+    {
+      executable: process.execPath,
+      sanitizerId: "synthetic-command-sanitizer",
+      allowedFailureCodes: ["not safe"],
+    },
+    {
+      executable: process.execPath,
+      sanitizerId: "synthetic-command-sanitizer",
+      allowedFailureCodes: ["synthetic_policy_blocked", "synthetic_policy_blocked"],
+    },
+    {
+      executable: process.execPath,
+      sanitizerId: "synthetic-command-sanitizer",
+      allowedFailureCodes: Array.from({ length: 101 }, (_, index) => `synthetic_${index}`),
+    },
   ];
   for (const options of invalidOptions) {
     assert.throws(
@@ -137,6 +158,60 @@ test("accepts one strict response and strips the wire version", async () => {
   assert.equal("responseVersion" in response, false);
   assert.equal(response.sanitizerId, sanitizer.id);
   assert.equal(response.policyBindingDigest, request.policyBindingDigest);
+
+  const responseWithStderr = await commandSanitizer("success-with-stderr").sanitize(
+    syntheticRequest(),
+  );
+  assert.equal(responseWithStderr.sanitizerId, sanitizer.id);
+});
+
+test("exposes only an instance-bound allowlisted command failure capability", async () => {
+  const allowedFailureCodes = ["synthetic_policy_blocked"];
+  const sanitizer = commandSanitizer("stable-failure", [], { allowedFailureCodes });
+  allowedFailureCodes[0] = "synthetic_mutated";
+  const error = await sanitizer.sanitize(syntheticRequest()).then(
+    () => undefined,
+    (reason: unknown) => reason,
+  );
+  assert.equal(error instanceof Error, true);
+  assert.equal((error as Error).message, "sanitizer command failed");
+
+  const other = commandSanitizer("stable-failure", [], {
+    allowedFailureCodes: ["synthetic_policy_blocked"],
+  });
+  assert.equal(consumeCommandSanitizerFailureCode(other, error), undefined);
+  assert.equal(
+    consumeCommandSanitizerFailureCode(sanitizer, error),
+    "synthetic_policy_blocked",
+  );
+  assert.equal(consumeCommandSanitizerFailureCode(sanitizer, error), undefined);
+});
+
+test("keeps malformed, unknown, oversized, and stderr failures generic", async () => {
+  for (const mode of [
+    "failure-with-message",
+    "failure-with-path",
+    "failure-duplicate",
+    "failure-broken-json",
+    "failure-unknown-code",
+    "failure-oversized",
+    "failure-with-stderr",
+    "stable-failure-zero",
+    "success-response-nonzero",
+    "nonzero",
+  ]) {
+    const sanitizer = commandSanitizer(mode, [], {
+      allowedFailureCodes: ["synthetic_policy_blocked"],
+    });
+    const error = await sanitizer.sanitize(syntheticRequest()).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    assert.equal(error instanceof Error, true);
+    assert.equal((error as Error).message, "sanitizer command failed");
+    assert.equal(consumeCommandSanitizerFailureCode(sanitizer, error), undefined);
+    assert.equal((error as Error).message.includes("SYNTHETIC-PRIVATE"), false);
+  }
 });
 
 test("rejects request identity and policy binding changes before spawning", async () => {

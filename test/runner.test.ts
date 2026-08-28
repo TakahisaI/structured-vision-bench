@@ -2159,7 +2159,10 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
             id: "fake-sanitizer",
             protocolVersion: 1,
             sanitize: async () => {
-              throw new RunnerError("sanitizer_response_invalid", "SYNTHETIC-SECRET-MARKER");
+              throw new RunnerError(
+                "synthetic_policy_blocked" as never,
+                "SYNTHETIC-SECRET-MARKER",
+              );
             },
           },
           policyEnvelopeBytes: policyBytes,
@@ -2177,6 +2180,104 @@ test("binds sanitizer output to the current case identity and policy bytes", asy
         error.code === "sanitizer_failed" &&
         !error.message.includes("SYNTHETIC-SECRET-MARKER"),
     );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("propagates only an allowlisted command sanitizer failure code", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-runner-"));
+  const bundle = path.join(temporary, "bundle");
+  const attempts = path.join(temporary, "attempts");
+  const marker = path.join(temporary, "sanitizer-failure.json");
+  const identity = computeCaseInputIdentity({
+    caseId: "synthetic-invoice-basic",
+    documentKind: "synthetic_invoice",
+    preparedImage: { mediaType: "image/png", sha256: IMAGE_SHA256 },
+  });
+  const policyBytes = createSanitizerPolicyEnvelope({
+    target: identity,
+    policyVersion: 1,
+    policy: { syntheticRule: "remove-extra-fields" },
+  });
+  const policyDigest = createHash("sha256").update(policyBytes).digest("hex");
+  const policyBindingDigest = computePolicyBindingDigest({
+    caseInputIdentityDigest: identity.digest,
+    policyVersion: 1,
+    policyDigest,
+  });
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const sanitizer = createCommandSanitizer({
+      executable: process.execPath,
+      argv: [FAKE_COMMAND_SANITIZER, "stable-failure", marker],
+      sanitizerId: "synthetic-command-sanitizer",
+      allowedFailureCodes: ["synthetic_policy_blocked"],
+    });
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: attempts,
+        provider: createMockProvider(),
+        sanitizerRequirement: syntheticRequirement(true),
+        sanitizer: {
+          required: true,
+          sanitizer,
+          policyEnvelopeBytes: policyBytes,
+          expectedSanitizerId: sanitizer.id,
+          expectedProtocolVersion: 1,
+          expectedPolicyVersion: 1,
+          expectedPolicyDigest: policyDigest,
+          expectedCaseInputIdentityVersion: 1,
+          expectedCaseInputIdentityDigest: identity.digest,
+          expectedPolicyBindingDigest: policyBindingDigest,
+        },
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError &&
+        error.code === "synthetic_policy_blocked" &&
+        error.message === "sanitizer failed" &&
+        error.details.length === 0,
+    );
+    const recorded = JSON.parse(await readFile(marker, "utf8")) as { cwd: string };
+    await assert.rejects(access(recorded.cwd));
+    assert.deepEqual(await readdir(attempts), []);
+
+    const relayAttempts = path.join(temporary, "relay-attempts");
+    const relaySanitizer: Sanitizer = {
+      id: "synthetic-relay-sanitizer",
+      protocolVersion: 1,
+      sanitize: async (request, signal) => {
+        try {
+          return await sanitizer.sanitize(request, signal);
+        } catch (error) {
+          throw error;
+        }
+      },
+    };
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: bundle,
+        attemptRoot: relayAttempts,
+        provider: createMockProvider(),
+        sanitizerRequirement: syntheticRequirement(true),
+        sanitizer: {
+          required: true,
+          sanitizer: relaySanitizer,
+          policyEnvelopeBytes: policyBytes,
+          expectedSanitizerId: relaySanitizer.id,
+          expectedProtocolVersion: 1,
+          expectedPolicyVersion: 1,
+          expectedPolicyDigest: policyDigest,
+          expectedCaseInputIdentityVersion: 1,
+          expectedCaseInputIdentityDigest: identity.digest,
+          expectedPolicyBindingDigest: policyBindingDigest,
+        },
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "sanitizer_failed",
+    );
+    assert.deepEqual(await readdir(relayAttempts), []);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

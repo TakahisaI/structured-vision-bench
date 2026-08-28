@@ -139,6 +139,16 @@ flags do not enforce those semantics for Windows reparse points and special devi
 Windows sanitizer-policy support therefore requires a future native secure-open implementation;
 digest binding alone does not replace this path-level boundary.
 
+A command sanitizer may propagate only a consumer-preconfigured stable failure code from the strict,
+value-free failure envelope defined in [`docs/sanitizer-v1.md`](sanitizer-v1.md). The adapter accepts
+it only for a non-zero exit with no stderr, within the independent 256-byte bound, after strict UTF-8,
+duplicate-member, exact-key, version, safe-label, and allowlist checks. A module-private one-shot
+capability binds the verified code to the exact command sanitizer instance; arbitrary sanitizer
+exceptions and relayed errors cannot forge it. Message, path, digest, raw values, stderr, malformed
+or oversized output, signals, overflow, abort, and timeout remain generic. Request, stdout, and
+stderr buffers are zeroed best-effort on every path, and failed runs leave no formal attempt or
+private staging artifact after cleanup.
+
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through
 the last pre-publication validation. Before provider work, the attempt-identity destination is claimed

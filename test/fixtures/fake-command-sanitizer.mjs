@@ -21,6 +21,65 @@ if (mode === "spawn-marker") {
   } else if (mode === "nonzero") {
     process.stderr.write("synthetic child failure\n");
     process.exitCode = 7;
+  } else if (mode === "stable-failure") {
+    if (markerPath !== undefined) {
+      await writeFile(markerPath, JSON.stringify({ cwd: process.cwd() }), "utf8");
+    }
+    process.stdout.write(JSON.stringify({
+      failureVersion: 1,
+      code: "synthetic_policy_blocked",
+    }));
+    process.exitCode = 7;
+  } else if (mode === "stable-failure-zero") {
+    process.stdout.write(JSON.stringify({
+      failureVersion: 1,
+      code: "synthetic_policy_blocked",
+    }));
+  } else if (mode === "success-response-nonzero") {
+    process.stdout.write(JSON.stringify(response(request)));
+    process.exitCode = 7;
+  } else if (mode === "success-with-stderr") {
+    process.stdout.write(JSON.stringify(response(request)));
+    process.stderr.write("synthetic ignored success diagnostic");
+  } else if (mode === "failure-with-message") {
+    process.stdout.write(JSON.stringify({
+      failureVersion: 1,
+      code: "synthetic_policy_blocked",
+      message: "SYNTHETIC-PRIVATE-FAILURE-MESSAGE",
+    }));
+    process.exitCode = 7;
+  } else if (mode === "failure-with-path") {
+    process.stdout.write(JSON.stringify({
+      failureVersion: 1,
+      code: "synthetic_policy_blocked",
+      path: "/synthetic/private-path",
+    }));
+    process.exitCode = 7;
+  } else if (mode === "failure-duplicate") {
+    process.stdout.write(
+      '{"failureVersion":1,"code":"synthetic_policy_blocked","code":"synthetic_policy_blocked"}',
+    );
+    process.exitCode = 7;
+  } else if (mode === "failure-broken-json") {
+    process.stdout.write('{"failureVersion":1');
+    process.exitCode = 7;
+  } else if (mode === "failure-unknown-code") {
+    process.stdout.write(JSON.stringify({ failureVersion: 1, code: "synthetic_unknown" }));
+    process.exitCode = 7;
+  } else if (mode === "failure-oversized") {
+    process.stdout.write(JSON.stringify({
+      failureVersion: 1,
+      code: "synthetic_policy_blocked",
+      padding: "x".repeat(300),
+    }));
+    process.exitCode = 7;
+  } else if (mode === "failure-with-stderr") {
+    process.stdout.write(JSON.stringify({
+      failureVersion: 1,
+      code: "synthetic_policy_blocked",
+    }));
+    process.stderr.write("SYNTHETIC-PRIVATE-FAILURE-STDERR");
+    process.exitCode = 7;
   } else if (mode === "invalid-json") {
     process.stdout.write("{not-json");
   } else if (mode === "duplicate-json") {

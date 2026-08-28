@@ -16,6 +16,7 @@ import type {
 } from "./types.js";
 
 export const MAX_COMMAND_SANITIZER_REQUEST_BYTES = 16 * 1024 * 1024;
+export const MAX_COMMAND_SANITIZER_FAILURE_BYTES = 256;
 const MAX_COMMAND_SANITIZER_SOURCE_BYTES =
   MAX_COMMAND_SANITIZER_REQUEST_BYTES * 2 + 4 * 1024;
 
@@ -40,6 +41,11 @@ export type CommandSanitizerRequestV1 = {
 export type CommandSanitizerResponseV1 = SanitizerResponse & {
   responseVersion: 1;
 };
+
+export type CommandSanitizerFailureV1 = Readonly<{
+  failureVersion: 1;
+  code: string;
+}>;
 
 /** @internal Creates the immutable request used by the private command protocol. */
 export function snapshotCommandSanitizerRequest(
@@ -214,6 +220,32 @@ export function parseCommandSanitizerResponse(
     policyBindingDigest: response.policyBindingDigest,
     ...(findings === undefined ? {} : { findings }),
   });
+}
+
+/** @internal Parses one value-free non-zero exit envelope and clears its source bytes. */
+export function parseCommandSanitizerFailure(
+  bytes: Uint8Array,
+  allowedCodes: readonly string[],
+): CommandSanitizerFailureV1 {
+  try {
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_COMMAND_SANITIZER_FAILURE_BYTES) {
+      throw new Error();
+    }
+    const text = decodeUtf8Strict(bytes, "command sanitizer failure");
+    if (text.trim() !== text) throw new Error();
+    const failure = requiredObject(parseJson(text, "command sanitizer failure"));
+    assertKeys(failure, ["failureVersion", "code"]);
+    if (
+      failure.failureVersion !== 1 ||
+      !isSafeLabel(failure.code) ||
+      !allowedCodes.includes(failure.code)
+    ) {
+      throw new Error();
+    }
+    return Object.freeze({ failureVersion: 1, code: failure.code });
+  } finally {
+    Buffer.prototype.fill.call(bytes, 0);
+  }
 }
 
 function snapshotProvider(value: JsonValue | undefined): SanitizerRequest["provider"] {

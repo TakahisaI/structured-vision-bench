@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   encodeCommandSanitizerRequest,
+  MAX_COMMAND_SANITIZER_FAILURE_BYTES,
   MAX_COMMAND_SANITIZER_REQUEST_BYTES,
+  parseCommandSanitizerFailure,
   parseCommandSanitizerResponse,
   snapshotCommandSanitizerRequest,
 } from "../src/runner/command-sanitizer-wire.js";
@@ -224,5 +226,72 @@ test("rejects malformed, duplicate, unknown, and unbound responses", () => {
     assert.throws(() =>
       parseCommandSanitizerResponse(bytes, "synthetic-sanitizer", request),
     );
+  }
+});
+
+test("parses one strict allowlisted failure envelope and zeroes its bytes", () => {
+  const bytes = Buffer.from(
+    JSON.stringify({ failureVersion: 1, code: "synthetic_policy_blocked" }),
+  );
+  const failure = parseCommandSanitizerFailure(bytes, [
+    "synthetic_other",
+    "synthetic_policy_blocked",
+  ]);
+  assert.deepEqual(failure, {
+    failureVersion: 1,
+    code: "synthetic_policy_blocked",
+  });
+  assert.equal(Object.isFrozen(failure), true);
+  assert.equal(bytes.every((value) => value === 0), true);
+});
+
+test("rejects unsafe failure envelopes and zeroes every source buffer", () => {
+  const cases = [
+    Buffer.alloc(0),
+    Buffer.from([0xff]),
+    Buffer.from('{"failureVersion":1,"code":"synthetic_policy_blocked"'),
+    Buffer.from(
+      '{"failureVersion":1,"code":"synthetic_policy_blocked","code":"synthetic_policy_blocked"}',
+    ),
+    Buffer.from(
+      JSON.stringify({
+        failureVersion: 1,
+        code: "synthetic_policy_blocked",
+        message: "SYNTHETIC-PRIVATE-MESSAGE",
+      }),
+    ),
+    Buffer.from(
+      JSON.stringify({
+        failureVersion: 1,
+        code: "synthetic_policy_blocked",
+        path: "/synthetic/private-path",
+      }),
+    ),
+    Buffer.from(
+      JSON.stringify({
+        failureVersion: 1,
+        code: "synthetic_policy_blocked",
+        digest: "0".repeat(64),
+      }),
+    ),
+    Buffer.from(JSON.stringify({ code: "synthetic_policy_blocked" })),
+    Buffer.from(JSON.stringify({ failureVersion: 1 })),
+    Buffer.from(JSON.stringify({ failureVersion: 2, code: "synthetic_policy_blocked" })),
+    Buffer.from(JSON.stringify({ failureVersion: 1, code: "not safe" })),
+    Buffer.from(JSON.stringify({ failureVersion: 1, code: "synthetic_unknown" })),
+    Buffer.from(
+      `${JSON.stringify({ failureVersion: 1, code: "synthetic_policy_blocked" })}\n`,
+    ),
+    Buffer.from(
+      `${JSON.stringify({ failureVersion: 1, code: "synthetic_policy_blocked" })}{}`,
+    ),
+    Buffer.alloc(MAX_COMMAND_SANITIZER_FAILURE_BYTES + 1, 0x78),
+  ];
+
+  for (const bytes of cases) {
+    assert.throws(() =>
+      parseCommandSanitizerFailure(bytes, ["synthetic_policy_blocked"]),
+    );
+    assert.equal(bytes.every((value) => value === 0), true);
   }
 });

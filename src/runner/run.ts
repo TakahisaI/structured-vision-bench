@@ -38,7 +38,10 @@ import {
   type SanitizerRequirementDecisionV1,
 } from "./identity.js";
 import { prepareSanitizerPolicy, type PreparedSanitizerPolicy } from "./sanitizer.js";
-import { isAbortSettlingCommandSanitizer } from "./command-sanitizer.js";
+import {
+  consumeCommandSanitizerFailureCode,
+  isAbortSettlingCommandSanitizer,
+} from "./command-sanitizer.js";
 import {
   isSanitizerFindingPath,
   sanitizerFindingPathIsAllowed,
@@ -130,6 +133,7 @@ type ValidatedSanitizerImplementation = Readonly<{
   protocolVersion: 1;
   sanitize: Sanitizer["sanitize"];
   awaitAbort: boolean;
+  consumeFailureCode: (error: unknown) => ConstructorParameters<typeof RunnerError>[0] | undefined;
 }>;
 
 export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
@@ -553,6 +557,8 @@ function validateSanitizerImplementation(
       protocolVersion: 1,
       sanitize: Function.prototype.bind.call(sanitize, value) as Sanitizer["sanitize"],
       awaitAbort: isAbortSettlingCommandSanitizer(value),
+      consumeFailureCode: (error: unknown) =>
+        consumeCommandSanitizerFailureCode(value, error),
     });
   } catch {
     throw new RunnerError(
@@ -1565,6 +1571,10 @@ async function executeSanitizer(
     );
     response = snapshotSanitizerResponse(responseValue);
   } catch (error) {
+    const failureCode = sanitizer.consumeFailureCode(error);
+    if (failureCode !== undefined) {
+      throw internalRunnerError(failureCode, "sanitizer failed");
+    }
     if (isInternalRunnerError(error)) throw error;
     throw internalRunnerError("sanitizer_failed", "sanitizer failed");
   }

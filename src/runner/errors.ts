@@ -1,5 +1,12 @@
 import { boundDetails } from "../bundle/validate-bundle.js";
 
+declare const SANITIZER_FAILURE_CODE: unique symbol;
+
+/** A value-free stable code accepted from a verified command-sanitizer failure envelope. */
+export type SanitizerFailureCode = string & {
+  readonly [SANITIZER_FAILURE_CODE]: true;
+};
+
 export type RunnerErrorCode =
   | "run_configuration_invalid"
   | "provider_invalid"
@@ -31,7 +38,8 @@ export type RunnerErrorCode =
   | "attempt_document_digest_mismatch"
   | "attempt_write_failed"
   | "runner_input_unreadable"
-  | "internal_error";
+  | "internal_error"
+  | SanitizerFailureCode;
 
 const MAX_RUNNER_MESSAGE_LENGTH = 240;
 

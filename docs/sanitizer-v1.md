@@ -16,10 +16,12 @@ this document; app-server integration remains Issue #18, and suite/resume propag
 ## Configuration and process boundary
 
 `createCommandSanitizer()` accepts an absolute executable, an argument vector, an environment-name
-allowlist, a bounded output limit, and the expected sanitizer ID. It snapshots all configuration and
-allowlisted environment values when the factory is called. The command is started with `shell:
-false`, an allowlist-only environment, and a fresh empty private working directory. Environment
-names must be ASCII identifiers and are unique under ASCII case folding.
+allowlist, a bounded output limit, the expected sanitizer ID, and an optional allowlist of stable
+failure codes. It snapshots all configuration and allowlisted environment values when the factory
+is called. Failure codes are case-sensitive ASCII safe labels, unique, and limited to 100 entries.
+The command is started with `shell: false`, an allowlist-only environment, and a fresh empty private
+working directory. Environment names must be ASCII identifiers and are unique under ASCII case
+folding.
 
 The executable is run configuration, never bundle content. The runner validates and binds the
 sanitizer ID, protocol version, and callable method before provider invocation.
@@ -101,6 +103,30 @@ Only `sanitizedDocument` becomes eligible for schema validation and publication.
 document, raw provider serialization/digest, policy body/path, and failure details are never written
 to the attempt or normal output.
 
+## Failure framing
+
+A conforming stable failure uses a non-zero exit status, writes nothing to stderr, and writes exactly
+one strict UTF-8 JSON object to stdout with no leading/trailing whitespace, LF, or trailing bytes:
+
+```json
+{"failureVersion":1,"code":"synthetic_policy_blocked"}
+```
+
+The envelope is independently limited to 256 bytes and has exactly the two fields shown. Message,
+path, raw value, digest, and any extra or duplicate member are prohibited. The code must exactly
+match a factory-snapshotted `allowedFailureCodes` entry. Only then does the command adapter create a
+one-shot, module-private failure capability bound to that exact sanitizer instance. The runner
+converts that capability to a fixed-message, empty-details `RunnerError` whose code is the same
+allowlisted value. Arbitrary sanitizer exceptions, error properties, or `RunnerError` instances do
+not possess this capability and become generic `sanitizer_failed`.
+
+Empty or malformed output, invalid UTF-8, unknown or unsafe codes, wrong versions, oversized
+envelopes, zero exits carrying a failure envelope, non-zero exits carrying a success response,
+stderr output, signal exits, overflow, abort, and timeout never carry a consumer code. They retain
+the existing generic classification; timeout remains `sanitizer_timeout`. A failed run may use the
+runner's pre-publication claim and private staging during execution, but cleanup completes before the
+error is returned and leaves no formal attempt or staging artifact.
+
 ## Cancellation, limits, and cleanup
 
 Stdout and stderr share one configured byte budget; stderr is counted and discarded. Timeout or
@@ -135,6 +161,8 @@ The required options are:
 - optional `--requirement-consumer-source-commit` when the decision has one.
 - repeatable `--sanitizer-finding-path` entries for non-null finding paths the consumer permits the
   runner to persist; omitting it permits only `null` paths.
+- optional repeatable `--sanitizer-failure-code` entries for stable codes accepted from the strict
+  non-zero failure envelope; omitting it permits no propagated consumer failure code.
 
 `--sanitizer-timeout-ms` and `--sanitizer-output-limit` override bounded defaults. The policy path
 is opened as a bounded, no-follow, non-blocking regular file and must not be group/other accessible
