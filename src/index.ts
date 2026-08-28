@@ -4,6 +4,16 @@ export * from "./bundle/validate-bundle.js";
 export * from "./comparison/compare.js";
 export * from "./provider/mock.js";
 export {
+  CODEX_APP_SERVER_PROVIDER_ID,
+  CODEX_APP_SERVER_PROVIDER_IMPLEMENTATION_VERSION,
+  CODEX_APP_SERVER_PROVIDER_ROUTE,
+  createCodexAppServerProvider,
+} from "./provider/codex-app-server-provider.js";
+export type {
+  CodexAppServerProviderOptions,
+  CodexAppServerTransportRevalidator,
+} from "./provider/codex-app-server-provider.js";
+export {
   COMMAND_PROVIDER_OPERATION_ENV,
   COMMAND_PROVIDER_PROTOCOL_VERSION,
   COMMAND_PROVIDER_REQUEST_DIRECTORY_ENV,

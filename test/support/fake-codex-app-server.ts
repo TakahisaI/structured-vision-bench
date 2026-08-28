@@ -274,7 +274,26 @@ async function runProtocol(overrides: ReadonlyMap<string, string>): Promise<void
       const finalItem = {
         id: "synthetic-final",
         type: "agentMessage",
-        text: JSON.stringify({ documentKind: "synthetic_invoice", totalAmount: 0 }),
+        text: JSON.stringify(
+          mode === "provider-success"
+            ? {
+                documentKind: "synthetic_invoice",
+                invoiceNumber: "INV-SYNTH-PROVIDER",
+                issuedAt: "2031-02-03",
+                currency: "JPY",
+                lines: [
+                  {
+                    lineNo: 1,
+                    description: "Synthetic service",
+                    quantity: 1,
+                    unitPrice: 0,
+                    amount: 0,
+                  },
+                ],
+                totalAmount: 0,
+              }
+            : { documentKind: "synthetic_invoice", totalAmount: 0 },
+        ),
         phase: "final_answer",
         memoryCitation: null,
         delivery: null,

@@ -12,9 +12,12 @@ import {
   CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION,
   CODEX_APP_SERVER_TOOL_PROFILE_VERSION,
   DEFAULT_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES,
+  awaitProcessCleanup,
+  linuxProcessGroupHasLiveMember,
   runCodexAppServerProcess,
   type CodexAppServerProcessOptions,
   type CodexAppServerProcessRequest,
+  type LinuxProcessTable,
 } from "../src/provider/codex-app-server-process.js";
 import { MAX_PROVIDER_INPUT_BYTES } from "../src/bundle/validate-bundle.js";
 
@@ -37,6 +40,51 @@ const PROHIBITED_HOSTED_KEYS = [
   "sanitizerRequirement",
   "truth",
 ];
+
+test("ignores inaccessible unrelated entries while inspecting Linux process groups", async () => {
+  const states = new Map([
+    ["101", linuxProcessStat("S", 77)],
+    ["102", linuxProcessStat("Z", 88)],
+  ]);
+  const processTable: LinuxProcessTable = {
+    async listProcessIds() {
+      return ["1", "101", "102", "103"];
+    },
+    async readProcessStat(processId) {
+      if (processId === "1") throw errorWithCode("EACCES");
+      if (processId === "103") throw errorWithCode("EPERM");
+      const source = states.get(processId);
+      assert.ok(source);
+      return source;
+    },
+  };
+
+  assert.equal(await linuxProcessGroupHasLiveMember(77, processTable), true);
+  assert.equal(await linuxProcessGroupHasLiveMember(88, processTable), false);
+});
+
+test("waits for leader close when process-group settlement inspection fails", async () => {
+  let closeLeader: (() => void) | undefined;
+  const close = new Promise<void>((resolve) => {
+    closeLeader = resolve;
+  });
+  let settled = false;
+  const running = awaitProcessCleanup(
+    async () => {
+      throw errorWithCode("EACCES");
+    },
+    close,
+  ).finally(() => {
+    settled = true;
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.ok(closeLeader);
+  closeLeader();
+  await assert.rejects(running, (error: unknown) => objectWithCode(error).code === "EACCES");
+  assert.equal(settled, true);
+});
 
 test("runs one fixed app-server process in an isolated empty workspace", async () => {
   await withFixture("success", async ({ options, capture, canary }) => {
@@ -231,7 +279,7 @@ test("zeroes a lazy input that resolves after timeout settlement", async () => {
       },
     };
     const running = runCodexAppServerProcess(
-      { ...options, timeoutMs: 100 },
+      { ...options, timeoutMs: 750 },
       pending,
     );
     await started;
@@ -258,7 +306,7 @@ test("bounds a pending lazy input read without starting app-server", async () =>
       },
     };
     await assert.rejects(
-      runCodexAppServerProcess({ ...options, timeoutMs: 100 }, pending),
+      runCodexAppServerProcess({ ...options, timeoutMs: 750 }, pending),
       stableProcessError,
     );
     assert.deepEqual(reads, { image: 1, schema: 1, system: 1, instruction: 0 });
@@ -710,6 +758,14 @@ function object(value: unknown): JsonObject {
 function objectWithCode(value: unknown): { code?: string } {
   if (value === null || typeof value !== "object") return {};
   return value as { code?: string };
+}
+
+function errorWithCode(code: string): Error & { code: string } {
+  return Object.assign(new Error("synthetic process table failure"), { code });
+}
+
+function linuxProcessStat(state: string, processGroupId: number): string {
+  return `999 (synthetic process) ${state} 1 ${processGroupId} 0 0`;
 }
 
 function array(value: unknown): unknown[] {

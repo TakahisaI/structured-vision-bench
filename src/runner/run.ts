@@ -20,6 +20,13 @@ import {
 import { RunnerError } from "./errors.js";
 import { isAbortSettlingCommandProvider } from "../provider/command.js";
 import {
+  CODEX_APP_SERVER_PROVIDER_ID,
+  CODEX_APP_SERVER_PROVIDER_IMPLEMENTATION_VERSION,
+  CODEX_APP_SERVER_PROVIDER_ROUTE,
+  isAbortSettlingCodexAppServerProvider,
+} from "../provider/codex-app-server-provider.js";
+import { CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION } from "../provider/codex-app-server-process.js";
+import {
   computeCaseInputIdentity,
   computeAttemptIdentity,
   createSanitizerRequirementDecision,
@@ -732,7 +739,21 @@ function validateProvider(provider: Provider): ValidatedProvider {
     const protocolVersion = implementation.protocolVersion;
     const prepareTransport = implementation.prepareTransport;
     const invoke = implementation.invoke;
-    const awaitAbort = isAbortSettlingCommandProvider(value);
+    const isCodexAppServerProvider = isAbortSettlingCodexAppServerProvider(value);
+    const declaresCodexAppServerIdentity =
+      id === CODEX_APP_SERVER_PROVIDER_ID || route === CODEX_APP_SERVER_PROVIDER_ROUTE;
+    if (
+      declaresCodexAppServerIdentity !== isCodexAppServerProvider ||
+      (isCodexAppServerProvider &&
+        (id !== CODEX_APP_SERVER_PROVIDER_ID ||
+          route !== CODEX_APP_SERVER_PROVIDER_ROUTE ||
+          implementationVersion !== CODEX_APP_SERVER_PROVIDER_IMPLEMENTATION_VERSION ||
+          protocolVersion !== CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION))
+    ) {
+      throw new Error();
+    }
+    const awaitAbort =
+      isAbortSettlingCommandProvider(value) || isCodexAppServerProvider;
     if (
       typeof id !== "string" ||
       !isSafeLabel(id) ||

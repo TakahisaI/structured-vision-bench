@@ -1,6 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -33,6 +42,8 @@ const MAX_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
 const PRIVATE_TEMP_PARENT = "/tmp";
 const MAX_ARGUMENTS = 8;
 const MAX_ARGUMENT_BYTES = 4096;
+const PROCESS_GROUP_SETTLE_TIMEOUT_MS = 2_000;
+const PROCESS_GROUP_SETTLE_INTERVAL_MS = 10;
 const MAX_JSONL_LINE_BYTES = CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES + 1024 * 1024;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/u;
 const SAFE_LABEL_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
@@ -101,10 +112,19 @@ export type CodexAppServerProcessOptions = Readonly<{
   outputLimitBytes?: number;
 }>;
 
+export type CodexAppServerProcessStartGuard = (
+  signal: AbortSignal,
+) => Promise<void>;
+
+export type LinuxProcessTable = Readonly<{
+  listProcessIds(): Promise<readonly string[]>;
+  readProcessStat(processId: string): Promise<string>;
+}>;
+
 type ValidatedOptions = Readonly<{
   executable: string;
   executableArguments: readonly string[];
-  environment: readonly (readonly [string, string])[];
+  envAllowlist: readonly string[];
   timeoutMs: number;
   outputLimitBytes: number;
 }>;
@@ -129,14 +149,16 @@ export async function runCodexAppServerProcess(
   optionsValue: CodexAppServerProcessOptions,
   requestValue: CodexAppServerProcessRequest,
   signal?: AbortSignal,
+  startGuard?: CodexAppServerProcessStartGuard,
 ): Promise<CodexAppServerProtocolResult> {
   let workspace: PrivateWorkspace | undefined;
   const materialized: Buffer[] = [];
   try {
     const options = validateOptions(optionsValue);
     const request = snapshotRequest(requestValue);
+    if (startGuard !== undefined && typeof startGuard !== "function") throw new Error();
     assertActive(signal);
-    workspace = await createPrivateWorkspace(options.environment);
+    workspace = await createPrivateWorkspace();
     const activeWorkspace = workspace;
     await writeFile(activeWorkspace.catalog, createToolCatalog(request.requested), {
       encoding: "utf8",
@@ -192,6 +214,7 @@ export async function runCodexAppServerProcess(
         };
       },
       signal,
+      startGuard,
     );
   } catch {
     throw new Error("codex app-server process failed");
@@ -218,19 +241,15 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
   const executableArguments = snapshotStrings(value.executableArguments ?? [], MAX_ARGUMENTS);
   const names = snapshotStrings(value.envAllowlist ?? [], 64);
   const seen = new Set<string>();
-  const environment: Array<readonly [string, string]> = [];
   for (const name of names) {
-    const normalized = name;
     if (
       !ENVIRONMENT_NAME_PATTERN.test(name) ||
-      RESERVED_ENVIRONMENT_NAMES.has(normalized) ||
-      seen.has(normalized)
+      RESERVED_ENVIRONMENT_NAMES.has(name) ||
+      seen.has(name)
     ) {
       throw new Error();
     }
-    seen.add(normalized);
-    const environmentValue = process.env[name];
-    if (environmentValue !== undefined) environment.push(Object.freeze([name, environmentValue]));
+    seen.add(name);
   }
   const timeoutMs = value.timeoutMs ?? DEFAULT_CODEX_APP_SERVER_TIMEOUT_MS;
   const outputLimitBytes =
@@ -248,7 +267,7 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
   return Object.freeze({
     executable,
     executableArguments: Object.freeze(executableArguments),
-    environment: Object.freeze(environment),
+    envAllowlist: Object.freeze(names),
     timeoutMs,
     outputLimitBytes,
   });
@@ -318,9 +337,7 @@ function snapshotInput(
   });
 }
 
-async function createPrivateWorkspace(
-  allowed: readonly (readonly [string, string])[],
-): Promise<PrivateWorkspace> {
+async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
   const temporaryParent = await realpath(PRIVATE_TEMP_PARENT);
   if (!path.isAbsolute(temporaryParent)) throw new Error();
   const root = await mkdtemp(path.join(temporaryParent, "svbench-codex-"));
@@ -343,7 +360,6 @@ async function createPrivateWorkspace(
       ),
     );
     const environment = Object.create(null) as NodeJS.ProcessEnv;
-    for (const [name, environmentValue] of allowed) environment[name] = environmentValue;
     environment.HOME = directories.home;
     environment.USERPROFILE = directories.home;
     environment.CODEX_HOME = directories.codexHome;
@@ -541,6 +557,7 @@ async function runConnectedProcess(
     signal: AbortSignal,
   ) => Promise<Parameters<typeof runCodexAppServerProtocol>[1]>,
   parentSignal: AbortSignal | undefined,
+  startGuard: CodexAppServerProcessStartGuard | undefined,
 ): Promise<CodexAppServerProtocolResult> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();
@@ -558,11 +575,21 @@ async function runConnectedProcess(
     return termination;
   };
   try {
+    const arguments_ = appServerArguments(options, workspace);
     assertActive(parentSignal);
-    child = spawn(options.executable, appServerArguments(options, workspace), {
+    if (startGuard !== undefined) {
+      await startGuard(controller.signal);
+      assertActive(controller.signal);
+      assertActive(parentSignal);
+    }
+    const environment = snapshotSpawnEnvironment(
+      options.envAllowlist,
+      workspace.environment,
+    );
+    child = spawn(options.executable, arguments_, {
       cwd: workspace.workspace,
       detached: process.platform !== "win32",
-      env: workspace.environment,
+      env: environment,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -591,8 +618,11 @@ async function runConnectedProcess(
       if (controller.signal.aborted) {
         await waitForInterruptGrace(close);
       }
-      await terminate();
-      await close;
+      if (close === undefined) {
+        await terminate();
+      } else {
+        await awaitProcessCleanup(terminate, close);
+      }
     }
     throw new Error();
   } finally {
@@ -782,6 +812,100 @@ async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Prom
   } catch (error) {
     if (objectWithCode(error).code !== "ESRCH") throw error;
   }
+  await waitForProcessGroupSettlement(pid);
+}
+
+function snapshotSpawnEnvironment(
+  allowlist: readonly string[],
+  privateEnvironment: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const environment = Object.create(null) as NodeJS.ProcessEnv;
+  for (const name of allowlist) {
+    const value = process.env[name];
+    if (value !== undefined) environment[name] = value;
+  }
+  for (const name of Object.keys(privateEnvironment)) {
+    const value = privateEnvironment[name];
+    if (value !== undefined) environment[name] = value;
+  }
+  return environment;
+}
+
+async function waitForProcessGroupSettlement(processGroupId: number): Promise<void> {
+  const deadline = Date.now() + PROCESS_GROUP_SETTLE_TIMEOUT_MS;
+  while (await processGroupHasLiveMember(processGroupId)) {
+    if (Date.now() >= deadline) throw new Error();
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, PROCESS_GROUP_SETTLE_INTERVAL_MS);
+    });
+  }
+}
+
+async function processGroupHasLiveMember(processGroupId: number): Promise<boolean> {
+  try {
+    process.kill(-processGroupId, 0);
+  } catch (error) {
+    if (objectWithCode(error).code === "ESRCH") return false;
+    throw error;
+  }
+  if (process.platform !== "linux") return true;
+  return linuxProcessGroupHasLiveMember(processGroupId);
+}
+
+const DEFAULT_LINUX_PROCESS_TABLE: LinuxProcessTable = Object.freeze({
+  async listProcessIds(): Promise<readonly string[]> {
+    const processIds: string[] = [];
+    for (const entry of await readdir("/proc", { withFileTypes: true })) {
+      if (entry.isDirectory() && /^[1-9][0-9]*$/u.test(entry.name)) {
+        processIds.push(entry.name);
+      }
+    }
+    return processIds;
+  },
+  async readProcessStat(processId: string): Promise<string> {
+    return readFile(`/proc/${processId}/stat`, "utf8");
+  },
+});
+
+export async function linuxProcessGroupHasLiveMember(
+  processGroupId: number,
+  processTable: LinuxProcessTable = DEFAULT_LINUX_PROCESS_TABLE,
+): Promise<boolean> {
+  for (const processId of await processTable.listProcessIds()) {
+    let source: string;
+    try {
+      source = await processTable.readProcessStat(processId);
+    } catch (error) {
+      const code = objectWithCode(error).code;
+      if (code === "ENOENT" || code === "EACCES" || code === "EPERM") continue;
+      throw error;
+    }
+    const stateOffset = source.lastIndexOf(") ");
+    if (stateOffset < 0) continue;
+    const fields = source.slice(stateOffset + 2).split(" ");
+    if (
+      Number(fields[2]) === processGroupId &&
+      fields[0] !== "Z" &&
+      fields[0] !== "X"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export async function awaitProcessCleanup(
+  terminate: () => Promise<void>,
+  close: Promise<unknown>,
+): Promise<void> {
+  let terminationError: unknown;
+  try {
+    await terminate();
+  } catch (error) {
+    terminationError = error;
+  }
+  await close;
+  if (terminationError !== undefined) throw terminationError;
 }
 
 async function waitForInterruptGrace(

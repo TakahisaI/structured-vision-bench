@@ -104,7 +104,13 @@ approval requests. Its process client requires an isolation-capable app-server t
 configuration and plugin startup before an in-process readiness proof, runs it in an isolated empty
 workspace with a fixed no-host-tool catalog, excludes account and extension prompt contributors,
 and tears down its single process before settlement. The stock CLI fails closed at this boundary.
-Issue #20 adds its approval-bound Provider wrapper.
+The public Provider wrapper requires a consumer-owned revalidator, binds one exact approval
+attestation to only the next invocation, and revalidates again through a process start guard after
+private workspace/catalog preparation and immediately before app-server spawn. Allowlisted runtime
+environment values are snapshotted only after that guard. It waits for the leader close, absence of
+live same-group members, and workspace cleanup on abort; restricted procfs entries unrelated to the
+same-owner child group cannot bypass leader-close waiting. A later prepare invalidates the prior
+one-shot authorization. Policy-required runs remain deferred to Issue #18.
 The protocol lifecycle and fixed identity are in
 [`docs/codex-app-server-transport-v1.md`](codex-app-server-transport-v1.md).
 

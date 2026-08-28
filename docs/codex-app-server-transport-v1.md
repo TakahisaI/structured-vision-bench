@@ -4,10 +4,10 @@
 
 This repository-internal transport consists of a single-thread, single-turn protocol core and its
 isolated one-shot process client. The protocol core remains independent of process, filesystem,
-credentials, approval, and runner state. The combined transport is not a Provider, login client,
-credential adapter, autonomous coding agent, or general app-server client. One-shot approval and
-Provider integration are Issue #20, CLI selection is Issue #17, and sanitizer-required execution is
-Issue #18.
+credentials, approval, and runner state. A separate public Provider wrapper binds this transport to
+one consumer-owned approval attestation. The combined transport is not a login client, credential
+adapter, autonomous coding agent, or general app-server client. CLI selection is Issue #17, and
+sanitizer-required execution is Issue #18.
 
 The client uses the documented app-server messages and exactly one ephemeral thread with one turn.
 Protocol-core tests use a deterministic in-memory connection. Process contract tests start only a
@@ -59,8 +59,9 @@ inputs. Bundle identity, case ID, document kind, provenance, approval, sanitizer
 truth, comparison, past attempts, and digests are not serialized to app-server. The only path is the
 empty canonical workspace supplied by the process client.
 
-Issue #20 owns the approval boundary that is allowed to call this client. The client does not accept
-or serialize approval, sanitizer requirement, case identity, provenance, truth, or comparison data.
+The Provider wrapper owns the approval boundary that is allowed to call this client. The process
+client does not accept or serialize approval, sanitizer requirement, case identity, provenance,
+truth, or comparison data.
 
 The thread is marked ephemeral; this is a data-minimization request, not an assertion about
 upstream persistence. The private approval gate remains the owner of persistence, retention,
@@ -126,7 +127,38 @@ below supplies the enforceable no-host-tool connection.
 
 The final agent-message text is strict JSON and is parsed inside the client. Raw model text,
 response values, paths, and process diagnostics are never copied into normal errors or result
-metadata. The future Provider wrapper and runner perform authoritative output-schema validation.
+metadata. The runner performs authoritative output-schema validation.
+
+## Approval-bound Provider
+
+`createCodexAppServerProvider()` exposes the fixed provider ID and route `codex-app-server`,
+implementation identity `codex-app-server-provider-v1`, and process protocol identity
+`codex-app-server-isolation-v1`. It requires a consumer-owned `revalidateTransport` function. That
+function receives only the frozen approval v1 attestation and abort signal; it owns the private
+account, endpoint, persistence, runtime, and scope checks and must settle its work when aborted.
+The public Provider compares the returned attestation exactly but does not interpret those private
+identities.
+
+The runner gate remains canonical. After it succeeds, the Provider revalidates the attestation in
+`prepareTransport()` and records an authorization for exactly the next `invoke()` on that Provider
+instance. Starting any later prepare invalidates the previous authorization. Invoke consumes the
+authorization before validation, requires an exact context approval and sanitizer-requirement
+match, then revalidates once more immediately before starting app-server. The process client creates
+the private workspace and writes the fixed model catalog before invoking that Provider-owned start
+guard. After the guard confirms the exact attestation, current generation, signal, and expiry, no
+asynchronous operation occurs before `spawn()`. Allowlisted environment values are also read only
+after the guard succeeds and are synchronously snapshotted for that immediate spawn. Missing,
+denied, expired,
+changed, reused, or sanitizer/policy-required authorization fails before process start and before
+any of the four input callbacks. A later prepare aborts and waits for any in-flight invocation and
+its process/workspace cleanup before it can authorize another invocation.
+
+Only the four extraction callbacks and requested model/effort/null max-tokens setting cross from
+the Provider into the process client. Approval, case and bundle identities, provenance, sanitizer
+requirement, paths, truth, comparison, and prior attempts do not. The Provider returns only the
+strict document and model, effort, usage, and stop-reason metadata supplied by the pinned protocol,
+plus the unchanged approval attestation for runner audit comparison. It performs no retry,
+parallel invocation, or fallback.
 
 ## Metadata
 
@@ -138,8 +170,8 @@ The transport result contains only values exposed by the fixed protocol:
 - unavailable stop reason as null.
 
 Missing optional effort, usage, or stop-reason values are not synthesized. A missing required model
-is a protocol failure. Issue #20 carries the CLI and generated-protocol identities into provider,
-approval, run, and attempt identity.
+is a protocol failure. The Provider carries its fixed implementation and isolation-protocol
+identities into approval, run, and attempt identity.
 
 ## Limits
 
@@ -201,9 +233,11 @@ ambient temporary-directory variables, with separate empty workspace, home,
 `CODEX_HOME`, config home, cache, temporary directory, and executable search path. The child cwd is
 the empty workspace, never a consumer repository, bundle directory, or their parent. The child
 environment starts empty. A caller may explicitly allowlist bounded environment names needed by an
-upstream-supported logged-in process boundary, but the process client always replaces home, config,
-cache, path, and temporary-directory variables with its private paths. It does not locate, read,
-copy, transform, refresh, or print a credential file.
+upstream-supported logged-in process boundary. Configuration snapshots and validates only those
+names; their values are read after the spawn guard and passed only to the immediately following
+spawn. The process client always replaces home, config, cache, path, and temporary-directory
+variables with its private paths. It does not locate, read, copy, transform, refresh, or print a
+credential file.
 
 The fixed tool profile identity is `codex-no-host-tools-v1`. The client starts app-server with
 strict config and disables code mode, code-mode host, shell and unified exec, shell snapshot,
@@ -236,7 +270,12 @@ Stdin and stdout use one strict UTF-8 JSON value per LF-terminated line. Individ
 stdout are bounded; stderr is counted and discarded. Raw process output, document values, digests,
 and private paths never enter normal errors. Success requires the protocol end-of-stream and exit
 status zero. Success as well as protocol failure, crash, overflow, timeout, or cancellation then
-terminates the durable POSIX process group, waits for close, zeroes materialized input copies, and
-removes the private root before the promise settles. Abort leaves a bounded grace after the
-best-effort interrupt write before forced teardown. Automated tests use only a deterministic fake
-executable and synthetic canaries; they perform no login and call no model.
+terminates the durable POSIX process group, waits until no live same-group member remains, waits for
+the leader close, zeroes materialized input copies, and removes the private root before the promise
+settles. Linux settlement enumerates process-group membership and treats only dead or zombie
+members as stopped. Process entries hidden by procfs access controls are ignored because spawned
+same-owner group members remain readable; a probe failure cannot bypass the leader-close wait. The
+other supported POSIX host waits for the group identity to disappear.
+Abort leaves a bounded grace after the best-effort interrupt write before forced teardown.
+Automated tests use only a deterministic fake executable and synthetic canaries; they perform no
+login and call no model.
