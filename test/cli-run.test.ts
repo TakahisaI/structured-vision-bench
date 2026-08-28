@@ -151,6 +151,8 @@ function requiredSanitizerArguments(input: {
   policyDigest: string;
   caseInputIdentityDigest: string;
   policyBindingDigest: string;
+  sanitizerMode?: string;
+  allowedFailureCodes?: string[];
 }): string[] {
   const verifier = {
     id: "synthetic-cli-verifier",
@@ -171,7 +173,7 @@ function requiredSanitizerArguments(input: {
     "--sanitizer-arg",
     FAKE_COMMAND_SANITIZER,
     "--sanitizer-arg",
-    "success",
+    input.sanitizerMode ?? "success",
     "--sanitizer-id",
     "synthetic-command-sanitizer",
     "--sanitizer-finding-path",
@@ -194,6 +196,10 @@ function requiredSanitizerArguments(input: {
     "synthetic_policy_required",
     "--requirement-decision-digest",
     decision.requirementDecisionDigest,
+    ...(input.allowedFailureCodes ?? []).flatMap((code) => [
+      "--sanitizer-failure-code",
+      code,
+    ]),
   ];
 }
 
@@ -654,6 +660,96 @@ test("runs a target-bound private command sanitizer from the public CLI", async 
   }
 });
 
+test("propagates one allowlisted sanitizer failure code through CLI JSON", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
+  const attempts = path.join(temporary, "attempts");
+  const policyPath = path.join(temporary, "synthetic-policy.json");
+  const identity = computeCaseInputIdentity({
+    caseId: "synthetic-invoice-basic",
+    documentKind: "synthetic_invoice",
+    preparedImage: { mediaType: "image/png", sha256: IMAGE_SHA256 },
+  });
+  const policyBytes = createSanitizerPolicyEnvelope({
+    target: identity,
+    policyVersion: 1,
+    policy: { syntheticRule: "remove-extra-fields" },
+  });
+  const policyDigest = createHash("sha256").update(policyBytes).digest("hex");
+  const policyBindingDigest = computePolicyBindingDigest({
+    caseInputIdentityDigest: identity.digest,
+    policyVersion: 1,
+    policyDigest,
+  });
+  try {
+    await writeFile(policyPath, policyBytes, { mode: 0o600 });
+    const base = requiredSanitizerArguments({
+      policyPath,
+      policyDigest,
+      caseInputIdentityDigest: identity.digest,
+      policyBindingDigest,
+      allowedFailureCodes: ["synthetic_policy_blocked"],
+    });
+    const run = (mode: string, attemptRoot: string) =>
+      spawnSync(
+        process.execPath,
+        [
+          CLI,
+          "run",
+          "--bundle",
+          FIXTURE,
+          "--provider",
+          "mock",
+          "--attempt-root",
+          attemptRoot,
+          ...base.map((value) => (value === "success" ? mode : value)),
+          "--json",
+        ],
+        { encoding: "utf8" },
+      );
+
+    const stable = run("stable-failure", attempts);
+    assert.equal(stable.status, 1, stable.stdout);
+    assert.equal(stable.stderr, "");
+    assert.deepEqual(JSON.parse(stable.stdout), {
+      ok: false,
+      error: {
+        code: "synthetic_policy_blocked",
+        message: "sanitizer failed",
+        details: [],
+      },
+    });
+    assert.deepEqual(await readdir(attempts), []);
+
+    for (const [index, mode] of [
+      "failure-with-message",
+      "failure-with-path",
+      "failure-duplicate",
+      "failure-broken-json",
+      "failure-unknown-code",
+      "failure-oversized",
+      "failure-with-stderr",
+    ].entries()) {
+      const genericAttempts = path.join(temporary, `generic-attempts-${index}`);
+      const generic = run(mode, genericAttempts);
+      assert.equal(generic.status, 1, generic.stdout);
+      assert.equal(generic.stderr, "");
+      const failure = JSON.parse(generic.stdout) as {
+        error: { code: string; message: string; details: string[] };
+      };
+      assert.deepEqual(failure.error, {
+        code: "sanitizer_failed",
+        message: "sanitizer failed",
+        details: [],
+      });
+      assert.equal(generic.stdout.includes("SYNTHETIC-PRIVATE"), false);
+      assert.equal(generic.stdout.includes(policyPath), false);
+      assert.deepEqual(await readdir(genericAttempts), []);
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("rejects invalid private sanitizer CLI configuration before runner execution", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-run-"));
   const policyPath = path.join(temporary, "synthetic-policy.json");
@@ -691,6 +787,21 @@ test("rejects invalid private sanitizer CLI configuration before runner executio
       [...valid, "--sanitizer-timeout-ms", String(MAX_TIMEOUT_MS + 1)],
       [...valid, "--sanitizer-finding-path", "/invalid~path"],
       [...valid, "--sanitizer-finding-path", "/invoiceNumber"],
+      [...valid, "--sanitizer-failure-code", "not safe"],
+      [
+        ...valid,
+        "--sanitizer-failure-code",
+        "synthetic_policy_blocked",
+        "--sanitizer-failure-code",
+        "synthetic_policy_blocked",
+      ],
+      [
+        ...valid,
+        ...Array.from({ length: 101 }, (_, index) => [
+          "--sanitizer-failure-code",
+          `synthetic_${index}`,
+        ]).flat(),
+      ],
       valid.map((value) =>
         /^[a-f0-9]{64}$/u.test(value) && value !== policyDigest && value !== identity.digest && value !== policyBindingDigest
           ? "f".repeat(64)

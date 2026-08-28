@@ -5,25 +5,33 @@ import path from "node:path";
 
 import {
   encodeCommandSanitizerRequest,
+  parseCommandSanitizerFailure,
   parseCommandSanitizerResponse,
   snapshotCommandSanitizerRequest,
   type CommandSanitizerRequestV1,
 } from "./command-sanitizer-wire.js";
-import { RunnerError } from "./errors.js";
+import { RunnerError, type SanitizerFailureCode } from "./errors.js";
 import type { Sanitizer, SanitizerRequest, SanitizerResponse } from "./types.js";
 
 export {
+  MAX_COMMAND_SANITIZER_FAILURE_BYTES,
   MAX_COMMAND_SANITIZER_REQUEST_BYTES,
+  type CommandSanitizerFailureV1,
   type CommandSanitizerRequestV1,
   type CommandSanitizerResponseV1,
 } from "./command-sanitizer-wire.js";
 
 export const DEFAULT_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
 export const MAX_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES = 16 * 1024 * 1024;
+export const MAX_COMMAND_SANITIZER_FAILURE_CODES = 100;
 
 const DIRECTORY_MODE = 0o700;
 const SAFE_LABEL_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 const ABORT_SETTLING_COMMAND_SANITIZERS = new WeakSet<object>();
+const COMMAND_SANITIZER_FAILURES = new WeakMap<
+  object,
+  Readonly<{ sanitizer: object; code: SanitizerFailureCode }>
+>();
 
 export type CommandSanitizerOptions = {
   executable: string;
@@ -31,6 +39,7 @@ export type CommandSanitizerOptions = {
   envAllowlist?: string[];
   outputLimitBytes?: number;
   sanitizerId: string;
+  allowedFailureCodes?: readonly string[];
 };
 
 type ValidatedCommandSanitizerOptions = Readonly<{
@@ -39,6 +48,7 @@ type ValidatedCommandSanitizerOptions = Readonly<{
   environment: ReadonlyArray<readonly [string, string]>;
   outputLimitBytes: number;
   sanitizerId: string;
+  allowedFailureCodes: readonly string[];
 }>;
 
 type ValidatedAbortSignal = Readonly<{
@@ -47,10 +57,16 @@ type ValidatedAbortSignal = Readonly<{
   removeAbortListener: (listener: () => void) => void;
 }>;
 
+type CommandSanitizerProcessResult = Readonly<{
+  exitCode: 0 | "nonzero";
+  bytes: Buffer;
+}>;
+
 /** Creates a shell-free sanitizer backed by a consumer-owned local process. */
 export function createCommandSanitizer(options: CommandSanitizerOptions): Sanitizer {
   const validated = validateOptions(options);
-  const sanitizer = Object.freeze({
+  let sanitizer: Sanitizer;
+  sanitizer = Object.freeze({
     id: validated.sanitizerId,
     protocolVersion: 1 as const,
     async sanitize(request: SanitizerRequest, signal?: AbortSignal): Promise<SanitizerResponse> {
@@ -58,8 +74,20 @@ export function createCommandSanitizer(options: CommandSanitizerOptions): Saniti
         const validatedSignal = validateAbortSignal(signal);
         assertActive(validatedSignal);
         const snapshot = snapshotCommandSanitizerRequest(request);
-        return await invokeCommandSanitizer(validated, snapshot, validatedSignal);
-      } catch {
+        return await invokeCommandSanitizer(
+          validated,
+          snapshot,
+          validatedSignal,
+          sanitizer,
+        );
+      } catch (error) {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          COMMAND_SANITIZER_FAILURES.get(error)?.sanitizer === sanitizer
+        ) {
+          throw error;
+        }
         throw new Error("sanitizer command failed");
       }
     },
@@ -89,6 +117,18 @@ export function isAbortSettlingCommandSanitizer(value: object): boolean {
   return ABORT_SETTLING_COMMAND_SANITIZERS.has(value);
 }
 
+/** @internal Consumes a verified failure capability bound to this command sanitizer. */
+export function consumeCommandSanitizerFailureCode(
+  sanitizer: object,
+  error: unknown,
+): SanitizerFailureCode | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const failure = COMMAND_SANITIZER_FAILURES.get(error);
+  if (failure?.sanitizer !== sanitizer) return undefined;
+  COMMAND_SANITIZER_FAILURES.delete(error);
+  return failure.code;
+}
+
 function validateOptions(options: CommandSanitizerOptions): ValidatedCommandSanitizerOptions {
   try {
     const value: unknown = options;
@@ -100,10 +140,24 @@ function validateOptions(options: CommandSanitizerOptions): ValidatedCommandSani
     const outputLimitBytes =
       candidate.outputLimitBytes ?? DEFAULT_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES;
     const sanitizerId = candidate.sanitizerId;
-    if (!Array.isArray(sourceArgv) || !Array.isArray(sourceEnvAllowlist)) throw new Error();
+    const sourceAllowedFailureCodes = candidate.allowedFailureCodes ?? [];
+    if (
+      !Array.isArray(sourceArgv) ||
+      !Array.isArray(sourceEnvAllowlist) ||
+      !Array.isArray(sourceAllowedFailureCodes)
+    ) {
+      throw new Error();
+    }
     const argvLength = sourceArgv.length;
     const envAllowlistLength = sourceEnvAllowlist.length;
-    if (argvLength > 64 || envAllowlistLength > 64) throw new Error();
+    const allowedFailureCodeLength = sourceAllowedFailureCodes.length;
+    if (
+      argvLength > 64 ||
+      envAllowlistLength > 64 ||
+      allowedFailureCodeLength > MAX_COMMAND_SANITIZER_FAILURE_CODES
+    ) {
+      throw new Error();
+    }
 
     const argv: string[] = [];
     for (let index = 0; index < argvLength; index += 1) {
@@ -126,6 +180,22 @@ function validateOptions(options: CommandSanitizerOptions): ValidatedCommandSani
       if (environmentValue !== undefined) environment.push(Object.freeze([name, environmentValue]));
     }
 
+    const allowedFailureCodes: string[] = [];
+    const seenFailureCodes = new Set<string>();
+    for (let index = 0; index < allowedFailureCodeLength; index += 1) {
+      const code: unknown = sourceAllowedFailureCodes[index];
+      if (
+        typeof code !== "string" ||
+        !SAFE_LABEL_PATTERN.test(code) ||
+        seenFailureCodes.has(code)
+      ) {
+        throw new Error();
+      }
+      seenFailureCodes.add(code);
+      allowedFailureCodes.push(code);
+    }
+    allowedFailureCodes.sort();
+
     if (
       typeof executable !== "string" ||
       executable.length === 0 ||
@@ -145,6 +215,7 @@ function validateOptions(options: CommandSanitizerOptions): ValidatedCommandSani
       environment: Object.freeze(environment),
       outputLimitBytes,
       sanitizerId,
+      allowedFailureCodes: Object.freeze(allowedFailureCodes),
     });
   } catch {
     throw new RunnerError(
@@ -158,6 +229,7 @@ async function invokeCommandSanitizer(
   options: ValidatedCommandSanitizerOptions,
   request: CommandSanitizerRequestV1,
   signal: ValidatedAbortSignal | undefined,
+  sanitizer: object,
 ): Promise<SanitizerResponse> {
   assertActive(signal);
   let workingDirectory: string | undefined;
@@ -172,13 +244,26 @@ async function invokeCommandSanitizer(
     assertActive(signal);
     const environment = Object.create(null) as NodeJS.ProcessEnv;
     for (const [name, value] of options.environment) environment[name] = value;
-    responseBytes = await runChildProcess(
+    const result = await runChildProcess(
       options,
       workingDirectory,
       environment,
       requestBytes,
       signal,
     );
+    responseBytes = result.bytes;
+    if (result.exitCode === "nonzero") {
+      const failure = parseCommandSanitizerFailure(
+        responseBytes,
+        options.allowedFailureCodes,
+      );
+      const error = new Error("sanitizer command failed");
+      COMMAND_SANITIZER_FAILURES.set(error, {
+        sanitizer,
+        code: failure.code as SanitizerFailureCode,
+      });
+      throw error;
+    }
     return parseCommandSanitizerResponse(responseBytes, options.sanitizerId, request);
   } finally {
     requestBytes?.fill(0);
@@ -195,9 +280,9 @@ async function runChildProcess(
   environment: NodeJS.ProcessEnv,
   input: Buffer,
   signal: ValidatedAbortSignal | undefined,
-): Promise<Buffer> {
+): Promise<CommandSanitizerProcessResult> {
   assertActive(signal);
-  return await new Promise<Buffer>((resolve, reject) => {
+  return await new Promise<CommandSanitizerProcessResult>((resolve, reject) => {
     let child;
     try {
       child = spawn(options.executable, options.argv, {
@@ -214,6 +299,7 @@ async function runChildProcess(
 
     const stdout: Buffer[] = [];
     let outputBytes = 0;
+    let stderrBytes = 0;
     let failed = false;
     let termination: Promise<void> | undefined;
     const terminate = (): void => {
@@ -241,6 +327,8 @@ async function runChildProcess(
           return;
         }
         stdout.push(Buffer.from(chunk));
+      } catch {
+        terminate();
       } finally {
         Buffer.prototype.fill.call(chunk, 0);
       }
@@ -248,6 +336,7 @@ async function runChildProcess(
     child.stderr.on("data", (chunk: Buffer) => {
       try {
         outputBytes += chunk.byteLength;
+        stderrBytes += chunk.byteLength;
         if (outputBytes > options.outputLimitBytes) terminate();
       } finally {
         Buffer.prototype.fill.call(chunk, 0);
@@ -255,16 +344,30 @@ async function runChildProcess(
     });
     child.once("close", (code, childSignal) => {
       void (async () => {
-        signal?.removeAbortListener(abort);
-        await termination;
-        if (failed || code !== 0 || childSignal !== null) {
-          for (const chunk of stdout) chunk.fill(0);
+        let output: Buffer | undefined;
+        let transferred = false;
+        try {
+          signal?.removeAbortListener(abort);
+          await termination;
+          if (
+            failed ||
+            childSignal !== null ||
+            code === null ||
+            (code !== 0 && stderrBytes !== 0)
+          ) {
+            throw new Error();
+          }
+          output = Buffer.concat(stdout);
+          resolve(
+            Object.freeze({ exitCode: code === 0 ? 0 : "nonzero", bytes: output }),
+          );
+          transferred = true;
+        } catch {
           reject(new Error());
-          return;
+        } finally {
+          for (const chunk of stdout) chunk.fill(0);
+          if (!transferred) output?.fill(0);
         }
-        const output = Buffer.concat(stdout);
-        for (const chunk of stdout) chunk.fill(0);
-        resolve(output);
       })();
     });
     child.stdin.end(input);

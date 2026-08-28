@@ -28,6 +28,7 @@ import {
 } from "../runner/approval.js";
 import {
   createCommandSanitizer,
+  MAX_COMMAND_SANITIZER_FAILURE_CODES,
   MAX_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES,
   type CommandSanitizerOptions,
 } from "../runner/command-sanitizer.js";
@@ -53,7 +54,7 @@ import type {
 } from "../runner/types.js";
 
 const RUN_USAGE =
-  "usage: svbench run --bundle <bundle-directory> --provider mock|command|codex-app-server [--phase <label>] [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--provider-command <absolute-executable> <provider options>] [--approval required|optional --approval-command <executable> <approval identity options>] [--sanitizer required --sanitizer-command <absolute-executable> <sanitizer identity and policy options>] [--json]";
+  "usage: svbench run --bundle <bundle-directory> --provider mock|command|codex-app-server [--phase <label>] [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--provider-command <absolute-executable> <provider options>] [--approval required|optional --approval-command <executable> <approval identity options>] [--sanitizer required --sanitizer-command <absolute-executable> <sanitizer identity, policy, and failure-code options>] [--json]";
 const COMPARE_USAGE =
   "usage: svbench compare --bundle <bundle-directory> --attempt <attempt-directory> [--rescore --rescore-reason <code>] [--json]";
 const asJson = process.argv.slice(2).includes("--json");
@@ -263,6 +264,7 @@ function parseRunArguments(): RunArguments {
       "sanitizer-timeout-ms": { type: "string" },
       "sanitizer-output-limit": { type: "string" },
       "sanitizer-finding-path": { type: "string", multiple: true },
+      "sanitizer-failure-code": { type: "string", multiple: true },
       "requirement-verifier-id": { type: "string" },
       "requirement-verifier-version": { type: "string" },
       "requirement-consumer-source-commit": { type: "string" },
@@ -310,6 +312,7 @@ function parseRunArguments(): RunArguments {
     timeoutMs: values["sanitizer-timeout-ms"],
     outputLimitBytes: values["sanitizer-output-limit"],
     allowedFindingPathPatterns: values["sanitizer-finding-path"],
+    allowedFailureCodes: values["sanitizer-failure-code"],
     requirementVerifierId: values["requirement-verifier-id"],
     requirementVerifierVersion: values["requirement-verifier-version"],
     requirementConsumerSourceCommit: values["requirement-consumer-source-commit"],
@@ -633,6 +636,7 @@ function parseCommandSanitizer(input: {
   timeoutMs: string | undefined;
   outputLimitBytes: string | undefined;
   allowedFindingPathPatterns: string[] | undefined;
+  allowedFailureCodes: string[] | undefined;
   requirementVerifierId: string | undefined;
   requirementVerifierVersion: string | undefined;
   requirementConsumerSourceCommit: string | undefined;
@@ -682,6 +686,7 @@ function parseCommandSanitizer(input: {
     argv: input.argv ?? [],
     envAllowlist: input.envAllowlist ?? [],
     sanitizerId,
+    allowedFailureCodes: snapshotSafeLabels(input.allowedFailureCodes ?? []),
     ...(input.outputLimitBytes === undefined
       ? {}
       : { outputLimitBytes: parseSanitizerOutputLimit(input.outputLimitBytes) }),
@@ -706,6 +711,19 @@ function parseCommandSanitizer(input: {
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: parseTimeoutMs(input.timeoutMs) }),
     },
   };
+}
+
+function snapshotSafeLabels(values: readonly string[]): string[] {
+  if (values.length > MAX_COMMAND_SANITIZER_FAILURE_CODES) throw new Error();
+  const snapshot: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const label = requiredSafeLabel(value);
+    if (seen.has(label)) throw new Error();
+    seen.add(label);
+    snapshot.push(label);
+  }
+  return snapshot.sort();
 }
 
 function parseCompareArguments(): CompareArguments {
