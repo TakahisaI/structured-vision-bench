@@ -101,6 +101,10 @@ export type CodexAppServerProcessOptions = Readonly<{
   outputLimitBytes?: number;
 }>;
 
+export type CodexAppServerProcessStartGuard = (
+  signal: AbortSignal,
+) => Promise<void>;
+
 type ValidatedOptions = Readonly<{
   executable: string;
   executableArguments: readonly string[];
@@ -129,12 +133,14 @@ export async function runCodexAppServerProcess(
   optionsValue: CodexAppServerProcessOptions,
   requestValue: CodexAppServerProcessRequest,
   signal?: AbortSignal,
+  startGuard?: CodexAppServerProcessStartGuard,
 ): Promise<CodexAppServerProtocolResult> {
   let workspace: PrivateWorkspace | undefined;
   const materialized: Buffer[] = [];
   try {
     const options = validateOptions(optionsValue);
     const request = snapshotRequest(requestValue);
+    if (startGuard !== undefined && typeof startGuard !== "function") throw new Error();
     assertActive(signal);
     workspace = await createPrivateWorkspace(options.environment);
     const activeWorkspace = workspace;
@@ -192,6 +198,7 @@ export async function runCodexAppServerProcess(
         };
       },
       signal,
+      startGuard,
     );
   } catch {
     throw new Error("codex app-server process failed");
@@ -541,6 +548,7 @@ async function runConnectedProcess(
     signal: AbortSignal,
   ) => Promise<Parameters<typeof runCodexAppServerProtocol>[1]>,
   parentSignal: AbortSignal | undefined,
+  startGuard: CodexAppServerProcessStartGuard | undefined,
 ): Promise<CodexAppServerProtocolResult> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();
@@ -559,6 +567,11 @@ async function runConnectedProcess(
   };
   try {
     assertActive(parentSignal);
+    if (startGuard !== undefined) {
+      await startGuard(controller.signal);
+      assertActive(controller.signal);
+      assertActive(parentSignal);
+    }
     child = spawn(options.executable, appServerArguments(options, workspace), {
       cwd: workspace.workspace,
       detached: process.platform !== "win32",

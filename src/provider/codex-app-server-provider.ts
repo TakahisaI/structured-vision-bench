@@ -133,10 +133,16 @@ export function createCodexAppServerProvider(
         }
         assertActive(signal);
         const request = snapshotInvocation(requestValue, contextValue, claimed.approval);
-        await revalidate(options, claimed.approval, controller.signal);
-        assertActive(controller.signal);
-        if (claimed.generation !== generation) throw new Error();
-        const result = await runCodexAppServerProcess(options.process, request, controller.signal);
+        const result = await runCodexAppServerProcess(
+          options.process,
+          request,
+          controller.signal,
+          async (processSignal) => {
+            await revalidate(options, claimed.approval, processSignal);
+            assertActive(processSignal);
+            if (claimed.generation !== generation) throw new Error();
+          },
+        );
         return {
           rawDocument: result.document,
           approval: claimed.approval,

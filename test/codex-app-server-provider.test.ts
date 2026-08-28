@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -286,22 +286,34 @@ test("a later prepare invalidates the prior one-shot authorization", async () =>
   });
 });
 
-test("rejects runtime drift on invoke revalidation before app-server start", async () => {
+test("revalidates runtime after private setup and immediately before app-server start", async () => {
   await withFixture("provider-success", async ({ capture, options }) => {
     const direct = directInvocation();
+    const guardedModel = "synthetic-spawn-guard-model";
+    direct.request.requested = {
+      ...direct.request.requested,
+      model: guardedModel,
+    };
+    direct.context.requested = direct.request.requested;
+    const existingRoots = await codexTemporaryRoots();
     let calls = 0;
+    let preparedCatalogObserved = false;
     const provider = createCodexAppServerProvider({
       process: options,
       revalidateTransport: async (approval) => {
         calls += 1;
-        return calls === 1
-          ? approval
-          : { ...approval, runtimeBindingDigest: "f".repeat(64) };
+        if (calls === 1) return approval;
+        preparedCatalogObserved = await hasNewPreparedCatalog(
+          existingRoots,
+          guardedModel,
+        );
+        return { ...approval, runtimeBindingDigest: "f".repeat(64) };
       },
     });
     await provider.prepareTransport!(direct.approval);
     await assert.rejects(provider.invoke(direct.request, direct.context), stableProviderFailure);
     assert.equal(calls, 2);
+    assert.equal(preparedCatalogObserved, true);
     assert.deepEqual(direct.reads, { image: 0, schema: 0, system: 0, instruction: 0 });
     assert.equal(await appServerStarts(capture), 0);
   });
@@ -600,6 +612,28 @@ async function withFixture(
 
 async function appServerStarts(capture: string): Promise<number> {
   return (await readCapture(capture)).filter((record) => record.phase === "app-server").length;
+}
+
+async function codexTemporaryRoots(): Promise<Set<string>> {
+  return new Set(
+    (await readdir("/tmp")).filter((name) => name.startsWith("svbench-codex-")),
+  );
+}
+
+async function hasNewPreparedCatalog(
+  existingRoots: ReadonlySet<string>,
+  model: string,
+): Promise<boolean> {
+  for (const root of await codexTemporaryRoots()) {
+    if (existingRoots.has(root)) continue;
+    try {
+      const catalog = await readFile(path.join("/tmp", root, "model-catalog.json"), "utf8");
+      if (catalog.includes(model)) return true;
+    } catch {
+      // A concurrent cleanup is equivalent to not observing this candidate.
+    }
+  }
+  return false;
 }
 
 async function readCapture(capture: string): Promise<Array<Record<string, unknown>>> {

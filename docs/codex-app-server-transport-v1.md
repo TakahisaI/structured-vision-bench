@@ -143,7 +143,10 @@ The runner gate remains canonical. After it succeeds, the Provider revalidates t
 `prepareTransport()` and records an authorization for exactly the next `invoke()` on that Provider
 instance. Starting any later prepare invalidates the previous authorization. Invoke consumes the
 authorization before validation, requires an exact context approval and sanitizer-requirement
-match, then revalidates once more immediately before starting app-server. Missing, denied, expired,
+match, then revalidates once more immediately before starting app-server. The process client creates
+the private workspace and writes the fixed model catalog before invoking that Provider-owned start
+guard. After the guard confirms the exact attestation, current generation, signal, and expiry, no
+asynchronous operation occurs before `spawn()`. Missing, denied, expired,
 changed, reused, or sanitizer/policy-required authorization fails before process start and before
 any of the four input callbacks. A later prepare aborts and waits for any in-flight invocation and
 its process/workspace cleanup before it can authorize another invocation.
