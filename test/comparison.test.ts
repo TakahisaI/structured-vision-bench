@@ -553,7 +553,7 @@ test("keeps sanitizer hard-gate findings outside field averages", async () => {
             severity: "error",
             classification: "synthetic-policy",
             hardGate: true,
-            path: "/synthetic/value",
+            path: "/invoiceNumber",
           },
         ],
       }),
@@ -574,6 +574,7 @@ test("keeps sanitizer hard-gate findings outside field averages", async () => {
         expectedCaseInputIdentityVersion: 1,
         expectedCaseInputIdentityDigest: identity.digest,
         expectedPolicyBindingDigest: policyBindingDigest,
+        allowedFindingPathPatterns: ["/invoiceNumber"],
       },
     });
     const comparison = await compareAttempt({
@@ -583,7 +584,16 @@ test("keeps sanitizer hard-gate findings outside field averages", async () => {
     assert.equal(comparison.summary.fields.matched, 13);
     assert.equal(comparison.summary.hardGate.sanitizerFailures, 1);
     assert.equal(comparison.summary.hardGate.passed, false);
-    assert.equal(JSON.stringify(comparison).includes("/synthetic/value"), false);
+    assert.equal(comparison.identity.sanitizer?.findings[0]?.path, "/invoiceNumber");
+    assert.equal(renderComparisonMarkdown(comparison).includes("/invoiceNumber"), false);
+    const resultSchema = parseJson(
+      decodeUtf8Strict(
+        await readFile("schemas/comparison-v1.schema.json"),
+        "comparison result schema",
+      ),
+      "comparison result schema",
+    );
+    assert.deepEqual(validateJsonSchema(resultSchema, comparison as unknown as JsonValue), []);
   });
 });
 

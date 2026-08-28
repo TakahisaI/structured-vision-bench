@@ -23,8 +23,10 @@ svbench compare \
 ```
 
 Human mode prints Markdown. `--json` prints `{ "ok": true, "result": ... }`. Neither form includes
-truth values, extracted values, case IDs, comparison pointers, local paths, or raw sanitizer paths.
-Field and array locations are represented only by their zero-based declaration positions.
+truth values, extracted values, case IDs, comparison pointers, or local paths. JSON may copy an exact
+value-free sanitizer finding path that the runner already matched against the consumer allowlist;
+Markdown does not render finding paths. Field and array locations are represented only by their
+zero-based declaration positions.
 
 An old attempt may be scored against corrected truth or comparison policy only through explicit
 rescoring:
@@ -78,7 +80,9 @@ field.
 
 Critical scalar and matched-item field mismatches fail the comparison hard gate. Missing or extra
 items fail it only when the declared array key is critical. A sanitizer finding with `hardGate: true`
-also fails the hard gate but is never folded into field accuracy.
+also fails the hard gate but is never folded into field accuracy. Its bounded value-free path is
+copied from the validated attempt as either `null` or the exact consumer-allowlisted JSON Pointer;
+comparison never reconstructs a path from document values.
 
 The JSON result contains:
 

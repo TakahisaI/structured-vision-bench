@@ -31,11 +31,19 @@ import {
   computeAttemptIdentity,
   createSanitizerRequirementDecision,
   computeRunIdentity,
+  computeSanitizerExecutionBindingDigest,
+  computeSanitizerFindingPathAllowlistDigest,
+  SANITIZER_FINDING_PATH_ALLOWLIST_VERSION,
   type CaseInputIdentity,
   type SanitizerRequirementDecisionV1,
 } from "./identity.js";
 import { prepareSanitizerPolicy, type PreparedSanitizerPolicy } from "./sanitizer.js";
 import { isAbortSettlingCommandSanitizer } from "./command-sanitizer.js";
+import {
+  isSanitizerFindingPath,
+  sanitizerFindingPathIsAllowed,
+  snapshotSanitizerFindingPathPatterns,
+} from "./sanitizer-finding-path.js";
 import {
   createCommandApprovalGate,
   DEFAULT_APPROVAL_OUTPUT_LIMIT_BYTES,
@@ -188,6 +196,11 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       );
     }
     validateProviderTransportPreparation(provider, approvalPlan);
+    const findingPathAllowlistDigest = requirement.sanitizerRequired
+      ? computeSanitizerFindingPathAllowlistDigest(
+          sanitizerSettings?.allowedFindingPathPatterns ?? [],
+        )
+      : null;
     const runId = computeRunIdentity({
       caseInputIdentityDigest: identity.digest,
       bundleManifestDigest: prepared.manifestDigest,
@@ -208,7 +221,13 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       approvalScopeDigest: approvalPlan?.approvedScopeDigest ?? null,
       approvalScopeIdentity: approvalPlan?.approvedScopeIdentity ?? null,
       approvalRequired: approvalPlan?.required ?? false,
-      sanitizerBindingDigest: preparedPolicy?.policyBindingDigest ?? null,
+      sanitizerBindingDigest:
+        preparedPolicy === undefined || findingPathAllowlistDigest === null
+          ? null
+          : computeSanitizerExecutionBindingDigest({
+              policyBindingDigest: preparedPolicy.policyBindingDigest,
+              findingPathAllowlistDigest,
+            }),
       sanitizerId:
         sanitizerImplementation?.id ?? sanitizerSettings?.expectedSanitizerId ?? null,
       sanitizerProtocolVersion:
@@ -558,6 +577,11 @@ function snapshotSanitizerSettings(
     if (snapshot.policyEnvelopeBytes !== undefined) {
       if (!(snapshot.policyEnvelopeBytes instanceof Uint8Array)) throw new Error();
       snapshot.policyEnvelopeBytes = Uint8Array.from(snapshot.policyEnvelopeBytes);
+    }
+    if (snapshot.allowedFindingPathPatterns !== undefined) {
+      snapshot.allowedFindingPathPatterns = snapshotSanitizerFindingPathPatterns(
+        snapshot.allowedFindingPathPatterns,
+      );
     }
     return Object.freeze(snapshot);
   } catch {
@@ -1497,6 +1521,13 @@ async function executeSanitizer(
     throw new RunnerError("sanitizer_required", "sanitizer implementation is missing");
   }
   let response: SanitizerResponse;
+  const sanitizerDocument = freezeObject(
+    normalizeJsonValue(
+      providerResponse.document,
+      "sanitizer document",
+      MAX_DOCUMENT_BYTES,
+    ),
+  );
   try {
     const controller = new AbortController();
     const request = freezeObject({
@@ -1508,7 +1539,7 @@ async function executeSanitizer(
         digest: identity.digest,
       }),
       documentKind,
-      document: freezeObject(normalizeJsonValue(providerResponse.document, "sanitizer document", MAX_DOCUMENT_BYTES)),
+      document: sanitizerDocument,
       policyEnvelope: freezeObject(normalizeJsonRecord(preparedPolicy.envelope, "sanitizer policy")),
       policy: freezeObject(normalizeJsonRecord(preparedPolicy.policy, "sanitizer policy")),
       policyVersion: preparedPolicy.policyVersion,
@@ -1557,6 +1588,10 @@ async function executeSanitizer(
       "sanitizer document",
       MAX_DOCUMENT_BYTES,
     );
+    const findings = normalizeFindings(
+      response.findings,
+      settings.allowedFindingPathPatterns ?? [],
+    );
     return {
       document: sanitizedDocument,
       manifest: {
@@ -1569,7 +1604,12 @@ async function executeSanitizer(
         policyTargetIdentityDigest: response.policyTargetIdentityDigest,
         policyBindingIdentity: preparedPolicy.policyBindingIdentity,
         policyBindingDigest: response.policyBindingDigest,
-        findings: normalizeFindings(response.findings),
+        findingPathAllowlistVersion: SANITIZER_FINDING_PATH_ALLOWLIST_VERSION,
+        findingPathAllowlistDigest: computeSanitizerFindingPathAllowlistDigest(
+          settings.allowedFindingPathPatterns ?? [],
+        ),
+        allowedFindingPathPatterns: [...(settings.allowedFindingPathPatterns ?? [])],
+        findings,
       },
     };
   } catch {
@@ -1577,7 +1617,10 @@ async function executeSanitizer(
   }
 }
 
-function normalizeFindings(findings: SanitizerFinding[] | undefined): SanitizerFinding[] {
+function normalizeFindings(
+  findings: SanitizerFinding[] | undefined,
+  allowedFindingPathPatterns?: readonly string[],
+): SanitizerFinding[] {
   if (findings === undefined) return [];
   if (!Array.isArray(findings) || findings.length > 100) {
     throw new RunnerError("sanitizer_response_invalid", "sanitizer findings are invalid");
@@ -1602,8 +1645,12 @@ function normalizeFindings(findings: SanitizerFinding[] | undefined): SanitizerF
       (finding.path !== undefined &&
         finding.path !== null &&
         (typeof finding.path !== "string" ||
-          finding.path.length > 1024 ||
-          !/^(?:\/(?:[^~/]|~[01])*)*$/u.test(finding.path)))
+          !isSanitizerFindingPath(finding.path) ||
+          (allowedFindingPathPatterns !== undefined &&
+            !sanitizerFindingPathIsAllowed(
+              finding.path,
+              allowedFindingPathPatterns,
+            ))))
     ) {
       throw new RunnerError("sanitizer_response_invalid", "sanitizer findings are invalid");
     }
@@ -1612,7 +1659,7 @@ function normalizeFindings(findings: SanitizerFinding[] | undefined): SanitizerF
       severity: finding.severity,
       classification: finding.classification,
       hardGate: finding.hardGate,
-      path: null,
+      path: finding.path ?? null,
     };
   });
 }

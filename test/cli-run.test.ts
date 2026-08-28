@@ -174,6 +174,8 @@ function requiredSanitizerArguments(input: {
     "success",
     "--sanitizer-id",
     "synthetic-command-sanitizer",
+    "--sanitizer-finding-path",
+    "/invoiceNumber",
     "--sanitizer-policy",
     input.policyPath,
     "--sanitizer-policy-version",
@@ -645,7 +647,7 @@ test("runs a target-bound private command sanitizer from the public CLI", async 
     assert.equal(attempt.manifest.sanitizer?.id, "synthetic-command-sanitizer");
     assert.equal(attempt.manifest.sanitizer?.policyDigest, policyDigest);
     assert.equal(attempt.manifest.sanitizer?.policyBindingDigest, policyBindingDigest);
-    assert.equal(attempt.manifest.sanitizer?.findings[0]?.path, null);
+    assert.equal(attempt.manifest.sanitizer?.findings[0]?.path, "/invoiceNumber");
     assert.equal(JSON.stringify(attempt.manifest).includes(policyPath), false);
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -681,11 +683,14 @@ test("rejects invalid private sanitizer CLI configuration before runner executio
     await writeFile(policyPath, policyBytes, { mode: 0o600 });
     const invalidArguments = [
       ["--sanitizer", "required"],
+      ["--sanitizer-finding-path", "/synthetic/private-path"],
       valid.map((value) => (value === process.execPath ? "./synthetic-sanitizer" : value)),
       valid.map((value) => (value === policyDigest ? "synthetic-invalid-digest" : value)),
       [...valid, "--sanitizer-env", "PATH", "--sanitizer-env", "Path"],
       [...valid, "--sanitizer-output-limit", String(MAX_COMMAND_SANITIZER_OUTPUT_LIMIT_BYTES + 1)],
       [...valid, "--sanitizer-timeout-ms", String(MAX_TIMEOUT_MS + 1)],
+      [...valid, "--sanitizer-finding-path", "/invalid~path"],
+      [...valid, "--sanitizer-finding-path", "/invoiceNumber"],
       valid.map((value) =>
         /^[a-f0-9]{64}$/u.test(value) && value !== policyDigest && value !== identity.digest && value !== policyBindingDigest
           ? "f".repeat(64)

@@ -6,6 +6,7 @@ import {
   type JsonValue,
 } from "../bundle/json.js";
 import { computeCaseInputIdentity, computePolicyBindingDigest } from "./identity.js";
+import { isSanitizerFindingPath } from "./sanitizer-finding-path.js";
 import type {
   JsonRecord,
   ProviderUsage,
@@ -22,7 +23,6 @@ const SAFE_LABEL_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 const CASE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/u;
 const MEDIA_TYPE_PATTERN = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/u;
-const JSON_POINTER_PATTERN = /^(?:\/(?:[^~/]|~[01])*)*$/u;
 
 export type CommandSanitizerRequestV1 = {
   requestVersion: 1;
@@ -325,9 +325,7 @@ function snapshotFindings(value: JsonValue | undefined): SanitizerFinding[] | un
       typeof finding.hardGate !== "boolean" ||
       (finding.path !== undefined &&
         finding.path !== null &&
-        (typeof finding.path !== "string" ||
-          finding.path.length > 1024 ||
-          !JSON_POINTER_PATTERN.test(finding.path)))
+        !isSanitizerFindingPath(finding.path))
     ) {
       throw new Error();
     }

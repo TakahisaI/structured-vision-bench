@@ -204,6 +204,20 @@ test("rejects malformed, duplicate, unknown, and unbound responses", () => {
         ],
       }),
     ),
+    Buffer.from(
+      JSON.stringify({
+        ...base,
+        findings: [
+          {
+            code: "synthetic-finding",
+            severity: "warning",
+            classification: "synthetic-classification",
+            hardGate: false,
+            path: "/items/*/note",
+          },
+        ],
+      }),
+    ),
   ];
 
   for (const bytes of cases) {

@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 
+import { snapshotSanitizerFindingPathPatterns } from "./sanitizer-finding-path.js";
+
 export const CASE_INPUT_IDENTITY_VERSION = 1 as const;
 export const ATTEMPT_IDENTITY_VERSION = 1 as const;
 export const POLICY_BINDING_VERSION = 1 as const;
 export const RUN_IDENTITY_VERSION = 1 as const;
 export const SANITIZER_REQUIREMENT_VERSION = 1 as const;
+export const SANITIZER_FINDING_PATH_ALLOWLIST_VERSION = 1 as const;
 
 export type SanitizerRequirementCoreV1 = {
   sanitizerRequired: boolean;
@@ -135,6 +138,30 @@ export function computePolicyBindingDigest(input: PolicyBindingInput): string {
     lengthPrefixedAscii(input.caseInputIdentityDigest),
     lengthPrefixedUtf8(String(input.policyVersion)),
     lengthPrefixedAscii(input.policyDigest),
+  ]);
+}
+
+/** Commits the canonical consumer-owned finding-path allowlist without document values. */
+export function computeSanitizerFindingPathAllowlistDigest(
+  sourcePatterns: readonly string[],
+): string {
+  const patterns = snapshotSanitizerFindingPathPatterns(sourcePatterns);
+  return sha256([
+    Buffer.from("svbench-sanitizer-finding-path-allowlist-v1", "ascii"),
+    lengthPrefixedUtf8(String(patterns.length)),
+    ...patterns.map(lengthPrefixedUtf8),
+  ]);
+}
+
+/** Binds the policy and path allowlist into the existing run sanitizer binding slot. */
+export function computeSanitizerExecutionBindingDigest(input: {
+  policyBindingDigest: string;
+  findingPathAllowlistDigest: string;
+}): string {
+  return sha256([
+    Buffer.from("svbench-sanitizer-execution-binding-v1", "ascii"),
+    lengthPrefixedAscii(input.policyBindingDigest),
+    lengthPrefixedAscii(input.findingPathAllowlistDigest),
   ]);
 }
 

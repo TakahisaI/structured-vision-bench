@@ -77,9 +77,25 @@ fields; `findings` is the only optional field:
 
 Unknown or missing fields, duplicate JSON members, invalid UTF-8, trailing payloads, identity
 mismatch, and malformed findings fail closed. Findings contain only bounded safe
-codes/classifications, severity, a hard-gate boolean, and an optional JSON Pointer. The runner
-deliberately reduces persisted finding paths to `null`; path text is never echoed in errors or
-reports.
+codes/classifications, severity, a hard-gate boolean, and an optional JSON Pointer. A non-null path
+is persisted only when it exactly matches a consumer-owned `allowedFindingPathPatterns` entry.
+Entries and response paths are ordinary bounded RFC 6901 pointers and may not contain a full `*`
+segment. `null` is always permitted. Missing exact allowlist coverage, unsafe pointers, and malformed
+patterns fail closed without echoing the path. Array wildcard authorization is a separate contract
+tracked by Issue #45 because concrete indices are known only after provider execution and require an
+independently anchored post-sanitization artifact identity.
+
+A successful sanitizer manifest records the canonical sorted patterns, allowlist version, and
+domain-separated allowlist digest. The run sanitizer binding commits both that digest and the
+target-bound policy binding digest. `readAttempt()` recomputes these commitments and requires every
+non-null finding path to exactly match the committed allowlist. Changing a path alone fails exact
+matching; changing the allowlist and its digest changes the recomputed run identity. This metadata
+contains consumer-authorized exact pointers only, never a document member discovered outside the
+allowlist or a document value.
+
+Programmatic and CLI allowlist patterns must contain only Unicode scalar values. An isolated UTF-16
+surrogate is rejected during configuration preflight, before approval, provider input access, or
+provider invocation, so UTF-8 replacement cannot collapse distinct settings into one digest.
 
 Only `sanitizedDocument` becomes eligible for schema validation and publication. The raw provider
 document, raw provider serialization/digest, policy body/path, and failure details are never written
@@ -117,6 +133,8 @@ The required options are:
 - `--requirement-verifier-id`, `--requirement-verifier-version`, `--requirement-reason`, and
   `--requirement-decision-digest`;
 - optional `--requirement-consumer-source-commit` when the decision has one.
+- repeatable `--sanitizer-finding-path` entries for non-null finding paths the consumer permits the
+  runner to persist; omitting it permits only `null` paths.
 
 `--sanitizer-timeout-ms` and `--sanitizer-output-limit` override bounded defaults. The policy path
 is opened as a bounded, no-follow, non-blocking regular file and must not be group/other accessible

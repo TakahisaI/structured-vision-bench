@@ -297,7 +297,16 @@
                 "type": "boolean"
               },
               "path": {
-                "type": "null"
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "maxLength": 1024,
+                    "pattern": "^(?:/(?!\\*(?:/|$))(?:[^~/]|~[01])*)*$"
+                  }
+                ]
               }
             }
           }

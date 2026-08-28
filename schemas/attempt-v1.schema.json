@@ -851,6 +851,9 @@
         "policyTargetIdentityDigest",
         "policyBindingIdentity",
         "policyBindingDigest",
+        "findingPathAllowlistVersion",
+        "findingPathAllowlistDigest",
+        "allowedFindingPathPatterns",
         "findings"
       ],
       "properties": {
@@ -933,6 +936,22 @@
             }
           ]
         },
+        "findingPathAllowlistVersion": {
+          "const": 1
+        },
+        "findingPathAllowlistDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "allowedFindingPathPatterns": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": "^(?:/(?!\\*(?:/|$))(?:[^~/]|~[01])*)*$"
+          }
+        },
         "findings": {
           "type": "array",
           "maxItems": 100,
@@ -972,7 +991,16 @@
           "type": "boolean"
         },
         "path": {
-          "const": null
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^(?:/(?!\\*(?:/|$))(?:[^~/]|~[01])*)*$"
+            }
+          ]
         }
       }
     },
