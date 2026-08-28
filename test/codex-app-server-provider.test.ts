@@ -319,6 +319,36 @@ test("revalidates runtime after private setup and immediately before app-server 
   });
 });
 
+test("snapshots allowlisted runtime environment after the spawn guard", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const environmentName = "SVBENCH_ALLOWED_CANARY";
+    const previous = process.env[environmentName];
+    process.env[environmentName] = "synthetic-runtime-a";
+    try {
+      const direct = directInvocation();
+      let calls = 0;
+      const provider = createCodexAppServerProvider({
+        process: { ...options, envAllowlist: [environmentName] },
+        revalidateTransport: async (approval) => {
+          calls += 1;
+          if (calls === 2) process.env[environmentName] = "synthetic-runtime-b";
+          return approval;
+        },
+      });
+      await provider.prepareTransport!(direct.approval);
+      await provider.invoke(direct.request, direct.context);
+      const boundary = (await readCapture(capture)).find(
+        (record) => record.phase === "app-server",
+      );
+      assert.ok(boundary);
+      assert.equal(boundary.allowedCanary, "synthetic-runtime-b");
+      assert.equal(calls, 2);
+    } finally {
+      restoreEnvironment(environmentName, previous);
+    }
+  });
+});
+
 test("publishes one schema-valid policy-free runner attempt", async () => {
   await withFixture("provider-success", async ({ capture, options, root }) => {
     const requirement = syntheticRequirement();
@@ -680,6 +710,11 @@ function hasCode(code: string): (error: unknown) => boolean {
 
 function objectWithCode(value: unknown): { code?: string } {
   return value !== null && typeof value === "object" ? (value as { code?: string }) : {};
+}
+
+function restoreEnvironment(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
 }
 
 async function assertProcessStopped(pid: number): Promise<void> {

@@ -146,7 +146,9 @@ authorization before validation, requires an exact context approval and sanitize
 match, then revalidates once more immediately before starting app-server. The process client creates
 the private workspace and writes the fixed model catalog before invoking that Provider-owned start
 guard. After the guard confirms the exact attestation, current generation, signal, and expiry, no
-asynchronous operation occurs before `spawn()`. Missing, denied, expired,
+asynchronous operation occurs before `spawn()`. Allowlisted environment values are also read only
+after the guard succeeds and are synchronously snapshotted for that immediate spawn. Missing,
+denied, expired,
 changed, reused, or sanitizer/policy-required authorization fails before process start and before
 any of the four input callbacks. A later prepare aborts and waits for any in-flight invocation and
 its process/workspace cleanup before it can authorize another invocation.
@@ -231,9 +233,11 @@ ambient temporary-directory variables, with separate empty workspace, home,
 `CODEX_HOME`, config home, cache, temporary directory, and executable search path. The child cwd is
 the empty workspace, never a consumer repository, bundle directory, or their parent. The child
 environment starts empty. A caller may explicitly allowlist bounded environment names needed by an
-upstream-supported logged-in process boundary, but the process client always replaces home, config,
-cache, path, and temporary-directory variables with its private paths. It does not locate, read,
-copy, transform, refresh, or print a credential file.
+upstream-supported logged-in process boundary. Configuration snapshots and validates only those
+names; their values are read after the spawn guard and passed only to the immediately following
+spawn. The process client always replaces home, config, cache, path, and temporary-directory
+variables with its private paths. It does not locate, read, copy, transform, refresh, or print a
+credential file.
 
 The fixed tool profile identity is `codex-no-host-tools-v1`. The client starts app-server with
 strict config and disables code mode, code-mode host, shell and unified exec, shell snapshot,
@@ -266,7 +270,10 @@ Stdin and stdout use one strict UTF-8 JSON value per LF-terminated line. Individ
 stdout are bounded; stderr is counted and discarded. Raw process output, document values, digests,
 and private paths never enter normal errors. Success requires the protocol end-of-stream and exit
 status zero. Success as well as protocol failure, crash, overflow, timeout, or cancellation then
-terminates the durable POSIX process group, waits for close, zeroes materialized input copies, and
-removes the private root before the promise settles. Abort leaves a bounded grace after the
-best-effort interrupt write before forced teardown. Automated tests use only a deterministic fake
-executable and synthetic canaries; they perform no login and call no model.
+terminates the durable POSIX process group, waits until no live same-group member remains, waits for
+the leader close, zeroes materialized input copies, and removes the private root before the promise
+settles. Linux settlement enumerates process-group membership and treats only dead or zombie
+members as stopped; the other supported POSIX host waits for the group identity to disappear.
+Abort leaves a bounded grace after the best-effort interrupt write before forced teardown.
+Automated tests use only a deterministic fake executable and synthetic canaries; they perform no
+login and call no model.

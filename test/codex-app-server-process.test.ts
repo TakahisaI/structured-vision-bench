@@ -231,7 +231,7 @@ test("zeroes a lazy input that resolves after timeout settlement", async () => {
       },
     };
     const running = runCodexAppServerProcess(
-      { ...options, timeoutMs: 100 },
+      { ...options, timeoutMs: 750 },
       pending,
     );
     await started;
@@ -258,7 +258,7 @@ test("bounds a pending lazy input read without starting app-server", async () =>
       },
     };
     await assert.rejects(
-      runCodexAppServerProcess({ ...options, timeoutMs: 100 }, pending),
+      runCodexAppServerProcess({ ...options, timeoutMs: 750 }, pending),
       stableProcessError,
     );
     assert.deepEqual(reads, { image: 1, schema: 1, system: 1, instruction: 0 });

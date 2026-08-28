@@ -106,9 +106,10 @@ workspace with a fixed no-host-tool catalog, excludes account and extension prom
 and tears down its single process before settlement. The stock CLI fails closed at this boundary.
 The public Provider wrapper requires a consumer-owned revalidator, binds one exact approval
 attestation to only the next invocation, and revalidates again through a process start guard after
-private workspace/catalog preparation and immediately before app-server spawn. It waits for
-process/workspace cleanup on abort. A later prepare invalidates the prior one-shot
-authorization. Policy-required runs remain deferred to Issue #18.
+private workspace/catalog preparation and immediately before app-server spawn. Allowlisted runtime
+environment values are snapshotted only after that guard. It waits for the leader close, absence of
+live same-group members, and workspace cleanup on abort. A later prepare invalidates the prior
+one-shot authorization. Policy-required runs remain deferred to Issue #18.
 The protocol lifecycle and fixed identity are in
 [`docs/codex-app-server-transport-v1.md`](codex-app-server-transport-v1.md).
 
