@@ -43,6 +43,8 @@ export const DEFAULT_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 384 * 1024 * 1024;
 
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
+const HOST_PLATFORM = process.platform;
+const SPAWN_DETACHED = HOST_PLATFORM !== "win32";
 const MAX_STDERR_BYTES = 1024 * 1024;
 export const MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
 const PRIVATE_TEMP_PARENT = "/tmp";
@@ -246,7 +248,7 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
   // Node does not expose a Windows Job Object primitive. Refuse to start on a
   // platform where an exited leader would make complete tree reclamation
   // unverifiable; a taskkill-by-PID fallback is not a durable tree identity.
-  if (process.platform !== "darwin" && process.platform !== "linux") throw new Error();
+  if (HOST_PLATFORM !== "darwin" && HOST_PLATFORM !== "linux") throw new Error();
   const executable = value.executable;
   if (typeof executable !== "string" || !path.isAbsolute(executable)) throw new Error();
   const executableArguments = snapshotStrings(value.executableArguments ?? [], MAX_ARGUMENTS);
@@ -618,7 +620,7 @@ async function runConnectedProcess(
     }
     child = spawn(options.executable, arguments_, {
       cwd: workspace.workspace,
-      detached: process.platform !== "win32",
+      detached: SPAWN_DETACHED,
       env: environment,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
@@ -919,7 +921,7 @@ async function processGroupHasLiveMember(processGroupId: number): Promise<boolea
   } catch (error) {
     return processGroupProbeFailureIndicatesLive(error);
   }
-  if (process.platform !== "linux") return true;
+  if (HOST_PLATFORM !== "linux") return true;
   return linuxProcessGroupHasLiveMember(processGroupId);
 }
 

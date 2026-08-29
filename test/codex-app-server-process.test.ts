@@ -369,6 +369,59 @@ test("does not re-iterate the allowlisted environment after the synchronous fina
   });
 });
 
+test("does not re-read the host platform after the synchronous finalizer", async () => {
+  await withFixture("success-descendant", async ({ options, capture }) => {
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    assert.ok(platformDescriptor);
+    let result: Awaited<ReturnType<typeof runCodexAppServerProcess>> | undefined;
+    let runError: unknown;
+
+    try {
+      result = await runCodexAppServerProcess(
+        options,
+        request(readCounter()),
+        undefined,
+        async () => ({
+          allowedEnvironment: [],
+          finalize() {
+            Object.defineProperty(process, "platform", {
+              configurable: true,
+              enumerable: true,
+              value: "win32",
+              writable: false,
+            });
+            return undefined;
+          },
+        }),
+      );
+    } catch (error) {
+      runError = error;
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+    }
+
+    const descendant = (await readCapture(capture)).find(
+      (record) => record.descendantPid !== undefined,
+    );
+    const descendantPid =
+      descendant === undefined ? undefined : Number(descendant.descendantPid);
+    try {
+      if (runError !== undefined) throw runError;
+      assert.equal(result?.respondedModel, "synthetic-model");
+      assert.ok(descendantPid !== undefined);
+      await assertProcessStopped(descendantPid);
+    } finally {
+      if (descendantPid !== undefined) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch (error: unknown) {
+          if (objectWithCode(error).code !== "ESRCH") throw error;
+        }
+      }
+    }
+  });
+});
+
 test("does not read provider inputs before request and in-process isolation proof", async () => {
   for (const scenario of [
     { mode: "success", mutate: (value: CodexAppServerProcessRequest) => ({
