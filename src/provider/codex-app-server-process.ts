@@ -20,6 +20,7 @@ import {
 } from "../bundle/json.js";
 import { MAX_PROVIDER_INPUT_BYTES } from "../bundle/validate-bundle.js";
 import {
+  abortController,
   addAbortSignalListener,
   isAbortSignalAborted,
   removeAbortSignalListener,
@@ -400,7 +401,7 @@ async function readInput(
   parentSignal: AbortSignal | undefined,
 ): Promise<Buffer> {
   const controller = new AbortController();
-  const abort = (): void => controller.abort();
+  const abort = (): void => abortController(controller);
   addAbortSignalListener(parentSignal, abort);
   const timer = setTimeout(abort, timeoutMs);
   try {
@@ -574,8 +575,8 @@ async function runConnectedProcess(
   let abortRequested = false;
   const abort = (): void => {
     abortRequested = true;
-    controller.abort();
-    guardController?.abort();
+    abortController(controller);
+    abortController(guardController);
   };
   addAbortSignalListener(parentSignal, abort);
   const timer = setTimeout(abort, options.timeoutMs);

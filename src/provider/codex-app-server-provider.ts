@@ -1,6 +1,12 @@
 import path from "node:path";
 
 import {
+  abortController,
+  addAbortSignalListener,
+  isAbortSignalAborted,
+  removeAbortSignalListener,
+} from "./abort-signal-intrinsics.js";
+import {
   CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION,
   runCodexAppServerProcess,
   type CodexAppServerProcessOptions,
@@ -87,7 +93,7 @@ export function createCodexAppServerProvider(
       const currentGeneration = ++generation;
       authorization = undefined;
       const previousInvocation = activeInvocation;
-      previousInvocation?.controller.abort();
+      abortController(previousInvocation?.controller);
       try {
         await previousInvocation?.settled;
         assertActive(signal);
@@ -118,7 +124,7 @@ export function createCodexAppServerProvider(
       }
 
       const controller = new AbortController();
-      const abort = (): void => controller.abort();
+      const abort = (): void => abortController(controller);
       let settleInvocation!: () => void;
       const settled = new Promise<void>((resolve) => {
         settleInvocation = resolve;
@@ -130,7 +136,7 @@ export function createCodexAppServerProvider(
       try {
         if (signal !== undefined) {
           listenerAttempted = true;
-          signal.addEventListener("abort", abort, { once: true });
+          addAbortSignalListener(signal, abort);
         }
         assertActive(signal);
         const request = snapshotInvocation(requestValue, contextValue, claimed.approval);
@@ -178,10 +184,10 @@ export function createCodexAppServerProvider(
       } catch {
         throw new Error("codex app-server provider failed");
       } finally {
-        controller.abort();
+        abortController(controller);
         if (listenerAttempted) {
           try {
-            signal!.removeEventListener("abort", abort);
+            removeAbortSignalListener(signal, abort);
           } catch {
             cleanupFailed = true;
           }
@@ -608,5 +614,5 @@ function daysInMonth(year: number, month: number): number {
 }
 
 function assertActive(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw new Error();
+  if (isAbortSignalAborted(signal)) throw new Error();
 }

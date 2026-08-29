@@ -136,34 +136,32 @@ test("validates and snapshots the public factory configuration", async () => {
   });
 });
 
-test("contains hostile AbortSignal listener failures and always releases lifecycle state", async (t) => {
-  for (const mode of ["add", "remove"]) {
-    await t.test(mode, async () => {
-      await withFixture("provider-success", async ({ capture, options }) => {
-        const direct = directInvocation();
-        const provider = createCodexAppServerProvider({
-          process: options,
-          revalidateTransport: async (approval) => approval,
-        });
-        await provider.prepareTransport!(direct.approval);
-        const signal = {
-          aborted: false,
-          addEventListener(): void {
-            if (mode === "add") throw new Error("synthetic-signal-add-canary");
-          },
-          removeEventListener(): void {
-            if (mode === "remove") throw new Error("synthetic-signal-remove-canary");
-          },
-        } as unknown as AbortSignal;
-        await assert.rejects(
-          provider.invoke(direct.request, direct.context, signal),
-          stableProviderFailure,
-        );
-        await provider.prepareTransport!(direct.approval);
-        assert.equal(await appServerStarts(capture), mode === "add" ? 0 : 1);
-      });
+test("rejects a counterfeit AbortSignal without calling its methods or retaining lifecycle state", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (approval) => approval,
     });
-  }
+    await provider.prepareTransport!(direct.approval);
+    let listenerCalls = 0;
+    const signal = {
+      aborted: false,
+      addEventListener(): void {
+        listenerCalls += 1;
+      },
+      removeEventListener(): void {
+        listenerCalls += 1;
+      },
+    } as unknown as AbortSignal;
+    await assert.rejects(
+      provider.invoke(direct.request, direct.context, signal),
+      stableProviderFailure,
+    );
+    await provider.prepareTransport!(direct.approval);
+    assert.equal(listenerCalls, 0);
+    assert.equal(await appServerStarts(capture), 0);
+  });
 });
 
 test("rejects a transparent wrapper that loses the fixed cleanup capability", async () => {
@@ -498,7 +496,7 @@ test("does not read a consumer-owned signal getter after final approval", async 
     await provider.prepareTransport!(direct.approval);
     await provider.invoke(direct.request, direct.context);
 
-    assert.equal(abortedReads, 3);
+    assert.equal(abortedReads, 0);
     assert.ok(Date.now() < expiresAt);
     assert.deepEqual(direct.reads, {
       image: 1,
@@ -528,10 +526,6 @@ test("consumer guard signal mutation cannot disable process cancellation", async
               configurable: true,
               get() {
                 abortedReads += 1;
-                if (abortedReads === 3 && !abortQueued) {
-                  abortQueued = true;
-                  queueMicrotask(() => parent.abort());
-                }
                 return false;
               },
             },
@@ -540,6 +534,8 @@ test("consumer guard signal mutation cannot disable process cancellation", async
               value() {},
             },
           });
+          abortQueued = true;
+          queueMicrotask(() => parent.abort());
         }
         return actual;
       },
@@ -552,6 +548,7 @@ test("consumer guard signal mutation cannot disable process cancellation", async
     );
 
     assert.equal(abortQueued, true);
+    assert.equal(abortedReads, 0);
     assert.equal(parent.signal.aborted, true);
     assert.deepEqual(direct.reads, {
       image: 0,
@@ -584,7 +581,6 @@ test("shared AbortSignal prototype mutation cannot disable internal cancellation
     );
     const existingRoots = await codexTemporaryRoots();
     let calls = 0;
-    let abortedReads = 0;
     let abortQueued = false;
     const provider = createCodexAppServerProvider({
       process: options,
@@ -597,11 +593,6 @@ test("shared AbortSignal prototype mutation cannot disable internal cancellation
             aborted: {
               configurable: true,
               get() {
-                abortedReads += 1;
-                if (abortedReads === 3 && !abortQueued) {
-                  abortQueued = true;
-                  queueMicrotask(() => parent.abort());
-                }
                 return false;
               },
             },
@@ -610,6 +601,8 @@ test("shared AbortSignal prototype mutation cannot disable internal cancellation
               value() {},
             },
           });
+          abortQueued = true;
+          queueMicrotask(() => parent.abort());
         }
         return actual;
       },
@@ -636,6 +629,144 @@ test("shared AbortSignal prototype mutation cannot disable internal cancellation
           addEventListenerDescriptor,
         );
       }
+    }
+
+    assert.equal(abortQueued, true);
+    assert.equal(parent.signal.aborted, true);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.ok((await appServerStarts(capture)) <= 1);
+    assert.equal(await hasNewPreparedCatalog(existingRoots, model), false);
+  });
+});
+
+test("prepare-time AbortSignal prototype mutation cannot hide an aborted invoke", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const model = "synthetic-provider-prototype-cancel-model";
+    const request = {
+      ...direct.request,
+      requested: { ...direct.request.requested, model },
+    };
+    const context = {
+      ...direct.context,
+      requested: request.requested,
+    };
+    const parent = new AbortController();
+    parent.abort();
+    const prototype = AbortSignal.prototype;
+    const abortedDescriptor = Object.getOwnPropertyDescriptor(prototype, "aborted");
+    const addEventListenerDescriptor = Object.getOwnPropertyDescriptor(
+      prototype,
+      "addEventListener",
+    );
+    const existingRoots = await codexTemporaryRoots();
+    let calls = 0;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual) => {
+        calls += 1;
+        if (calls === 1) {
+          Object.defineProperties(prototype, {
+            aborted: {
+              configurable: true,
+              get() {
+                return false;
+              },
+            },
+            addEventListener: {
+              configurable: true,
+              value() {},
+            },
+          });
+        }
+        return actual;
+      },
+    });
+
+    try {
+      await provider.prepareTransport!(direct.approval);
+      await assert.rejects(
+        provider.invoke(request, context, parent.signal),
+        stableProviderFailure,
+      );
+    } finally {
+      if (abortedDescriptor === undefined) {
+        Reflect.deleteProperty(prototype, "aborted");
+      } else {
+        Object.defineProperty(prototype, "aborted", abortedDescriptor);
+      }
+      if (addEventListenerDescriptor === undefined) {
+        Reflect.deleteProperty(prototype, "addEventListener");
+      } else {
+        Object.defineProperty(
+          prototype,
+          "addEventListener",
+          addEventListenerDescriptor,
+        );
+      }
+    }
+
+    assert.equal(parent.signal.aborted, true);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.equal(await appServerStarts(capture), 0);
+    assert.equal(await hasNewPreparedCatalog(existingRoots, model), false);
+  });
+});
+
+test("shared AbortController prototype mutation cannot disable guard cancellation", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const model = "synthetic-controller-prototype-cancel-model";
+    const request = {
+      ...direct.request,
+      requested: { ...direct.request.requested, model },
+    };
+    const context = {
+      ...direct.context,
+      requested: request.requested,
+    };
+    const parent = new AbortController();
+    const prototype = AbortController.prototype;
+    const abortDescriptor = Object.getOwnPropertyDescriptor(prototype, "abort");
+    assert.ok(abortDescriptor?.value);
+    const abortIntrinsic = abortDescriptor.value as (reason?: unknown) => void;
+    const existingRoots = await codexTemporaryRoots();
+    let calls = 0;
+    let abortQueued = false;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual) => {
+        calls += 1;
+        if (calls === 2) {
+          Object.defineProperty(prototype, "abort", {
+            configurable: true,
+            value() {},
+          });
+          abortQueued = true;
+          queueMicrotask(() => Reflect.apply(abortIntrinsic, parent, []));
+        }
+        return actual;
+      },
+    });
+
+    await provider.prepareTransport!(direct.approval);
+    try {
+      await assert.rejects(
+        provider.invoke(request, context, parent.signal),
+        stableProviderFailure,
+      );
+    } finally {
+      Object.defineProperty(prototype, "abort", abortDescriptor);
     }
 
     assert.equal(abortQueued, true);

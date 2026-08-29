@@ -5,6 +5,7 @@ const abortedGetterValue = Object.getOwnPropertyDescriptor(
 )?.get;
 const addEventListenerIntrinsic = EventTarget.prototype.addEventListener;
 const removeEventListenerIntrinsic = EventTarget.prototype.removeEventListener;
+const abortControllerIntrinsic = AbortController.prototype.abort;
 const once = Object.freeze({ once: true });
 
 if (abortedGetterValue === undefined) throw new Error();
@@ -29,4 +30,9 @@ export function removeAbortSignalListener(
 ): void {
   if (signal === undefined) return;
   applyIntrinsic(removeEventListenerIntrinsic, signal, ["abort", listener]);
+}
+
+export function abortController(controller: AbortController | undefined): void {
+  if (controller === undefined) return;
+  applyIntrinsic(abortControllerIntrinsic, controller, []);
 }
