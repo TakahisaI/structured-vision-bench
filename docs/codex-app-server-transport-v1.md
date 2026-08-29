@@ -146,13 +146,27 @@ match, then revalidates once more immediately before starting app-server. The pr
 the private workspace and writes the fixed model catalog before invoking that Provider-owned start
 guard. After the guard confirms the exact attestation, current generation, signal, and expiry, no
 asynchronous operation occurs before `spawn()`. Allowlisted environment values are also read only
-after the guard succeeds and are synchronously snapshotted for that immediate spawn. Missing,
-denied, expired, changed, or reused authorization fails before process start and before any of the
-four input callbacks. Sanitizer-required authorization must match the exact consumer decision but
-does not send policy or binding data to app-server; the runner applies the target-bound sanitizer
-after the strict document returns and before schema validation or publication. A later prepare
-aborts and waits for any in-flight invocation and its process/workspace cleanup before it can
-authorize another invocation.
+after the guard succeeds and are synchronously snapshotted for that immediate spawn. Missing, denied,
+expired, changed, or reused authorization fails before process start and before any of the four input
+callbacks. Approval snapshots and equality checks use only validated own data; inherited optional
+metadata and its getters are ignored. Sanitizer-required authorization must match the exact consumer
+decision but does not send policy or binding data to app-server; the runner applies the target-bound
+sanitizer after the strict document returns and before schema validation or publication. A later
+prepare aborts and waits for any in-flight invocation and its process/workspace cleanup before it can
+authorize another invocation. After the synchronous finalizer returns, the process client checks only
+its private primitive abort state before spawning; the immutable child environment has already been
+constructed from the authorization and private workspace before the finalizer runs. The client does
+not read consumer-reachable signal properties after the finalizer. The guard receives a dedicated relay signal,
+while timeout, cancellation, protocol, and input-read settlement retain a separate internal signal
+that consumer code never receives. Promise construction and settlement on those internal paths use
+module-load-captured native Promise construction and `then`; they do not depend on the mutable global
+`Promise`, mutable Promise prototype methods, or iterable-based `Promise.race()` and `Promise.all()`
+after consumer code has run. Consumer-returned native Promises have their constructor, captured
+`then`, and species metadata restored and hardened before internal settlement observes them.
+Invocation settlement, private-path derivation, process spawn and cleanup, close-event registration,
+timeout scheduling, process-group inspection, and required protocol-field validation likewise use
+module-load-captured primitives or indexed traversal rather than consumer-replaceable globals, live
+Node built-in export bindings, or shared Array iterators.
 
 Only the four extraction callbacks and requested model/effort/null max-tokens setting cross from
 the Provider into the process client. Approval, case and bundle identities, provenance, sanitizer
@@ -277,10 +291,21 @@ Each invocation creates one mode-0700 temporary root under the canonical system 
 ambient temporary-directory variables, with separate empty workspace, home,
 `CODEX_HOME`, config home, cache, temporary directory, and executable search path. The child cwd is
 the empty workspace, never a consumer repository, bundle directory, or their parent. The child
-environment starts empty. A caller may explicitly allowlist bounded environment names needed by an
+environment starts empty. Temporary-root containment and all derived private paths use path
+operations captured before consumer code can run. A caller may explicitly allowlist bounded environment names needed by an
 upstream-supported logged-in process boundary. Configuration snapshots and validates only those
-names; their values are read after the spawn guard and passed only to the immediately following
-spawn. The process client always replaces home, config, cache, path, and temporary-directory
+names. The final revalidation continuation captures their values into an immutable spawn
+authorization only after abort, usability, exact-identity, and generation checks succeed;
+prepare-only and failed revalidation paths do not read the values. After the process client awaits
+that authorization, it synchronously reads the current allowlisted values, then rechecks approval
+expiry, exact identity, generation, and abort state so time or side effects during the reads cannot
+cross the final boundary. The finalizer must return `undefined` synchronously; any other return is
+rejected before process start. Every native Promise created while invoking a consumer callback receives a captured
+rejection sink at creation time, before the callback can make its own constructor metadata non-configurable; invalid
+revalidation and finalizer returns therefore cannot strand an exposed rejection. The client then
+checks only its private primitive abort state and calls spawn without another callback or await. The process client
+always replaces home, config,
+cache, path, and temporary-directory
 variables with its private paths. It does not locate, read, copy, transform, refresh, or print a
 credential file.
 
@@ -307,16 +332,22 @@ model metadata, so a remote catalog or parent cache cannot restore a host tool.
 
 After the live process proves the isolation identity, the client invokes each image, schema, system,
 and instruction callback once, copies at most the provider-input limit, and verifies its declared
-SHA-256 before sending any protocol request. The four inputs are kept in memory and never written
+SHA-256 before sending any protocol request. Hash update/digest, byte copying, materialized-copy
+tracking, and zeroing use module-load captured primitives, so a callback cannot substitute a digest
+or retain an uncleared copy through shared prototypes. The four inputs are kept in memory and never written
 into the private workspace. The schema and text inputs require strict UTF-8; the schema also
 requires strict JSON.
 
 Stdin and stdout use one strict UTF-8 JSON value per LF-terminated line. Individual values and total
-stdout are bounded; stderr is counted and discarded. Raw process output, document values, digests,
+stdout are bounded; stderr is counted and discarded. JSON cloning, parsing, encoding, key ordering,
+connection binding, and canonical equality use module-load captured primitives and do not consult
+consumer-replaceable JSON, Array, Object, or Function prototype methods. Raw process output, document values, digests,
 and private paths never enter normal errors. Success requires the protocol end-of-stream and exit
 status zero. Success as well as protocol failure, crash, overflow, timeout, or cancellation then
 terminates the durable POSIX process group, waits until no live same-group member remains, waits for
-the leader close, zeroes materialized input copies, and removes the private root before the promise
+the leader close through restored event primitives fixed as own methods on the spawned child and its
+streams, zeroes materialized input copies,
+and removes the private root before the promise
 settles. Linux settlement enumerates process-group membership and treats only dead or zombie
 members as stopped. Process entries hidden by procfs access controls are ignored because spawned
 same-owner group members remain readable; a probe failure cannot bypass the leader-close wait. The

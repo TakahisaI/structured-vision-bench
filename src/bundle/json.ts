@@ -3,26 +3,84 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 
 export class JsonContractError extends Error {}
 
+const applyIntrinsic = Reflect.apply;
+const arrayIsArrayIntrinsic = Array.isArray;
+const jsonParseIntrinsic = JSON.parse;
+const jsonStringifyIntrinsic = JSON.stringify;
+const numberIntrinsic = Number;
+const numberIsFiniteIntrinsic = Number.isFinite;
+const numberParseIntIntrinsic = Number.parseInt;
+const objectCreateIntrinsic = Object.create;
+const objectGetOwnPropertyDescriptorIntrinsic = Object.getOwnPropertyDescriptor;
+const objectGetPrototypeOfIntrinsic = Object.getPrototypeOf;
+const objectHasOwnIntrinsic = Object.hasOwn;
+const objectKeysIntrinsic = Object.keys;
+const objectPrototypeIntrinsic = Object.prototype;
+const regExpTestIntrinsic = RegExp.prototype.test;
+const setAddIntrinsic = Set.prototype.add;
+const setHasIntrinsic = Set.prototype.has;
+const SetIntrinsic = Set;
+const stringCharCodeAtIntrinsic = String.prototype.charCodeAt;
+const stringFromCharCodeIntrinsic = String.fromCharCode;
+const stringSliceIntrinsic = String.prototype.slice;
+const stringStartsWithIntrinsic = String.prototype.startsWith;
+const structuredCloneIntrinsic = structuredClone;
+const TextDecoderIntrinsic = TextDecoder;
+const textDecoderDecodeIntrinsic = TextDecoderIntrinsic.prototype.decode;
+const TextEncoderIntrinsic = TextEncoder;
+const textEncoderEncodeIntrinsic = TextEncoderIntrinsic.prototype.encode;
+const weakSetAddIntrinsic = WeakSet.prototype.add;
+const weakSetDeleteIntrinsic = WeakSet.prototype.delete;
+const weakSetHasIntrinsic = WeakSet.prototype.has;
+const WeakSetIntrinsic = WeakSet;
+
 export function isJsonObject(value: unknown): value is Record<string, JsonValue> {
+  const prototype =
+    typeof value === "object" && value !== null
+      ? objectGetPrototypeOfIntrinsic(value)
+      : undefined;
   return (
     typeof value === "object" &&
     value !== null &&
-    !Array.isArray(value) &&
-    (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+    !arrayIsArrayIntrinsic(value) &&
+    (prototype === objectPrototypeIntrinsic || prototype === null)
   );
 }
 
-export function isJsonValue(value: unknown, seen = new WeakSet<object>()): value is JsonValue {
+export function isJsonValue(
+  value: unknown,
+  seen = new WeakSetIntrinsic<object>(),
+): value is JsonValue {
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "number") return numberIsFiniteIntrinsic(value);
   if (typeof value !== "object") return false;
-  if (seen.has(value)) return false;
-  seen.add(value);
-  const valid = Array.isArray(value)
-    ? value.every((child) => isJsonValue(child, seen))
-    : isJsonObject(value) && Object.values(value).every((child) => isJsonValue(child, seen));
-  seen.delete(value);
-  return valid;
+  if (applyIntrinsic(weakSetHasIntrinsic, seen, [value])) return false;
+  applyIntrinsic(weakSetAddIntrinsic, seen, [value]);
+  try {
+    if (arrayIsArrayIntrinsic(value)) {
+      for (let index = 0; index < value.length; index += 1) {
+        if (objectHasOwnIntrinsic(value, index) && !isJsonValue(value[index], seen)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (!isJsonObject(value)) return false;
+    const keys = objectKeysIntrinsic(value);
+    for (let index = 0; index < keys.length; index += 1) {
+      const property = objectGetOwnPropertyDescriptorIntrinsic(value, keys[index]!);
+      if (
+        property === undefined ||
+        !("value" in property) ||
+        !isJsonValue(property.value, seen)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } finally {
+    applyIntrinsic(weakSetDeleteIntrinsic, seen, [value]);
+  }
 }
 
 /**
@@ -35,7 +93,8 @@ export function decodeUtf8Strict(bytes: Uint8Array, label: string): string {
     throw new JsonContractError(`${label} must not start with a UTF-8 BOM`);
   }
   try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    const decoder = new TextDecoderIntrinsic("utf-8", { fatal: true, ignoreBOM: true });
+    return applyIntrinsic(textDecoderDecodeIntrinsic, decoder, [bytes]) as string;
   } catch {
     throw new JsonContractError(`${label} is not valid UTF-8`);
   }
@@ -55,7 +114,7 @@ export function parseJson(source: string, label: string): JsonValue {
   scanJsonContract(source, label);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(source);
+    parsed = jsonParseIntrinsic(source);
   } catch {
     // The scanner accepted it, so this is unreachable in practice; kept as a
     // safety net that never leaks internals.
@@ -72,36 +131,114 @@ export function parseJson(source: string, label: string): JsonValue {
  * via toJSON.
  */
 export function normalizeJsonValue(value: unknown, label: string, maxBytes?: number): JsonValue {
-  let cloned: unknown;
+  let snapshot: JsonValue;
   let source: string | undefined;
   try {
-    cloned = structuredClone(value);
-    if (!isJsonValue(cloned)) throw new Error();
-    source = JSON.stringify(cloned);
+    snapshot = snapshotJsonValue(structuredCloneIntrinsic(value), new WeakSetIntrinsic<object>());
+    source = stringifyJsonValue(snapshot);
   } catch {
     throw new JsonContractError(`${label} is not valid JSON`);
   }
   if (source === undefined) throw new JsonContractError(`${label} is not valid JSON`);
-  if (maxBytes !== undefined && new TextEncoder().encode(source).length > maxBytes) {
+  const encoder = new TextEncoderIntrinsic();
+  const encoded = applyIntrinsic(textEncoderEncodeIntrinsic, encoder, [source]) as Uint8Array;
+  if (maxBytes !== undefined && encoded.length > maxBytes) {
     throw new JsonContractError(`${label} exceeds its size limit`);
   }
   return parseJson(source, label);
 }
 
+/** Serializes a validated JSON value without consulting replaceable prototypes or toJSON. */
+export function stringifyJsonValue(value: JsonValue): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return jsonStringifyIntrinsic(value);
+  }
+  if (typeof value === "number") {
+    if (!numberIsFiniteIntrinsic(value)) throw new JsonContractError("value is not valid JSON");
+    return jsonStringifyIntrinsic(value);
+  }
+  if (arrayIsArrayIntrinsic(value)) {
+    let source = "[";
+    for (let index = 0; index < value.length; index += 1) {
+      if (index !== 0) source += ",";
+      if (!objectHasOwnIntrinsic(value, index)) {
+        throw new JsonContractError("value is not valid JSON");
+      }
+      source += stringifyJsonValue(value[index]!);
+    }
+    return `${source}]`;
+  }
+  if (!isJsonObject(value)) throw new JsonContractError("value is not valid JSON");
+  const keys = objectKeysIntrinsic(value);
+  let source = "{";
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    const property = objectGetOwnPropertyDescriptorIntrinsic(value, key);
+    if (property === undefined || !("value" in property)) {
+      throw new JsonContractError("value is not valid JSON");
+    }
+    if (index !== 0) source += ",";
+    source += `${jsonStringifyIntrinsic(key)}:${stringifyJsonValue(property.value as JsonValue)}`;
+  }
+  return `${source}}`;
+}
+
+function snapshotJsonValue(value: unknown, seen: WeakSet<object>): JsonValue {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
+  if (typeof value === "number") {
+    if (!numberIsFiniteIntrinsic(value)) throw new Error();
+    return value;
+  }
+  if (typeof value !== "object" || applyIntrinsic(weakSetHasIntrinsic, seen, [value])) {
+    throw new Error();
+  }
+  applyIntrinsic(weakSetAddIntrinsic, seen, [value]);
+  try {
+    if (arrayIsArrayIntrinsic(value)) {
+      const result: JsonValue[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        result[index] = objectHasOwnIntrinsic(value, index)
+          ? snapshotJsonValue(value[index], seen)
+          : null;
+      }
+      return result;
+    }
+    if (!isJsonObject(value)) throw new Error();
+    const result = objectCreateIntrinsic(null) as Record<string, JsonValue>;
+    const keys = objectKeysIntrinsic(value);
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index]!;
+      const property = objectGetOwnPropertyDescriptorIntrinsic(value, key);
+      if (property === undefined || !("value" in property)) throw new Error();
+      result[key] = snapshotJsonValue(property.value, seen);
+    }
+    return result;
+  } finally {
+    applyIntrinsic(weakSetDeleteIntrinsic, seen, [value]);
+  }
+}
+
 function assertFiniteNumbers(value: unknown, label: string): void {
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
+    if (!numberIsFiniteIntrinsic(value)) {
       throw new JsonContractError(`${label} contains a number outside the binary64 domain`);
     }
     return;
   }
   if (value !== null && typeof value === "object") {
-    for (const child of Object.values(value)) assertFiniteNumbers(child, label);
+    const keys = objectKeysIntrinsic(value);
+    for (let index = 0; index < keys.length; index += 1) {
+      const property = objectGetOwnPropertyDescriptorIntrinsic(value, keys[index]!);
+      if (property !== undefined && "value" in property) {
+        assertFiniteNumbers(property.value, label);
+      }
+    }
   }
 }
 
 const JSON_STRING_ESCAPE = /^["\\/bfnrt]$/u;
 const JSON_DIGIT = /[0-9]/u;
+const JSON_HEX = /[0-9a-fA-F]/u;
 
 function fail(message: string): never {
   throw new JsonContractError(`is not valid JSON: ${message}`);
@@ -133,12 +270,12 @@ function scanJsonContract(source: string, label: string): void {
         position += 1;
         return value;
       }
-      const code = character.charCodeAt(0);
+      const code = applyIntrinsic(stringCharCodeAtIntrinsic, character, [0]) as number;
       if (code < 0x20) fail("unescaped control character in string");
       if (isHighSurrogate(code)) {
-        const low = source.charCodeAt(position + 1);
+        const low = applyIntrinsic(stringCharCodeAtIntrinsic, source, [position + 1]) as number;
         if (!isLowSurrogate(low)) fail("contains an invalid Unicode surrogate pair");
-        value += source.slice(position, position + 2);
+        value += applyIntrinsic(stringSliceIntrinsic, source, [position, position + 2]) as string;
         position += 2;
         continue;
       }
@@ -156,7 +293,9 @@ function scanJsonContract(source: string, label: string): void {
         value += scanUnicodeEscape();
         continue;
       }
-      if (!JSON_STRING_ESCAPE.test(escape)) fail("invalid escape sequence");
+      if (!applyIntrinsic(regExpTestIntrinsic, JSON_STRING_ESCAPE, [escape])) {
+        fail("invalid escape sequence");
+      }
       value += decodeSimpleEscape(escape);
       position += 1;
     }
@@ -172,10 +311,10 @@ function scanJsonContract(source: string, label: string): void {
       position += 1; // the backslash before the low surrogate escape
       const low = scanUnicodeCodeUnit();
       if (!isLowSurrogate(low)) fail("contains an invalid Unicode surrogate pair");
-      return String.fromCharCode(codeUnit, low);
+      return stringFromCharCodeIntrinsic(codeUnit, low);
     }
     if (isLowSurrogate(codeUnit)) fail("contains an invalid Unicode surrogate pair");
-    return String.fromCharCode(codeUnit);
+    return stringFromCharCodeIntrinsic(codeUnit);
   }
 
   function scanUnicodeCodeUnit(): number {
@@ -183,10 +322,10 @@ function scanJsonContract(source: string, label: string): void {
     let codePoint = 0;
     for (let digit = 0; digit < 4; digit += 1) {
       const character = source[position];
-      if (character === undefined || !/[0-9a-fA-F]/u.test(character)) {
+      if (character === undefined || !applyIntrinsic(regExpTestIntrinsic, JSON_HEX, [character])) {
         fail("invalid \\u escape");
       }
-      codePoint = codePoint * 16 + Number.parseInt(character, 16);
+      codePoint = codePoint * 16 + numberParseIntIntrinsic(character, 16);
       position += 1;
     }
     return codePoint;
@@ -220,24 +359,38 @@ function scanJsonContract(source: string, label: string): void {
     if (source[position] === "-") position += 1;
     if (source[position] === "0") {
       position += 1;
-    } else if (JSON_DIGIT.test(source[position] ?? "")) {
+    } else if (applyIntrinsic(regExpTestIntrinsic, JSON_DIGIT, [source[position] ?? ""])) {
       position += 1;
-      while (JSON_DIGIT.test(source[position] ?? "")) position += 1;
+      while (applyIntrinsic(regExpTestIntrinsic, JSON_DIGIT, [source[position] ?? ""])) {
+        position += 1;
+      }
     } else {
       fail("invalid number");
     }
     if (source[position] === ".") {
       position += 1;
-      if (!JSON_DIGIT.test(source[position] ?? "")) fail("invalid number fraction");
-      while (JSON_DIGIT.test(source[position] ?? "")) position += 1;
+      if (!applyIntrinsic(regExpTestIntrinsic, JSON_DIGIT, [source[position] ?? ""])) {
+        fail("invalid number fraction");
+      }
+      while (applyIntrinsic(regExpTestIntrinsic, JSON_DIGIT, [source[position] ?? ""])) {
+        position += 1;
+      }
     }
     if (source[position] === "e" || source[position] === "E") {
       position += 1;
       if (source[position] === "+" || source[position] === "-") position += 1;
-      if (!JSON_DIGIT.test(source[position] ?? "")) fail("invalid number exponent");
-      while (JSON_DIGIT.test(source[position] ?? "")) position += 1;
+      if (!applyIntrinsic(regExpTestIntrinsic, JSON_DIGIT, [source[position] ?? ""])) {
+        fail("invalid number exponent");
+      }
+      while (applyIntrinsic(regExpTestIntrinsic, JSON_DIGIT, [source[position] ?? ""])) {
+        position += 1;
+      }
     }
-    if (!Number.isFinite(Number(source.slice(start, position)))) {
+    if (
+      !numberIsFiniteIntrinsic(
+        numberIntrinsic(applyIntrinsic(stringSliceIntrinsic, source, [start, position]) as string),
+      )
+    ) {
       fail("contains a number outside the binary64 domain");
     }
   }
@@ -251,15 +404,15 @@ function scanJsonContract(source: string, label: string): void {
       scanString();
       return;
     }
-    if (source.startsWith("true", position)) {
+    if (applyIntrinsic(stringStartsWithIntrinsic, source, ["true", position])) {
       position += 4;
       return;
     }
-    if (source.startsWith("false", position)) {
+    if (applyIntrinsic(stringStartsWithIntrinsic, source, ["false", position])) {
       position += 5;
       return;
     }
-    if (source.startsWith("null", position)) {
+    if (applyIntrinsic(stringStartsWithIntrinsic, source, ["null", position])) {
       position += 4;
       return;
     }
@@ -269,7 +422,7 @@ function scanJsonContract(source: string, label: string): void {
   function scanObject(): void {
     position += 1;
     skipWhitespace();
-    const members = new Set<string>();
+    const members = new SetIntrinsic<string>();
     if (source[position] === "}") {
       position += 1;
       return;
@@ -278,8 +431,10 @@ function scanJsonContract(source: string, label: string): void {
       skipWhitespace();
       if (source[position] !== '"') fail("expected object key");
       const key = scanString();
-      if (members.has(key)) fail("contains a duplicate object member");
-      members.add(key);
+      if (applyIntrinsic(setHasIntrinsic, members, [key])) {
+        fail("contains a duplicate object member");
+      }
+      applyIntrinsic(setAddIntrinsic, members, [key]);
       skipWhitespace();
       if (source[position] !== ":") fail('expected ":"');
       position += 1;

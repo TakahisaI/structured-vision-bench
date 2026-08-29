@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -136,34 +136,32 @@ test("validates and snapshots the public factory configuration", async () => {
   });
 });
 
-test("contains hostile AbortSignal listener failures and always releases lifecycle state", async (t) => {
-  for (const mode of ["add", "remove"]) {
-    await t.test(mode, async () => {
-      await withFixture("provider-success", async ({ capture, options }) => {
-        const direct = directInvocation();
-        const provider = createCodexAppServerProvider({
-          process: options,
-          revalidateTransport: async (approval) => approval,
-        });
-        await provider.prepareTransport!(direct.approval);
-        const signal = {
-          aborted: false,
-          addEventListener(): void {
-            if (mode === "add") throw new Error("synthetic-signal-add-canary");
-          },
-          removeEventListener(): void {
-            if (mode === "remove") throw new Error("synthetic-signal-remove-canary");
-          },
-        } as unknown as AbortSignal;
-        await assert.rejects(
-          provider.invoke(direct.request, direct.context, signal),
-          stableProviderFailure,
-        );
-        await provider.prepareTransport!(direct.approval);
-        assert.equal(await appServerStarts(capture), mode === "add" ? 0 : 1);
-      });
+test("rejects a counterfeit AbortSignal without calling its methods or retaining lifecycle state", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (approval) => approval,
     });
-  }
+    await provider.prepareTransport!(direct.approval);
+    let listenerCalls = 0;
+    const signal = {
+      aborted: false,
+      addEventListener(): void {
+        listenerCalls += 1;
+      },
+      removeEventListener(): void {
+        listenerCalls += 1;
+      },
+    } as unknown as AbortSignal;
+    await assert.rejects(
+      provider.invoke(direct.request, direct.context, signal),
+      stableProviderFailure,
+    );
+    await provider.prepareTransport!(direct.approval);
+    assert.equal(listenerCalls, 0);
+    assert.equal(await appServerStarts(capture), 0);
+  });
 });
 
 test("rejects a transparent wrapper that loses the fixed cleanup capability", async () => {
@@ -347,6 +345,914 @@ test("snapshots allowlisted runtime environment after the spawn guard", async ()
       restoreEnvironment(environmentName, previous);
     }
   });
+});
+
+test("shared Array iterator mutation cannot replace the environment allowlist", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const environmentName = "SVBENCH_ALLOWED_CANARY";
+    const replacementName = "SVBENCH_PARENT_CANARY";
+    const previousAllowed = process.env[environmentName];
+    const previousParent = process.env[replacementName];
+    process.env[environmentName] = "synthetic-runtime-a";
+    process.env[replacementName] = "synthetic-parent-canary";
+    const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      Symbol.iterator,
+    );
+    assert.ok(iteratorDescriptor?.value);
+    let calls = 0;
+    try {
+      const direct = directInvocation();
+      const provider = createCodexAppServerProvider({
+        process: { ...options, envAllowlist: [environmentName] },
+        revalidateTransport: async (approval) => {
+          calls += 1;
+          if (calls === 1) {
+            Object.defineProperty(Array.prototype, Symbol.iterator, {
+              configurable: true,
+              writable: true,
+              value: function* (this: unknown[]): Generator<unknown> {
+                if (this.length === 1 && this[0] === environmentName) {
+                  yield replacementName;
+                  return;
+                }
+                for (let index = 0; index < this.length; index += 1) {
+                  yield this[index];
+                }
+              },
+            });
+          }
+          return approval;
+        },
+      });
+
+      try {
+        await provider.prepareTransport!(direct.approval);
+        await provider.invoke(direct.request, direct.context);
+      } finally {
+        Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+      }
+
+      const boundary = (await readCapture(capture)).find(
+        (record) => record.phase === "app-server",
+      );
+      assert.ok(boundary);
+      assert.equal(boundary.allowedCanary, "synthetic-runtime-a");
+      assert.equal(boundary.parentCanary, null);
+      assert.equal(calls, 2);
+    } finally {
+      Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+      restoreEnvironment(environmentName, previousAllowed);
+      restoreEnvironment(replacementName, previousParent);
+    }
+  });
+});
+
+test("invocation settlement uses the module-load Promise constructor", async () => {
+  await withFixture("provider-success", async ({ options }) => {
+    const promiseDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Promise");
+    assert.ok(promiseDescriptor);
+    const OriginalPromise = Promise;
+    let revalidations = 0;
+    const direct = directInvocation();
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (approval) => {
+        revalidations += 1;
+        if (revalidations === 1) {
+          const ReplacementPromise = function (
+            executor: (
+              resolve: (value?: unknown) => void,
+              reject: (reason?: unknown) => void,
+            ) => void,
+          ): Promise<unknown> {
+            executor(undefined as unknown as (value?: unknown) => void, () => undefined);
+            return OriginalPromise.resolve();
+          } as unknown as PromiseConstructor;
+          Object.defineProperty(globalThis, "Promise", {
+            configurable: true,
+            value: ReplacementPromise,
+            writable: true,
+          });
+        }
+        return approval;
+      },
+    });
+
+    try {
+      await provider.prepareTransport!(direct.approval);
+      const running = provider.invoke(direct.request, direct.context);
+      Object.defineProperty(globalThis, "Promise", promiseDescriptor);
+      await running;
+    } finally {
+      Object.defineProperty(globalThis, "Promise", promiseDescriptor);
+    }
+
+    assert.equal(revalidations, 2);
+  });
+});
+
+test("revalidation settlement restores captured Promise metadata", async (context) => {
+  await context.test("species mutation", async () => {
+    await withFixture("provider-success", async ({ options }) => {
+      const speciesDescriptor = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
+      const thenDescriptor = Object.getOwnPropertyDescriptor(Promise.prototype, "then");
+      assert.ok(speciesDescriptor);
+      assert.ok(thenDescriptor?.value);
+      let speciesCalls = 0;
+      let thenReads = 0;
+      const direct = directInvocation();
+      const provider = createCodexAppServerProvider({
+        process: options,
+        revalidateTransport: (approval) => {
+          Object.defineProperty(Promise, Symbol.species, {
+            configurable: true,
+            value: function SyntheticSpecies(
+              executor: ConstructorParameters<PromiseConstructor>[0],
+            ): Promise<unknown> {
+              speciesCalls += 1;
+              return new Promise(executor);
+            },
+          });
+          Object.defineProperty(Promise.prototype, "then", {
+            configurable: true,
+            get() {
+              thenReads += 1;
+              throw new Error("synthetic then access");
+            },
+          });
+          return Promise.resolve(approval);
+        },
+      });
+
+      try {
+        await provider.prepareTransport!(direct.approval);
+        await provider.invoke(direct.request, direct.context);
+      } finally {
+        Object.defineProperty(Promise, Symbol.species, speciesDescriptor);
+        Object.defineProperty(Promise.prototype, "then", thenDescriptor);
+      }
+
+      assert.equal(speciesCalls, 0);
+      assert.equal(thenReads, 0);
+    });
+  });
+
+  await context.test("rejected Promise with hostile constructor getter", async () => {
+    await withFixture("provider-success", async ({ options }) => {
+      const unhandledRejections: unknown[] = [];
+      const recordUnhandledRejection = (reason: unknown): void => {
+        unhandledRejections[unhandledRejections.length] = reason;
+      };
+      process.on("unhandledRejection", recordUnhandledRejection);
+      const direct = directInvocation();
+      const provider = createCodexAppServerProvider({
+        process: options,
+        revalidateTransport: () => {
+          const rejected = Promise.reject(new Error("synthetic rejected revalidation"));
+          Object.defineProperty(rejected, "constructor", {
+            configurable: false,
+            get() {
+              throw new Error("synthetic constructor access");
+            },
+          });
+          return rejected;
+        },
+      });
+
+      try {
+        await assert.rejects(
+          provider.prepareTransport!(direct.approval),
+          /codex app-server transport preparation failed/u,
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } finally {
+        process.off("unhandledRejection", recordUnhandledRejection);
+      }
+
+      assert.deepEqual(unhandledRejections, []);
+    });
+  });
+});
+
+test("private workspace paths use module-load path functions", async () => {
+  await withFixture("provider-success", async ({ options, capture, root }) => {
+    const joinDescriptor = Object.getOwnPropertyDescriptor(path, "join");
+    const dirnameDescriptor = Object.getOwnPropertyDescriptor(path, "dirname");
+    assert.ok(joinDescriptor?.value);
+    assert.ok(dirnameDescriptor?.value);
+    let joinCalls = 0;
+    let dirnameCalls = 0;
+    const canonicalTemporaryParent = await realpath("/tmp");
+    const direct = directInvocation();
+    let revalidations = 0;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (approval) => {
+        revalidations += 1;
+        if (revalidations === 1) {
+          Object.defineProperty(path, "join", {
+            configurable: true,
+            value: (..._parts: string[]) => {
+              joinCalls += 1;
+              return `${root}/synthetic-outside-workspace`;
+            },
+            writable: true,
+          });
+          Object.defineProperty(path, "dirname", {
+            configurable: true,
+            value: (_value: string) => {
+              dirnameCalls += 1;
+              return "/tmp";
+            },
+            writable: true,
+          });
+        }
+        return approval;
+      },
+    });
+
+    try {
+      await provider.prepareTransport!(direct.approval);
+      await provider.invoke(direct.request, direct.context);
+    } finally {
+      Object.defineProperty(path, "join", joinDescriptor);
+      Object.defineProperty(path, "dirname", dirnameDescriptor);
+    }
+
+    assert.equal(joinCalls, 0);
+    assert.equal(dirnameCalls, 0);
+    const boundary = (await readCapture(capture)).find(
+      (record) => record.phase === "app-server",
+    );
+    assert.ok(boundary);
+    assert.equal(path.dirname(String(boundary.root)), canonicalTemporaryParent);
+    assert.match(path.basename(String(boundary.root)), /^svbench-codex-/u);
+  });
+});
+
+test("reads allowlisted runtime only after final approval succeeds", async (context) => {
+  for (const mode of ["prepare-only", "rejected-invoke"] as const) {
+    await context.test(mode, async () => {
+      await withFixture("provider-success", async ({ capture, options }) => {
+        const environmentName = "SVBENCH_ALLOWED_CANARY";
+        const originalEnvironment = process.env;
+        const previous = originalEnvironment[environmentName];
+        originalEnvironment[environmentName] = "synthetic-runtime-a";
+        let environmentReads = 0;
+        process.env = new Proxy(originalEnvironment, {
+          get(target, property, receiver) {
+            if (property === environmentName) environmentReads += 1;
+            return Reflect.get(target, property, receiver) as unknown;
+          },
+        });
+        try {
+          const direct = directInvocation();
+          let calls = 0;
+          const provider = createCodexAppServerProvider({
+            process: { ...options, envAllowlist: [environmentName] },
+            revalidateTransport: async (approval) => {
+              calls += 1;
+              if (mode === "rejected-invoke" && calls === 2) {
+                return { ...approval, runtimeBindingDigest: "f".repeat(64) };
+              }
+              return approval;
+            },
+          });
+
+          await provider.prepareTransport!(direct.approval);
+          if (mode === "rejected-invoke") {
+            await assert.rejects(
+              provider.invoke(direct.request, direct.context),
+              stableProviderFailure,
+            );
+            assert.deepEqual(direct.reads, {
+              image: 0,
+              schema: 0,
+              system: 0,
+              instruction: 0,
+            });
+          }
+
+          assert.equal(environmentReads, 0);
+          assert.equal(await appServerStarts(capture), 0);
+        } finally {
+          process.env = originalEnvironment;
+          restoreEnvironment(environmentName, previous);
+        }
+      });
+    });
+  }
+});
+
+test("rechecks approval expiry after the final runtime read", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const environmentName = "SVBENCH_ALLOWED_CANARY";
+    const originalEnvironment = process.env;
+    const previous = originalEnvironment[environmentName];
+    originalEnvironment[environmentName] = "synthetic-runtime-a";
+    const expiresAt = Date.now() + 500;
+    let environmentReads = 0;
+    process.env = new Proxy(originalEnvironment, {
+      get(target, property, receiver) {
+        if (property === environmentName) {
+          environmentReads += 1;
+          if (environmentReads === 2) {
+            Atomics.wait(
+              new Int32Array(new SharedArrayBuffer(4)),
+              0,
+              0,
+              Math.max(1, expiresAt - Date.now() + 1),
+            );
+          }
+        }
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    try {
+      const approval = {
+        ...syntheticApproval(),
+        expiresAt: new Date(expiresAt).toISOString(),
+      };
+      const direct = directInvocation(approval);
+      const provider = createCodexAppServerProvider({
+        process: { ...options, envAllowlist: [environmentName] },
+        revalidateTransport: async (actual) => actual,
+      });
+
+      await provider.prepareTransport!(direct.approval);
+      await assert.rejects(
+        provider.invoke(direct.request, direct.context),
+        stableProviderFailure,
+      );
+
+      assert.equal(environmentReads, 2);
+      assert.deepEqual(direct.reads, {
+        image: 0,
+        schema: 0,
+        system: 0,
+        instruction: 0,
+      });
+      assert.equal(await appServerStarts(capture), 0);
+    } finally {
+      process.env = originalEnvironment;
+      restoreEnvironment(environmentName, previous);
+    }
+  });
+});
+
+test("shared clock mutation cannot revive an expired approval", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const nowDescriptor = Object.getOwnPropertyDescriptor(Date, "now");
+    const parseDescriptor = Object.getOwnPropertyDescriptor(Date, "parse");
+    assert.ok(nowDescriptor?.value);
+    assert.ok(parseDescriptor?.value);
+    const originalNow = nowDescriptor.value as typeof Date.now;
+    const expiresAt = originalNow() + 250;
+    const approval = {
+      ...syntheticApproval(),
+      expiresAt: new Date(expiresAt).toISOString(),
+    };
+    const direct = directInvocation(approval);
+    let calls = 0;
+    let clockReplaced = false;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual) => {
+        calls += 1;
+        if (calls === 2) {
+          Atomics.wait(
+            new Int32Array(new SharedArrayBuffer(4)),
+            0,
+            0,
+            Math.max(1, expiresAt - originalNow() + 1),
+          );
+          Object.defineProperties(Date, {
+            now: {
+              configurable: true,
+              writable: true,
+              value: () => 0,
+            },
+            parse: {
+              configurable: true,
+              writable: true,
+              value: () => 1,
+            },
+          });
+          clockReplaced = true;
+        }
+        return actual;
+      },
+    });
+
+    try {
+      await provider.prepareTransport!(direct.approval);
+      await assert.rejects(
+        provider.invoke(direct.request, direct.context),
+        stableProviderFailure,
+      );
+    } finally {
+      Object.defineProperty(Date, "now", nowDescriptor);
+      Object.defineProperty(Date, "parse", parseDescriptor);
+    }
+
+    assert.equal(clockReplaced, true);
+    assert.ok(originalNow() >= expiresAt);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.equal(await appServerStarts(capture), 0);
+  });
+});
+
+test("does not read a consumer-owned signal getter after final approval", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const expiresAt = Date.now() + 500;
+    const approval = {
+      ...syntheticApproval(),
+      expiresAt: new Date(expiresAt).toISOString(),
+    };
+    const direct = directInvocation(approval);
+    let calls = 0;
+    let abortedReads = 0;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual, signal) => {
+        calls += 1;
+        if (calls === 2) {
+          assert.ok(signal);
+          Object.defineProperty(signal, "aborted", {
+            configurable: true,
+            get() {
+              abortedReads += 1;
+              if (abortedReads === 4) {
+                Atomics.wait(
+                  new Int32Array(new SharedArrayBuffer(4)),
+                  0,
+                  0,
+                  Math.max(1, expiresAt - Date.now() + 1),
+                );
+              }
+              return false;
+            },
+          });
+        }
+        return actual;
+      },
+    });
+
+    await provider.prepareTransport!(direct.approval);
+    await provider.invoke(direct.request, direct.context);
+
+    assert.equal(abortedReads, 0);
+    assert.ok(Date.now() < expiresAt);
+    assert.deepEqual(direct.reads, {
+      image: 1,
+      schema: 1,
+      system: 1,
+      instruction: 1,
+    });
+    assert.equal(await appServerStarts(capture), 1);
+  });
+});
+
+test("consumer guard signal mutation cannot disable process cancellation", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const parent = new AbortController();
+    let calls = 0;
+    let abortedReads = 0;
+    let abortQueued = false;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual, signal) => {
+        calls += 1;
+        if (calls === 2) {
+          assert.ok(signal);
+          Object.defineProperties(signal, {
+            aborted: {
+              configurable: true,
+              get() {
+                abortedReads += 1;
+                return false;
+              },
+            },
+            addEventListener: {
+              configurable: true,
+              value() {},
+            },
+          });
+          abortQueued = true;
+          queueMicrotask(() => parent.abort());
+        }
+        return actual;
+      },
+    });
+
+    await provider.prepareTransport!(direct.approval);
+    await assert.rejects(
+      provider.invoke(direct.request, direct.context, parent.signal),
+      stableProviderFailure,
+    );
+
+    assert.equal(abortQueued, true);
+    assert.equal(abortedReads, 0);
+    assert.equal(parent.signal.aborted, true);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.ok((await appServerStarts(capture)) <= 1);
+  });
+});
+
+test("shared AbortSignal prototype mutation cannot disable internal cancellation", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const model = "synthetic-prototype-cancel-model";
+    const request = {
+      ...direct.request,
+      requested: { ...direct.request.requested, model },
+    };
+    const context = {
+      ...direct.context,
+      requested: request.requested,
+    };
+    const parent = new AbortController();
+    const prototype = AbortSignal.prototype;
+    const abortedDescriptor = Object.getOwnPropertyDescriptor(prototype, "aborted");
+    const addEventListenerDescriptor = Object.getOwnPropertyDescriptor(
+      prototype,
+      "addEventListener",
+    );
+    const existingRoots = await codexTemporaryRoots();
+    let calls = 0;
+    let abortQueued = false;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual, signal) => {
+        calls += 1;
+        if (calls === 2) {
+          assert.ok(signal);
+          assert.equal(Object.getPrototypeOf(signal), prototype);
+          Object.defineProperties(prototype, {
+            aborted: {
+              configurable: true,
+              get() {
+                return false;
+              },
+            },
+            addEventListener: {
+              configurable: true,
+              value() {},
+            },
+          });
+          abortQueued = true;
+          queueMicrotask(() => parent.abort());
+        }
+        return actual;
+      },
+    });
+
+    await provider.prepareTransport!(direct.approval);
+    try {
+      await assert.rejects(
+        provider.invoke(request, context, parent.signal),
+        stableProviderFailure,
+      );
+    } finally {
+      if (abortedDescriptor === undefined) {
+        Reflect.deleteProperty(prototype, "aborted");
+      } else {
+        Object.defineProperty(prototype, "aborted", abortedDescriptor);
+      }
+      if (addEventListenerDescriptor === undefined) {
+        Reflect.deleteProperty(prototype, "addEventListener");
+      } else {
+        Object.defineProperty(
+          prototype,
+          "addEventListener",
+          addEventListenerDescriptor,
+        );
+      }
+    }
+
+    assert.equal(abortQueued, true);
+    assert.equal(parent.signal.aborted, true);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.ok((await appServerStarts(capture)) <= 1);
+    assert.equal(await hasNewPreparedCatalog(existingRoots, model), false);
+  });
+});
+
+test("prepare-time AbortSignal prototype mutation cannot hide an aborted invoke", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const model = "synthetic-provider-prototype-cancel-model";
+    const request = {
+      ...direct.request,
+      requested: { ...direct.request.requested, model },
+    };
+    const context = {
+      ...direct.context,
+      requested: request.requested,
+    };
+    const parent = new AbortController();
+    parent.abort();
+    const prototype = AbortSignal.prototype;
+    const abortedDescriptor = Object.getOwnPropertyDescriptor(prototype, "aborted");
+    const addEventListenerDescriptor = Object.getOwnPropertyDescriptor(
+      prototype,
+      "addEventListener",
+    );
+    const existingRoots = await codexTemporaryRoots();
+    let calls = 0;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual) => {
+        calls += 1;
+        if (calls === 1) {
+          Object.defineProperties(prototype, {
+            aborted: {
+              configurable: true,
+              get() {
+                return false;
+              },
+            },
+            addEventListener: {
+              configurable: true,
+              value() {},
+            },
+          });
+        }
+        return actual;
+      },
+    });
+
+    try {
+      await provider.prepareTransport!(direct.approval);
+      await assert.rejects(
+        provider.invoke(request, context, parent.signal),
+        stableProviderFailure,
+      );
+    } finally {
+      if (abortedDescriptor === undefined) {
+        Reflect.deleteProperty(prototype, "aborted");
+      } else {
+        Object.defineProperty(prototype, "aborted", abortedDescriptor);
+      }
+      if (addEventListenerDescriptor === undefined) {
+        Reflect.deleteProperty(prototype, "addEventListener");
+      } else {
+        Object.defineProperty(
+          prototype,
+          "addEventListener",
+          addEventListenerDescriptor,
+        );
+      }
+    }
+
+    assert.equal(parent.signal.aborted, true);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.equal(await appServerStarts(capture), 0);
+    assert.equal(await hasNewPreparedCatalog(existingRoots, model), false);
+  });
+});
+
+test("prepare-time AbortController signal mutation cannot hide internal cancellation", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const model = "synthetic-controller-signal-cancel-model";
+    const request = {
+      ...direct.request,
+      requested: { ...direct.request.requested, model },
+    };
+    const context = {
+      ...direct.context,
+      requested: request.requested,
+    };
+    const parent = new AbortController();
+    const parentSignal = parent.signal;
+    const decoy = new AbortController();
+    const decoySignal = decoy.signal;
+    const prototype = AbortController.prototype;
+    const signalDescriptor = Object.getOwnPropertyDescriptor(prototype, "signal");
+    assert.ok(signalDescriptor?.get);
+    const existingRoots = await codexTemporaryRoots();
+    let calls = 0;
+    let abortQueued = false;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual) => {
+        calls += 1;
+        if (calls === 1) {
+          Object.defineProperty(prototype, "signal", {
+            configurable: true,
+            get() {
+              return decoySignal;
+            },
+          });
+        } else if (calls === 2) {
+          abortQueued = true;
+          queueMicrotask(() => parent.abort());
+        }
+        return actual;
+      },
+    });
+
+    try {
+      await provider.prepareTransport!(direct.approval);
+      await assert.rejects(
+        provider.invoke(request, context, parentSignal),
+        stableProviderFailure,
+      );
+    } finally {
+      Object.defineProperty(prototype, "signal", signalDescriptor);
+    }
+
+    assert.equal(abortQueued, true);
+    assert.equal(parentSignal.aborted, true);
+    assert.equal(decoySignal.aborted, false);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.ok((await appServerStarts(capture)) <= 1);
+    assert.equal(await hasNewPreparedCatalog(existingRoots, model), false);
+  });
+});
+
+test("shared AbortController prototype mutation cannot disable guard cancellation", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const model = "synthetic-controller-prototype-cancel-model";
+    const request = {
+      ...direct.request,
+      requested: { ...direct.request.requested, model },
+    };
+    const context = {
+      ...direct.context,
+      requested: request.requested,
+    };
+    const parent = new AbortController();
+    const prototype = AbortController.prototype;
+    const abortDescriptor = Object.getOwnPropertyDescriptor(prototype, "abort");
+    assert.ok(abortDescriptor?.value);
+    const abortIntrinsic = abortDescriptor.value as (reason?: unknown) => void;
+    const existingRoots = await codexTemporaryRoots();
+    let calls = 0;
+    let abortQueued = false;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual) => {
+        calls += 1;
+        if (calls === 2) {
+          Object.defineProperty(prototype, "abort", {
+            configurable: true,
+            value() {},
+          });
+          abortQueued = true;
+          queueMicrotask(() => Reflect.apply(abortIntrinsic, parent, []));
+        }
+        return actual;
+      },
+    });
+
+    await provider.prepareTransport!(direct.approval);
+    try {
+      await assert.rejects(
+        provider.invoke(request, context, parent.signal),
+        stableProviderFailure,
+      );
+    } finally {
+      Object.defineProperty(prototype, "abort", abortDescriptor);
+    }
+
+    assert.equal(abortQueued, true);
+    assert.equal(parent.signal.aborted, true);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.ok((await appServerStarts(capture)) <= 1);
+    assert.equal(await hasNewPreparedCatalog(existingRoots, model), false);
+  });
+});
+
+test("does not execute inherited optional approval getters", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    let inheritedReads = 0;
+    const inherited = Object.create(Object.prototype, {
+      reasonCode: {
+        configurable: true,
+        get() {
+          inheritedReads += 1;
+          throw new Error("synthetic inherited approval getter");
+        },
+      },
+    }) as object;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (approval) => {
+        const response = { ...approval };
+        Object.setPrototypeOf(response, inherited);
+        return response;
+      },
+    });
+
+    await provider.prepareTransport!(direct.approval);
+    await provider.invoke(direct.request, direct.context);
+
+    assert.equal(inheritedReads, 0);
+    assert.deepEqual(direct.reads, {
+      image: 1,
+      schema: 1,
+      system: 1,
+      instruction: 1,
+    });
+    assert.equal(await appServerStarts(capture), 1);
+  });
+});
+
+test("rejects nested-microtask expiry and runtime drift before spawn", async (t) => {
+  for (const mode of ["expiry", "runtime"] as const) {
+    await t.test(mode, async () => {
+      await withFixture("provider-success", async ({ capture, options }) => {
+        const environmentName = "SVBENCH_ALLOWED_CANARY";
+        const previous = process.env[environmentName];
+        process.env[environmentName] = "synthetic-runtime-a";
+        try {
+          const expiry = Date.now() + 500;
+          const approval = {
+            ...syntheticApproval(),
+            ...(mode === "expiry"
+              ? { expiresAt: new Date(expiry).toISOString() }
+              : {}),
+          };
+          const direct = directInvocation(approval);
+          let calls = 0;
+          const provider = createCodexAppServerProvider({
+            process: { ...options, envAllowlist: [environmentName] },
+            revalidateTransport: async (actual) => {
+              calls += 1;
+              if (calls === 2) {
+                queueMicrotask(() => {
+                  queueMicrotask(() => {
+                    if (mode === "expiry") {
+                      Atomics.wait(
+                        new Int32Array(new SharedArrayBuffer(4)),
+                        0,
+                        0,
+                        Math.max(1, expiry - Date.now() + 1),
+                      );
+                    } else {
+                      process.env[environmentName] = "synthetic-runtime-b";
+                    }
+                  });
+                });
+              }
+              return actual;
+            },
+          });
+          await provider.prepareTransport!(direct.approval);
+          await assert.rejects(
+            provider.invoke(direct.request, direct.context),
+            stableProviderFailure,
+          );
+          assert.equal(calls, 2);
+          assert.deepEqual(direct.reads, {
+            image: 0,
+            schema: 0,
+            system: 0,
+            instruction: 0,
+          });
+          assert.equal(await appServerStarts(capture), 0);
+        } finally {
+          restoreEnvironment(environmentName, previous);
+        }
+      });
+    });
+  }
 });
 
 test("publishes one schema-valid policy-free runner attempt", async () => {

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
+import fsPromises from "node:fs/promises";
 import { mkdtemp, readFile, rm, stat, watch, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -18,6 +22,7 @@ import {
   runCodexAppServerProcess,
   type CodexAppServerProcessOptions,
   type CodexAppServerProcessRequest,
+  type CodexAppServerProcessStartAuthorization,
   type LinuxProcessTable,
 } from "../src/provider/codex-app-server-process.js";
 import { MAX_PROVIDER_INPUT_BYTES } from "../src/bundle/validate-bundle.js";
@@ -173,6 +178,589 @@ test("runs one fixed app-server process in an isolated empty workspace", async (
   });
 });
 
+test("snapshots hostile start-authorization entries before validating them", async (context) => {
+  await context.test("does not recopy a name that changes after validation", async () => {
+    await withFixture("success", async ({ options, capture }) => {
+      let nameReads = 0;
+      const entry = new Proxy<[string, string]>(
+        ["SVBENCH_ALLOWED_CANARY", "synthetic-runtime-a"],
+        {
+          get(target, property, receiver) {
+            if (property === "0") {
+              nameReads += 1;
+              return nameReads === 1 ? "SVBENCH_ALLOWED_CANARY" : "NODE_OPTIONS";
+            }
+            return Reflect.get(target, property, receiver) as unknown;
+          },
+        },
+      );
+      const result = await runCodexAppServerProcess(
+        { ...options, envAllowlist: ["SVBENCH_ALLOWED_CANARY"] },
+        request(readCounter()),
+        undefined,
+        async () => ({
+          allowedEnvironment: [entry],
+          finalize() {
+            return undefined;
+          },
+        }),
+      );
+
+      assert.equal(result.respondedModel, "synthetic-model");
+      assert.equal(nameReads, 1);
+      const boundary = (await readCapture(capture)).find(
+        (record) => record.phase === "app-server",
+      );
+      assert.ok(boundary);
+      assert.equal(boundary.allowedCanary, "synthetic-runtime-a");
+      assert.equal(stringArray(boundary.environmentKeys).includes("NODE_OPTIONS"), false);
+    });
+  });
+
+  await context.test("does not recopy a value that changes after validation", async () => {
+    await withFixture("success", async ({ options, capture }) => {
+      let valueReads = 0;
+      const entry = new Proxy<[string, string]>(
+        ["SVBENCH_ALLOWED_CANARY", "synthetic-runtime-a"],
+        {
+          get(target, property, receiver) {
+            if (property === "1") {
+              valueReads += 1;
+              return valueReads === 1 ? "synthetic-runtime-a" : "synthetic-runtime-b";
+            }
+            return Reflect.get(target, property, receiver) as unknown;
+          },
+        },
+      );
+      const result = await runCodexAppServerProcess(
+        { ...options, envAllowlist: ["SVBENCH_ALLOWED_CANARY"] },
+        request(readCounter()),
+        undefined,
+        async () => ({
+          allowedEnvironment: [entry],
+          finalize() {
+            return undefined;
+          },
+        }),
+      );
+
+      assert.equal(result.respondedModel, "synthetic-model");
+      assert.equal(valueReads, 1);
+      const boundary = (await readCapture(capture)).find(
+        (record) => record.phase === "app-server",
+      );
+      assert.ok(boundary);
+      assert.equal(boundary.allowedCanary, "synthetic-runtime-a");
+    });
+  });
+});
+
+test("rejects a start finalizer that does not complete synchronously", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const reads = readCounter();
+    const delayed = {
+      allowedEnvironment: [],
+      async finalize() {
+        await Promise.resolve();
+        throw new Error("synthetic delayed authorization failure");
+      },
+    } as unknown as CodexAppServerProcessStartAuthorization;
+
+    await assert.rejects(
+      runCodexAppServerProcess(
+        options,
+        request(reads),
+        undefined,
+        async () => delayed,
+      ),
+      stableProcessError,
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
+    assert.equal(
+      (await readCapture(capture)).some((record) => record.phase === "app-server"),
+      false,
+    );
+  });
+});
+
+test("consumes a rejected finalizer promise despite a hostile Promise constructor getter", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const unhandledRejections: unknown[] = [];
+    const recordUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections[unhandledRejections.length] = reason;
+    };
+    process.on("unhandledRejection", recordUnhandledRejection);
+
+    try {
+      await assert.rejects(
+        runCodexAppServerProcess(
+          options,
+          request(readCounter()),
+          undefined,
+          async () => ({
+            allowedEnvironment: [],
+            finalize() {
+              const rejected = Promise.reject(new Error("synthetic rejected finalizer"));
+              Object.defineProperty(rejected, "constructor", {
+                configurable: false,
+                get() {
+                  throw new Error("synthetic constructor access");
+                },
+              });
+              return rejected as unknown as undefined;
+            },
+          }),
+        ),
+        stableProcessError,
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      process.off("unhandledRejection", recordUnhandledRejection);
+    }
+
+    assert.deepEqual(unhandledRejections, []);
+    assert.equal(
+      (await readCapture(capture)).some((record) => record.phase === "app-server"),
+      false,
+    );
+  });
+});
+
+test("uses captured Node process and cleanup functions after the finalizer", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const originalSpawn = childProcess.spawn;
+    const originalRm = fsPromises.rm;
+    let replacementSpawnCalls = 0;
+    let replacementRmCalls = 0;
+
+    try {
+      const result = await runCodexAppServerProcess(
+        options,
+        request(readCounter()),
+        undefined,
+        async () => ({
+          allowedEnvironment: [],
+          finalize() {
+            childProcess.spawn = ((..._arguments: unknown[]) => {
+              replacementSpawnCalls += 1;
+              throw new Error("synthetic replacement spawn");
+            }) as typeof childProcess.spawn;
+            fsPromises.rm = (async (..._arguments: unknown[]) => {
+              replacementRmCalls += 1;
+            }) as typeof fsPromises.rm;
+            syncBuiltinESMExports();
+            return undefined;
+          },
+        }),
+      );
+      assert.equal(result.respondedModel, "synthetic-model");
+    } finally {
+      childProcess.spawn = originalSpawn;
+      fsPromises.rm = originalRm;
+      syncBuiltinESMExports();
+    }
+
+    assert.equal(replacementSpawnCalls, 0);
+    assert.equal(replacementRmCalls, 0);
+    const boundary = (await readCapture(capture)).find(
+      (record) => record.phase === "app-server",
+    );
+    assert.ok(boundary);
+    await assertMissing(String(boundary.root));
+  });
+});
+
+test(
+  "uses captured timeout scheduling after the synchronous finalizer",
+  { timeout: 5_000 },
+  async () => {
+    await withFixture("isolation-hang-descendant", async ({ options, capture }) => {
+      const setTimeoutDescriptor = Object.getOwnPropertyDescriptor(globalThis, "setTimeout");
+      assert.ok(setTimeoutDescriptor);
+      const originalSetTimeout = setTimeout;
+      const originalClearTimeout = clearTimeout;
+      const controller = new AbortController();
+      const rescue = originalSetTimeout(() => controller.abort(), 750);
+      const startedAt = Date.now();
+
+      try {
+        await assert.rejects(
+          runCodexAppServerProcess(
+            { ...options, timeoutMs: 100 },
+            request(readCounter()),
+            controller.signal,
+            async () => ({
+              allowedEnvironment: [],
+              finalize() {
+                Object.defineProperty(globalThis, "setTimeout", {
+                  configurable: true,
+                  value: () => 0,
+                  writable: true,
+                });
+                return undefined;
+              },
+            }),
+          ),
+          stableProcessError,
+        );
+      } finally {
+        originalClearTimeout(rescue);
+        Object.defineProperty(globalThis, "setTimeout", setTimeoutDescriptor);
+      }
+
+      assert.ok(Date.now() - startedAt < 600, "internal timeout must win before rescue");
+      const records = await readCapture(capture);
+      const boundary = records.find((record) => record.phase === "app-server");
+      const descendant = records.find(
+        (record) => record.isolationDescendantPid !== undefined,
+      );
+      assert.ok(boundary);
+      assert.ok(descendant);
+      await assertMissing(String(boundary.root));
+      await assertProcessStopped(Number(descendant.isolationDescendantPid));
+    });
+  },
+);
+
+test("rejects an internal abort requested by the synchronous finalizer", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const reads = readCounter();
+    const parent = new AbortController();
+
+    await assert.rejects(
+      runCodexAppServerProcess(
+        options,
+        request(reads),
+        parent.signal,
+        async () => ({
+          allowedEnvironment: [],
+          finalize() {
+            parent.abort();
+            return undefined;
+          },
+        }),
+      ),
+      stableProcessError,
+    );
+
+    assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
+    assert.equal(
+      (await readCapture(capture)).some((record) => record.phase === "app-server"),
+      false,
+    );
+  });
+});
+
+test("does not re-iterate the allowlisted environment after the synchronous finalizer", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const reads = readCounter();
+    const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      Symbol.iterator,
+    );
+    assert.ok(iteratorDescriptor?.value);
+    let targetIteratorCalls = 0;
+
+    try {
+      await runCodexAppServerProcess(
+        { ...options, envAllowlist: ["SVBENCH_ALLOWED_CANARY"] },
+        request(reads),
+        undefined,
+        async () => ({
+          allowedEnvironment: [
+            ["SVBENCH_ALLOWED_CANARY", "synthetic-explicit-canary"],
+          ],
+          finalize() {
+            Object.defineProperty(Array.prototype, Symbol.iterator, {
+              configurable: true,
+              writable: true,
+              value: function* (this: unknown[]): Generator<unknown> {
+                const first = this[0];
+                if (
+                  this.length === 1 &&
+                  Array.isArray(first) &&
+                  first[0] === "SVBENCH_ALLOWED_CANARY" &&
+                  first[1] === "synthetic-explicit-canary"
+                ) {
+                  targetIteratorCalls += 1;
+                  yield ["SVBENCH_PARENT_CANARY", "synthetic-injected-canary"];
+                  return;
+                }
+                for (let index = 0; index < this.length; index += 1) {
+                  yield this[index];
+                }
+              },
+            });
+            return undefined;
+          },
+        }),
+      );
+    } finally {
+      Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+    }
+
+    assert.equal(targetIteratorCalls, 0);
+    assert.deepEqual(reads, { image: 1, schema: 1, system: 1, instruction: 1 });
+    const boundary = (await readCapture(capture)).find(
+      (record) => record.phase === "app-server",
+    );
+    assert.ok(boundary);
+    assert.equal(boundary.allowedCanary, "synthetic-explicit-canary");
+    assert.equal(boundary.parentCanary, null);
+  });
+});
+
+test(
+  "keeps cancellation and cleanup independent of a replaced Array iterator",
+  { timeout: 5_000 },
+  async () => {
+    await withFixture("isolation-hang-descendant", async ({ options, capture }) => {
+      const reads = readCounter();
+      const controller = new AbortController();
+      const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+        Array.prototype,
+        Symbol.iterator,
+      );
+      assert.ok(iteratorDescriptor?.value);
+      const unhandledRejections: unknown[] = [];
+      const recordUnhandledRejection = (reason: unknown): void => {
+        unhandledRejections[unhandledRejections.length] = reason;
+      };
+      process.on("unhandledRejection", recordUnhandledRejection);
+
+      let records: JsonObject[] = [];
+      try {
+        const running = runCodexAppServerProcess(
+          { ...options, timeoutMs: 10_000 },
+          request(reads),
+          controller.signal,
+          async () => ({
+            allowedEnvironment: [],
+            finalize() {
+              Object.defineProperty(Array.prototype, Symbol.iterator, {
+                configurable: true,
+                writable: true,
+                value: function* (this: unknown[]): Generator<unknown> {
+                  if (
+                    this.length === 2 &&
+                    this[0] instanceof Promise &&
+                    this[1] instanceof Promise
+                  ) {
+                    yield this[0];
+                    return;
+                  }
+                  for (let index = 0; index < this.length; index += 1) {
+                    yield this[index];
+                  }
+                },
+              });
+              return undefined;
+            },
+          }),
+        );
+        records = await waitForCapture(
+          capture,
+          (values) =>
+            values.some((value) => value.phase === "app-server") &&
+            values.some((value) => value.isolationDescendantPid !== undefined),
+        );
+        controller.abort();
+        await assert.rejects(running, stableProcessError);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } finally {
+        Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+        process.off("unhandledRejection", recordUnhandledRejection);
+      }
+
+      assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
+      assert.deepEqual(unhandledRejections, []);
+      const boundary = records.find((record) => record.phase === "app-server");
+      const descendant = records.find(
+        (record) => record.isolationDescendantPid !== undefined,
+      );
+      assert.ok(boundary);
+      assert.ok(descendant);
+      await assertMissing(String(boundary.root));
+      await assertProcessStopped(Number(descendant.isolationDescendantPid));
+    });
+  },
+);
+
+test(
+  "restores EventEmitter on/once/emit before spawn and cleanup",
+  { timeout: 5_000 },
+  async () => {
+    await withFixture("isolation-hang-descendant", async ({ options, capture }) => {
+      const onceDescriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, "once");
+      const onDescriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, "on");
+      const emitDescriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, "emit");
+      assert.ok(onceDescriptor?.value);
+      assert.ok(onDescriptor?.value);
+      assert.ok(emitDescriptor?.value);
+      const controller = new AbortController();
+      let records: JsonObject[] = [];
+
+      try {
+        const running = runCodexAppServerProcess(
+          { ...options, timeoutMs: 10_000 },
+          request(readCounter()),
+          controller.signal,
+          async () => ({
+            allowedEnvironment: [],
+            finalize() {
+              for (const name of ["on", "once", "emit"] as const) {
+                Object.defineProperty(EventEmitter.prototype, name, {
+                  configurable: true,
+                  value() {
+                    return this;
+                  },
+                  writable: true,
+                });
+              }
+              return undefined;
+            },
+          }),
+        );
+        records = await waitForCapture(
+          capture,
+          (values) =>
+            values.some((value) => value.phase === "app-server") &&
+            values.some((value) => value.isolationDescendantPid !== undefined),
+        );
+        controller.abort();
+        await assert.rejects(running, stableProcessError);
+      } finally {
+        Object.defineProperty(EventEmitter.prototype, "on", onDescriptor);
+        Object.defineProperty(EventEmitter.prototype, "once", onceDescriptor);
+        Object.defineProperty(EventEmitter.prototype, "emit", emitDescriptor);
+      }
+
+      const boundary = records.find((record) => record.phase === "app-server");
+      const descendant = records.find(
+        (record) => record.isolationDescendantPid !== undefined,
+      );
+      assert.ok(boundary);
+      assert.ok(descendant);
+      await assertMissing(String(boundary.root));
+      await assertProcessStopped(Number(descendant.isolationDescendantPid));
+    });
+  },
+);
+
+test("does not re-read the host platform after the synchronous finalizer", async () => {
+  await withFixture("success-descendant", async ({ options, capture }) => {
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    assert.ok(platformDescriptor);
+    let result: Awaited<ReturnType<typeof runCodexAppServerProcess>> | undefined;
+    let runError: unknown;
+
+    try {
+      result = await runCodexAppServerProcess(
+        options,
+        request(readCounter()),
+        undefined,
+        async () => ({
+          allowedEnvironment: [],
+          finalize() {
+            Object.defineProperty(process, "platform", {
+              configurable: true,
+              enumerable: true,
+              value: "win32",
+              writable: false,
+            });
+            return undefined;
+          },
+        }),
+      );
+    } catch (error) {
+      runError = error;
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+    }
+
+    const descendant = (await readCapture(capture)).find(
+      (record) => record.descendantPid !== undefined,
+    );
+    const descendantPid =
+      descendant === undefined ? undefined : Number(descendant.descendantPid);
+    try {
+      if (runError !== undefined) throw runError;
+      assert.equal(result?.respondedModel, "synthetic-model");
+      assert.ok(descendantPid !== undefined);
+      await assertProcessStopped(descendantPid);
+    } finally {
+      if (descendantPid !== undefined) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch (error: unknown) {
+          if (objectWithCode(error).code !== "ESRCH") throw error;
+        }
+      }
+    }
+  });
+});
+
+test("does not use a replaced Object.create for the spawn environment", async () => {
+  await withFixture("success", async ({ options }) => {
+    const createDescriptor = Object.getOwnPropertyDescriptor(Object, "create");
+    assert.ok(createDescriptor?.value);
+    const createIntrinsic = createDescriptor.value as typeof Object.create;
+    let targetCreateCalls = 0;
+    let postFinalizerTraps = 0;
+    let finalizerComplete = false;
+
+    try {
+      const result = await runCodexAppServerProcess(
+        options,
+        request(readCounter()),
+        undefined,
+        async () => {
+          Object.defineProperty(Object, "create", {
+            configurable: true,
+            value(
+              prototype: object | null,
+              properties?: PropertyDescriptorMap,
+            ): object {
+              const target =
+                properties === undefined
+                  ? Reflect.apply(createIntrinsic, Object, [prototype])
+                  : Reflect.apply(createIntrinsic, Object, [prototype, properties]);
+              if (prototype !== null || targetCreateCalls !== 0) return target;
+              targetCreateCalls += 1;
+              return new Proxy(target, {
+                getOwnPropertyDescriptor(proxyTarget, property) {
+                  if (finalizerComplete) postFinalizerTraps += 1;
+                  return Reflect.getOwnPropertyDescriptor(proxyTarget, property);
+                },
+                ownKeys(proxyTarget) {
+                  if (finalizerComplete) postFinalizerTraps += 1;
+                  return Reflect.ownKeys(proxyTarget);
+                },
+              });
+            },
+          });
+          return {
+            allowedEnvironment: [],
+            finalize() {
+              finalizerComplete = true;
+              Object.defineProperty(Object, "create", createDescriptor);
+              return undefined;
+            },
+          };
+        },
+      );
+      assert.equal(result.respondedModel, "synthetic-model");
+    } finally {
+      Object.defineProperty(Object, "create", createDescriptor);
+    }
+
+    assert.equal(targetCreateCalls, 0);
+    assert.equal(postFinalizerTraps, 0);
+  });
+});
+
 test("does not read provider inputs before request and in-process isolation proof", async () => {
   for (const scenario of [
     { mode: "success", mutate: (value: CodexAppServerProcessRequest) => ({
@@ -259,6 +847,149 @@ test("zeroes callback-returned bytes after success and digest failure", async ()
       }
       assert.ok(returned.every((byte) => byte === 0));
     }
+  });
+});
+
+test("input digest verification and zeroing use captured byte and hash primitives", async () => {
+  await withFixture("success", async ({ options }) => {
+    const hashPrototype = Object.getPrototypeOf(createHash("sha256")) as object;
+    const updateDescriptor = Object.getOwnPropertyDescriptor(hashPrototype, "update");
+    const digestDescriptor = Object.getOwnPropertyDescriptor(hashPrototype, "digest");
+    const pushDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "push");
+    const fillDescriptor = Object.getOwnPropertyDescriptor(Uint8Array.prototype, "fill");
+    const originalFill = Uint8Array.prototype.fill;
+    assert.ok(updateDescriptor?.value);
+    assert.ok(digestDescriptor?.value);
+    assert.ok(pushDescriptor?.value);
+    assert.equal(typeof originalFill, "function");
+    const reads = readCounter();
+    const base = request(reads);
+    const returned = Buffer.from("synthetic digest mismatch");
+
+    try {
+      await assert.rejects(
+        runCodexAppServerProcess(options, {
+          ...base,
+          image: {
+            ...base.image,
+            sha256: "0".repeat(64),
+            async readBytes(): Promise<Buffer> {
+              reads.image = (reads.image ?? 0) + 1;
+              Object.defineProperty(hashPrototype, "update", {
+                configurable: true,
+                value() {
+                  return this;
+                },
+                writable: true,
+              });
+              Object.defineProperty(hashPrototype, "digest", {
+                configurable: true,
+                value() {
+                  return "0".repeat(64);
+                },
+                writable: true,
+              });
+              Object.defineProperty(Array.prototype, "push", {
+                configurable: true,
+                value() {
+                  return 0;
+                },
+                writable: true,
+              });
+              Object.defineProperty(Uint8Array.prototype, "fill", {
+                configurable: true,
+                value() {
+                  return this;
+                },
+                writable: true,
+              });
+              return returned;
+            },
+          },
+        }),
+        stableProcessError,
+      );
+    } finally {
+      Object.defineProperty(hashPrototype, "update", updateDescriptor);
+      Object.defineProperty(hashPrototype, "digest", digestDescriptor);
+      Object.defineProperty(Array.prototype, "push", pushDescriptor);
+      if (fillDescriptor === undefined) {
+        delete (Uint8Array.prototype as { fill?: unknown }).fill;
+      } else {
+        Object.defineProperty(Uint8Array.prototype, "fill", fillDescriptor);
+      }
+    }
+
+    assert.ok(returned.every((byte) => byte === 0));
+  });
+});
+
+test("input callbacks cannot rewrite normalized app-server JSON", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const stringifyDescriptor = Object.getOwnPropertyDescriptor(JSON, "stringify");
+    const freezeDescriptor = Object.getOwnPropertyDescriptor(Object, "freeze");
+    const mapDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "map");
+    const sortDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "sort");
+    assert.ok(stringifyDescriptor?.value);
+    assert.ok(freezeDescriptor?.value);
+    assert.ok(mapDescriptor?.value);
+    assert.ok(sortDescriptor?.value);
+    const reads = readCounter();
+    const base = request(reads);
+    let result: Awaited<ReturnType<typeof runCodexAppServerProcess>> | undefined;
+
+    try {
+      result = await runCodexAppServerProcess(options, {
+        ...base,
+        image: {
+          ...base.image,
+          async readBytes(): Promise<Buffer> {
+            reads.image = (reads.image ?? 0) + 1;
+            Object.defineProperty(JSON, "stringify", {
+              configurable: true,
+              value() {
+                return '{"baseInstructions":"synthetic injected"}';
+              },
+              writable: true,
+            });
+            Object.defineProperty(Object, "freeze", {
+              configurable: true,
+              value(value: unknown) {
+                return value;
+              },
+              writable: true,
+            });
+            Object.defineProperty(Array.prototype, "map", {
+              configurable: true,
+              value() {
+                return [];
+              },
+              writable: true,
+            });
+            Object.defineProperty(Array.prototype, "sort", {
+              configurable: true,
+              value() {
+                return this;
+              },
+              writable: true,
+            });
+            return Buffer.from("synthetic image");
+          },
+        },
+      });
+    } finally {
+      Object.defineProperty(JSON, "stringify", stringifyDescriptor);
+      Object.defineProperty(Object, "freeze", freezeDescriptor);
+      Object.defineProperty(Array.prototype, "map", mapDescriptor);
+      Object.defineProperty(Array.prototype, "sort", sortDescriptor);
+    }
+
+    assert.equal(result?.respondedModel, "synthetic-model");
+    const records = await readCapture(capture);
+    const threadStart = object(
+      records.find((record) => record.threadStart !== undefined)?.threadStart,
+    );
+    assert.equal(threadStart.baseInstructions, "synthetic system");
   });
 });
 

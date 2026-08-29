@@ -25,12 +25,15 @@ if (command[0] === "app-server") {
   const overrides = await captureProcessBoundary(command);
   if (
     mode === "isolation-success-descendant" ||
-    mode === "isolation-failure-descendant"
+    mode === "isolation-failure-descendant" ||
+    mode === "isolation-hang-descendant"
   ) {
     const descendant = spawnDescendant();
     await appendCapture({ isolationDescendantPid: descendant.pid });
   }
-  if (mode === "isolation-hang") await hangForever();
+  if (mode === "isolation-hang" || mode === "isolation-hang-descendant") {
+    await hangForever();
+  }
   if (mode === "isolation-failure-descendant") process.exit(7);
   const readiness = {
     method: "svbench/isolation/ready",

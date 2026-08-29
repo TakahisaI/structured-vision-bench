@@ -1,11 +1,24 @@
 import path from "node:path";
 
 import {
+  abortController,
+  abortControllerSignal,
+  addAbortSignalListener,
+  createAbortController,
+  isAbortSignalAborted,
+  removeAbortSignalListener,
+} from "./abort-signal-intrinsics.js";
+import {
   CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION,
   runCodexAppServerProcess,
   type CodexAppServerProcessOptions,
   type CodexAppServerProcessRequest,
+  type CodexAppServerProcessStartAuthorization,
 } from "./codex-app-server-process.js";
+import {
+  createIntrinsicPromise,
+  invokeIntrinsicPromiseCallback,
+} from "./promise-intrinsics.js";
 import type {
   ApprovalResponse,
   Provider,
@@ -25,7 +38,17 @@ const SAFE_LABEL_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 const MAX_OPTION_STRINGS = 64;
 const MAX_OPTION_STRING_BYTES = 4096;
 const ENVIRONMENT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
-const RESERVED_ENVIRONMENT_NAMES = new Set([
+const DateIntrinsic = Date;
+const applyIntrinsic = Reflect.apply;
+const arrayIsArrayIntrinsic = Array.isArray;
+const bindIntrinsic = Function.prototype.bind;
+const dateNowIntrinsic = DateIntrinsic.now;
+const dateParseIntrinsic = DateIntrinsic.parse;
+const freezeIntrinsic = Object.freeze;
+const objectHasOwnIntrinsic = Object.hasOwn;
+const objectKeysIntrinsic = Object.keys;
+const pathIsAbsoluteIntrinsic = path.isAbsolute;
+const RESERVED_ENVIRONMENT_NAMES = freezeIntrinsic([
   "APPDATA",
   "CODEX_HOME",
   "HOME",
@@ -74,7 +97,7 @@ export function createCodexAppServerProvider(
   let authorization: Authorization | undefined;
   let activeInvocation: ActiveInvocation | undefined;
 
-  const provider = Object.freeze({
+  const provider = freezeIntrinsic({
     id: CODEX_APP_SERVER_PROVIDER_ID,
     route: CODEX_APP_SERVER_PROVIDER_ROUTE,
     implementationVersion: CODEX_APP_SERVER_PROVIDER_IMPLEMENTATION_VERSION,
@@ -86,7 +109,7 @@ export function createCodexAppServerProvider(
       const currentGeneration = ++generation;
       authorization = undefined;
       const previousInvocation = activeInvocation;
-      previousInvocation?.controller.abort();
+      abortController(previousInvocation?.controller);
       try {
         await previousInvocation?.settled;
         assertActive(signal);
@@ -95,7 +118,7 @@ export function createCodexAppServerProvider(
         const revalidated = await revalidate(options, approval, signal);
         assertActive(signal);
         if (currentGeneration !== generation) throw new Error();
-        authorization = Object.freeze({
+        authorization = freezeIntrinsic({
           generation: currentGeneration,
           approval: revalidated,
         });
@@ -116,31 +139,57 @@ export function createCodexAppServerProvider(
         throw new Error("codex app-server provider failed");
       }
 
-      const controller = new AbortController();
-      const abort = (): void => controller.abort();
+      const controller = createAbortController();
+      const controllerSignal = abortControllerSignal(controller);
+      const abort = (): void => abortController(controller);
       let settleInvocation!: () => void;
-      const settled = new Promise<void>((resolve) => {
+      const settled = createIntrinsicPromise<void>((resolve) => {
         settleInvocation = resolve;
       });
-      const invocation = Object.freeze({ controller, settled });
+      const invocation = freezeIntrinsic({ controller, settled });
       activeInvocation = invocation;
       let listenerAttempted = false;
       let cleanupFailed = false;
       try {
         if (signal !== undefined) {
           listenerAttempted = true;
-          signal.addEventListener("abort", abort, { once: true });
+          addAbortSignalListener(signal, abort);
         }
         assertActive(signal);
         const request = snapshotInvocation(requestValue, contextValue, claimed.approval);
         const result = await runCodexAppServerProcess(
           options.process,
           request,
-          controller.signal,
-          async (processSignal) => {
-            await revalidate(options, claimed.approval, processSignal);
+          controllerSignal,
+          async (processSignal): Promise<CodexAppServerProcessStartAuthorization> => {
             assertActive(processSignal);
+            const revalidated = snapshotApproval(
+              await invokeIntrinsicPromiseCallback<ApprovalResponse>(() =>
+                options.revalidateTransport(claimed.approval, processSignal),
+              ),
+            );
+            assertActive(processSignal);
+            assertUsableApproval(revalidated);
+            if (!approvalEqual(revalidated, claimed.approval)) throw new Error();
             if (claimed.generation !== generation) throw new Error();
+            const allowedEnvironment = snapshotAllowedEnvironment(
+              options.process.envAllowlist ?? [],
+            );
+            return freezeIntrinsic({
+              allowedEnvironment,
+              finalize(): undefined {
+                assertActive(processSignal);
+                assertAllowedEnvironmentCurrent(
+                  allowedEnvironment,
+                  options.process.envAllowlist ?? [],
+                );
+                assertActive(processSignal);
+                assertUsableApproval(revalidated);
+                if (!approvalEqual(revalidated, claimed.approval)) throw new Error();
+                if (claimed.generation !== generation) throw new Error();
+                return undefined;
+              },
+            });
           },
         );
         return {
@@ -154,10 +203,10 @@ export function createCodexAppServerProvider(
       } catch {
         throw new Error("codex app-server provider failed");
       } finally {
-        controller.abort();
+        abortController(controller);
         if (listenerAttempted) {
           try {
-            signal!.removeEventListener("abort", abort);
+            removeAbortSignalListener(signal, abort);
           } catch {
             cleanupFailed = true;
           }
@@ -186,7 +235,7 @@ function validateOptions(value: CodexAppServerProviderOptions): ValidatedOptions
       processOptions === null ||
       typeof processOptions !== "object" ||
       typeof processOptions.executable !== "string" ||
-      !path.isAbsolute(processOptions.executable) ||
+      !pathIsAbsoluteIntrinsic(processOptions.executable) ||
       typeof revalidateTransport !== "function"
     ) {
       throw new Error();
@@ -199,21 +248,17 @@ function validateOptions(value: CodexAppServerProviderOptions): ValidatedOptions
       processOptions.envAllowlist ?? [],
       MAX_OPTION_STRINGS,
     );
-    const seenEnvironmentNames = new Set<string>();
-    if (
-      envAllowlist.some((name) => {
-        if (
-          !ENVIRONMENT_NAME_PATTERN.test(name) ||
-          RESERVED_ENVIRONMENT_NAMES.has(name) ||
-          seenEnvironmentNames.has(name)
-        ) {
-          return true;
-        }
-        seenEnvironmentNames.add(name);
-        return false;
-      })
-    ) {
-      throw new Error();
+    const seenEnvironmentNames: string[] = [];
+    for (let index = 0; index < envAllowlist.length; index += 1) {
+      const name = envAllowlist[index]!;
+      if (
+        !ENVIRONMENT_NAME_PATTERN.test(name) ||
+        stringArrayContains(RESERVED_ENVIRONMENT_NAMES, name) ||
+        stringArrayContains(seenEnvironmentNames, name)
+      ) {
+        throw new Error();
+      }
+      seenEnvironmentNames[seenEnvironmentNames.length] = name;
     }
     const timeoutMs = processOptions.timeoutMs;
     const outputLimitBytes = processOptions.outputLimitBytes;
@@ -227,18 +272,17 @@ function validateOptions(value: CodexAppServerProviderOptions): ValidatedOptions
     ) {
       throw new Error();
     }
-    return Object.freeze({
-      process: Object.freeze({
+    return freezeIntrinsic({
+      process: freezeIntrinsic({
         executable: processOptions.executable,
-        executableArguments: Object.freeze(executableArguments),
-        envAllowlist: Object.freeze(envAllowlist),
+        executableArguments: freezeIntrinsic(executableArguments),
+        envAllowlist: freezeIntrinsic(envAllowlist),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(outputLimitBytes === undefined ? {} : { outputLimitBytes }),
       }),
-      revalidateTransport: Function.prototype.bind.call(
-        revalidateTransport,
+      revalidateTransport: applyIntrinsic(bindIntrinsic, revalidateTransport, [
         undefined,
-      ) as CodexAppServerTransportRevalidator,
+      ]) as CodexAppServerTransportRevalidator,
     });
   } catch {
     throw new Error("codex app-server provider configuration is invalid");
@@ -246,9 +290,10 @@ function validateOptions(value: CodexAppServerProviderOptions): ValidatedOptions
 }
 
 function snapshotStrings(value: readonly string[], limit: number): string[] {
-  if (!Array.isArray(value) || value.length > limit) throw new Error();
+  if (!arrayIsArrayIntrinsic(value) || value.length > limit) throw new Error();
   const result: string[] = [];
-  for (const entry of value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const entry = value[index];
     if (
       typeof entry !== "string" ||
       entry.length === 0 ||
@@ -257,9 +302,16 @@ function snapshotStrings(value: readonly string[], limit: number): string[] {
     ) {
       throw new Error();
     }
-    result.push(entry);
+    result[result.length] = entry;
   }
   return result;
+}
+
+function stringArrayContains(values: readonly string[], expected: string): boolean {
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === expected) return true;
+  }
+  return false;
 }
 
 async function revalidate(
@@ -269,12 +321,46 @@ async function revalidate(
 ): Promise<ApprovalResponse> {
   assertActive(signal);
   const actual = snapshotApproval(
-    await options.revalidateTransport(expected, signal),
+    await invokeIntrinsicPromiseCallback<ApprovalResponse>(() =>
+      options.revalidateTransport(expected, signal),
+    ),
   );
   assertActive(signal);
   assertUsableApproval(actual);
   if (!approvalEqual(actual, expected)) throw new Error();
   return actual;
+}
+
+function snapshotAllowedEnvironment(
+  allowlist: readonly string[],
+): readonly (readonly [string, string])[] {
+  const allowed: Array<readonly [string, string]> = [];
+  for (let index = 0; index < allowlist.length; index += 1) {
+    const name = allowlist[index]!;
+    const value = process.env[name];
+    if (value !== undefined) {
+      allowed[allowed.length] = freezeIntrinsic([name, value]);
+    }
+  }
+  return freezeIntrinsic(allowed);
+}
+
+function assertAllowedEnvironmentCurrent(
+  expected: readonly (readonly [string, string])[],
+  allowlist: readonly string[],
+): void {
+  for (let index = 0; index < allowlist.length; index += 1) {
+    const name = allowlist[index]!;
+    let expectedValue: string | undefined;
+    for (let expectedIndex = 0; expectedIndex < expected.length; expectedIndex += 1) {
+      const entry = expected[expectedIndex]!;
+      if (entry[0] === name) {
+        expectedValue = entry[1];
+        break;
+      }
+    }
+    if (process.env[name] !== expectedValue) throw new Error();
+  }
 }
 
 function snapshotInvocation(
@@ -340,25 +426,24 @@ function snapshotInvocation(
   ) {
     throw new Error();
   }
-  const readImage = Function.prototype.bind.call(image.readBytes, image) as () => Promise<Buffer>;
-  const readSchema = Function.prototype.bind.call(schema.readBytes, schema) as () => Promise<Buffer>;
-  const readSystem = Function.prototype.bind.call(system.readText, system) as () => Promise<string>;
-  const readInstruction = Function.prototype.bind.call(
-    instruction.readText,
+  const readImage = applyIntrinsic(bindIntrinsic, image.readBytes, [image]) as () => Promise<Buffer>;
+  const readSchema = applyIntrinsic(bindIntrinsic, schema.readBytes, [schema]) as () => Promise<Buffer>;
+  const readSystem = applyIntrinsic(bindIntrinsic, system.readText, [system]) as () => Promise<string>;
+  const readInstruction = applyIntrinsic(bindIntrinsic, instruction.readText, [
     instruction,
-  ) as () => Promise<string>;
-  return Object.freeze({
-    image: Object.freeze({
+  ]) as () => Promise<string>;
+  return freezeIntrinsic({
+    image: freezeIntrinsic({
       mediaType: image.mediaType,
       sha256: digests.image,
       readBytes: readImage,
     }),
-    schema: Object.freeze({ sha256: digests.schema, readBytes: readSchema }),
-    system: Object.freeze({
+    schema: freezeIntrinsic({ sha256: digests.schema, readBytes: readSchema }),
+    system: freezeIntrinsic({
       sha256: digests.system,
       readBytes: () => readTextBytes(readSystem),
     }),
-    instruction: Object.freeze({
+    instruction: freezeIntrinsic({
       sha256: digests.instruction,
       readBytes: () => readTextBytes(readInstruction),
     }),
@@ -385,11 +470,13 @@ function snapshotRequested(value: RequestedExecutionSettings): RequestedExecutio
   ) {
     throw new Error();
   }
-  return Object.freeze({ model, effort, maxTokens: null });
+  return freezeIntrinsic({ model, effort, maxTokens: null });
 }
 
 function snapshotApproval(value: unknown): ApprovalResponse {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error();
+  if (value === null || typeof value !== "object" || arrayIsArrayIntrinsic(value)) {
+    throw new Error();
+  }
   const approval = value as Record<string, unknown>;
   const required = [
     "responseVersion",
@@ -412,10 +499,15 @@ function snapshotApproval(value: unknown): ApprovalResponse {
     "sanitizerRequirementReason",
   ] as const;
   const optional = ["checkedAt", "expiresAt", "reasonCode"] as const;
-  const allowed = new Set<string>([...required, ...optional]);
+  const hasCheckedAt = objectHasOwnIntrinsic(approval, "checkedAt");
+  const hasExpiresAt = objectHasOwnIntrinsic(approval, "expiresAt");
+  const hasReasonCode = objectHasOwnIntrinsic(approval, "reasonCode");
+  const checkedAt = hasCheckedAt ? approval.checkedAt : undefined;
+  const expiresAt = hasExpiresAt ? approval.expiresAt : undefined;
+  const reasonCode = hasReasonCode ? approval.reasonCode : undefined;
   if (
-    required.some((key) => !Object.hasOwn(approval, key)) ||
-    Object.keys(approval).some((key) => !allowed.has(key)) ||
+    hasMissingApprovalKey(approval, required) ||
+    hasUnexpectedApprovalKey(approval, required, optional) ||
     approval.responseVersion !== 1 ||
     typeof approval.approved !== "boolean" ||
     !isSafeLabel(approval.gateId) ||
@@ -434,13 +526,13 @@ function snapshotApproval(value: unknown): ApprovalResponse {
     typeof approval.sanitizerRequired !== "boolean" ||
     typeof approval.policyRequired !== "boolean" ||
     !isSafeLabel(approval.sanitizerRequirementReason) ||
-    !isOptionalDateTime(approval.checkedAt) ||
-    !isOptionalDateTime(approval.expiresAt) ||
-    (approval.reasonCode !== undefined && !isSafeLabel(approval.reasonCode))
+    !isOptionalDateTime(checkedAt) ||
+    !isOptionalDateTime(expiresAt) ||
+    (reasonCode !== undefined && !isSafeLabel(reasonCode))
   ) {
     throw new Error();
   }
-  return Object.freeze({
+  return freezeIntrinsic({
     responseVersion: 1,
     approved: approval.approved,
     gateId: approval.gateId,
@@ -459,18 +551,50 @@ function snapshotApproval(value: unknown): ApprovalResponse {
     sanitizerRequired: approval.sanitizerRequired,
     policyRequired: approval.policyRequired,
     sanitizerRequirementReason: approval.sanitizerRequirementReason,
-    ...(Object.hasOwn(approval, "checkedAt") ? { checkedAt: approval.checkedAt } : {}),
-    ...(Object.hasOwn(approval, "expiresAt") ? { expiresAt: approval.expiresAt } : {}),
-    ...(Object.hasOwn(approval, "reasonCode") ? { reasonCode: approval.reasonCode } : {}),
+    ...(hasCheckedAt ? { checkedAt } : {}),
+    ...(hasExpiresAt ? { expiresAt } : {}),
+    ...(hasReasonCode ? { reasonCode } : {}),
   } as ApprovalResponse);
 }
 
+function hasMissingApprovalKey(
+  approval: Record<string, unknown>,
+  required: readonly string[],
+): boolean {
+  for (let index = 0; index < required.length; index += 1) {
+    if (!objectHasOwnIntrinsic(approval, required[index]!)) return true;
+  }
+  return false;
+}
+
+function hasUnexpectedApprovalKey(
+  approval: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const keys = objectKeysIntrinsic(approval);
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    if (
+      !stringArrayContains(required, key) &&
+      !stringArrayContains(optional, key)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function assertUsableApproval(approval: ApprovalResponse): void {
+  const expiresAt = objectHasOwnIntrinsic(approval, "expiresAt")
+    ? approval.expiresAt
+    : undefined;
   if (
     !approval.approved ||
-    (approval.expiresAt !== undefined &&
-      approval.expiresAt !== null &&
-      Date.parse(approval.expiresAt) <= Date.now())
+    (expiresAt !== undefined &&
+      expiresAt !== null &&
+      applyIntrinsic(dateParseIntrinsic, DateIntrinsic, [expiresAt]) <=
+        applyIntrinsic(dateNowIntrinsic, DateIntrinsic, []))
   ) {
     throw new Error();
   }
@@ -500,7 +624,13 @@ function approvalEqual(left: ApprovalResponse, right: ApprovalResponse): boolean
     "expiresAt",
     "reasonCode",
   ] as const;
-  return keys.every((key) => (left[key] ?? null) === (right[key] ?? null));
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
+    const leftValue = objectHasOwnIntrinsic(left, key) ? left[key] : null;
+    const rightValue = objectHasOwnIntrinsic(right, key) ? right[key] : null;
+    if ((leftValue ?? null) !== (rightValue ?? null)) return false;
+  }
+  return true;
 }
 
 function requestedEqual(
@@ -550,5 +680,5 @@ function daysInMonth(year: number, month: number): number {
 }
 
 function assertActive(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw new Error();
+  if (isAbortSignalAborted(signal)) throw new Error();
 }

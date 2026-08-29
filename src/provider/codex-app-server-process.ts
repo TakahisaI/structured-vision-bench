@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   chmod,
   mkdir,
@@ -11,14 +12,24 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { Readable, Writable } from "node:stream";
 
 import {
   decodeUtf8Strict,
   normalizeJsonValue,
   parseJson,
+  stringifyJsonValue,
   type JsonValue,
 } from "../bundle/json.js";
 import { MAX_PROVIDER_INPUT_BYTES } from "../bundle/validate-bundle.js";
+import {
+  abortController,
+  abortControllerSignal,
+  addAbortSignalListener,
+  createAbortController,
+  isAbortSignalAborted,
+  removeAbortSignalListener,
+} from "./abort-signal-intrinsics.js";
 import {
   CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES,
   CODEX_APP_SERVER_CLI_VERSION,
@@ -27,6 +38,16 @@ import {
   type CodexAppServerProtocolReceivedMessage,
   type CodexAppServerProtocolResult,
 } from "./codex-app-server.js";
+import {
+  createIntrinsicPromise,
+  ignoreIntrinsicPromiseRejection,
+  invokeIntrinsicPromiseCallback,
+  invokeIntrinsicSynchronousCallback,
+  raceIntrinsicPromises,
+  resolveIntrinsicPromise,
+  restoreIntrinsicPromiseConstructor,
+  thenIntrinsicPromise,
+} from "./promise-intrinsics.js";
 import type { RequestedExecutionSettings } from "../runner/types.js";
 
 export const CODEX_APP_SERVER_TOOL_PROFILE_VERSION = "codex-no-host-tools-v1";
@@ -37,6 +58,88 @@ export const DEFAULT_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 384 * 1024 * 1024;
 
 const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
+const HOST_PLATFORM = process.platform;
+const SPAWN_DETACHED = HOST_PLATFORM !== "win32";
+const applyIntrinsic = Reflect.apply;
+const arrayIsArrayIntrinsic = Array.isArray;
+const bindIntrinsic = Function.prototype.bind;
+const bufferAllocIntrinsic = Buffer.alloc;
+const bufferAllocUnsafeIntrinsic = Buffer.allocUnsafe;
+const bufferByteLengthIntrinsic = Buffer.byteLength;
+const bufferFromIntrinsic = Buffer.from;
+const bufferIsBufferIntrinsic = Buffer.isBuffer;
+const chmodIntrinsic = chmod;
+const clearTimeoutIntrinsic = clearTimeout;
+const createHashIntrinsic = createHash;
+const dateNowIntrinsic = Date.now;
+const definePropertyIntrinsic = Object.defineProperty;
+const freezeIntrinsic = Object.freeze;
+const functionHasInstanceIntrinsic = Function.prototype[Symbol.hasInstance];
+const getOwnPropertyDescriptorIntrinsic = Object.getOwnPropertyDescriptor;
+const mkdirIntrinsic = mkdir;
+const mkdtempIntrinsic = mkdtemp;
+const mathMaxIntrinsic = Math.max;
+const mathMinIntrinsic = Math.min;
+const numberIsSafeIntegerIntrinsic = Number.isSafeInteger;
+const objectCreateIntrinsic = Object.create;
+const objectKeysIntrinsic = Object.keys;
+const objectValuesIntrinsic = Object.values;
+const eventEmitterOnIntrinsic = EventEmitter.prototype.on;
+const eventEmitterOnceIntrinsic = EventEmitter.prototype.once;
+const eventEmitterEmitIntrinsic = EventEmitter.prototype.emit;
+const eventEmitterAddListenerIntrinsic = EventEmitter.prototype.addListener;
+const eventEmitterRemoveListenerIntrinsic = EventEmitter.prototype.removeListener;
+const eventEmitterOnDescriptor = getOwnPropertyDescriptorIntrinsic(EventEmitter.prototype, "on")!;
+const eventEmitterOnceDescriptor = getOwnPropertyDescriptorIntrinsic(
+  EventEmitter.prototype,
+  "once",
+)!;
+const eventEmitterEmitDescriptor = getOwnPropertyDescriptorIntrinsic(
+  EventEmitter.prototype,
+  "emit",
+)!;
+const eventEmitterAddListenerDescriptor = getOwnPropertyDescriptorIntrinsic(
+  EventEmitter.prototype,
+  "addListener",
+)!;
+const eventEmitterRemoveListenerDescriptor = getOwnPropertyDescriptorIntrinsic(
+  EventEmitter.prototype,
+  "removeListener",
+)!;
+const hashPrototypeIntrinsic = Object.getPrototypeOf(createHashIntrinsic("sha256")) as {
+  update: (...arguments_: unknown[]) => unknown;
+  digest: (...arguments_: unknown[]) => unknown;
+};
+const hashUpdateIntrinsic = hashPrototypeIntrinsic.update;
+const hashDigestIntrinsic = hashPrototypeIntrinsic.digest;
+const pathDirnameIntrinsic = path.dirname;
+const pathIsAbsoluteIntrinsic = path.isAbsolute;
+const pathJoinIntrinsic = path.join;
+const processKillIntrinsic = applyIntrinsic(bindIntrinsic, process.kill, [
+  process,
+]) as typeof process.kill;
+const readFileIntrinsic = readFile;
+const readdirIntrinsic = readdir;
+const realpathIntrinsic = realpath;
+const rmIntrinsic = rm;
+const setTimeoutIntrinsic = setTimeout;
+const spawnIntrinsic = spawn;
+const readableAsyncIteratorIntrinsic = Readable.prototype[Symbol.asyncIterator];
+const readableDestroyIntrinsic = Readable.prototype.destroy;
+const writableDestroyIntrinsic = Writable.prototype.destroy;
+const writableEndIntrinsic = Writable.prototype.end;
+const writableWriteIntrinsic = Writable.prototype.write;
+const writeFileIntrinsic = writeFile;
+const uint8ArrayFillIntrinsic = Uint8Array.prototype.fill;
+const uint8ArrayIndexOfIntrinsic = Uint8Array.prototype.indexOf;
+const uint8ArraySetIntrinsic = Uint8Array.prototype.set;
+const uint8ArraySubarrayIntrinsic = Uint8Array.prototype.subarray;
+const Uint8ArrayIntrinsic = Uint8Array;
+const typedArrayPrototypeIntrinsic = Object.getPrototypeOf(Uint8ArrayIntrinsic.prototype);
+const typedArrayByteLengthGetterIntrinsic = getOwnPropertyDescriptorIntrinsic(
+  typedArrayPrototypeIntrinsic,
+  "byteLength",
+)!.get!;
 const MAX_STDERR_BYTES = 1024 * 1024;
 export const MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
 const PRIVATE_TEMP_PARENT = "/tmp";
@@ -48,7 +151,7 @@ const MAX_JSONL_LINE_BYTES = CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES + 1024 
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/u;
 const SAFE_LABEL_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 const ENVIRONMENT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
-const RESERVED_ENVIRONMENT_NAMES = new Set([
+const RESERVED_ENVIRONMENT_NAMES = freezeIntrinsic([
   "APPDATA",
   "CODEX_HOME",
   "HOME",
@@ -61,7 +164,7 @@ const RESERVED_ENVIRONMENT_NAMES = new Set([
   "XDG_CACHE_HOME",
   "XDG_CONFIG_HOME",
 ]);
-const DISABLED_FEATURES = Object.freeze([
+const DISABLED_FEATURES = freezeIntrinsic([
   "apps",
   "code_mode",
   "code_mode_host",
@@ -80,7 +183,7 @@ const DISABLED_FEATURES = Object.freeze([
   "unified_exec",
   "view_image",
 ]);
-const REASONING_EFFORTS = Object.freeze([
+const REASONING_EFFORTS = freezeIntrinsic([
   "none",
   "minimal",
   "low",
@@ -112,9 +215,14 @@ export type CodexAppServerProcessOptions = Readonly<{
   outputLimitBytes?: number;
 }>;
 
+export type CodexAppServerProcessStartAuthorization = Readonly<{
+  allowedEnvironment: readonly (readonly [string, string])[];
+  finalize(): undefined;
+}>;
+
 export type CodexAppServerProcessStartGuard = (
   signal: AbortSignal,
-) => Promise<void>;
+) => Promise<CodexAppServerProcessStartAuthorization>;
 
 export type LinuxProcessTable = Readonly<{
   listProcessIds(): Promise<readonly string[]>;
@@ -160,7 +268,7 @@ export async function runCodexAppServerProcess(
     assertActive(signal);
     workspace = await createPrivateWorkspace();
     const activeWorkspace = workspace;
-    await writeFile(activeWorkspace.catalog, createToolCatalog(request.requested), {
+    await writeFileIntrinsic(activeWorkspace.catalog, createToolCatalog(request.requested), {
       encoding: "utf8",
       flag: "wx",
       mode: FILE_MODE,
@@ -219,10 +327,12 @@ export async function runCodexAppServerProcess(
   } catch {
     throw new Error("codex app-server process failed");
   } finally {
-    for (const bytes of materialized) bytes.fill(0);
+    for (let index = 0; index < materialized.length; index += 1) {
+      zeroReturnedBytes(materialized[index]!);
+    }
     if (workspace !== undefined) {
       try {
-        await rm(workspace.root, { force: true, recursive: true });
+        await rmIntrinsic(workspace.root, { force: true, recursive: true });
       } catch {
         throw new Error("codex app-server process failed");
       }
@@ -235,59 +345,68 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
   // Node does not expose a Windows Job Object primitive. Refuse to start on a
   // platform where an exited leader would make complete tree reclamation
   // unverifiable; a taskkill-by-PID fallback is not a durable tree identity.
-  if (process.platform !== "darwin" && process.platform !== "linux") throw new Error();
+  if (HOST_PLATFORM !== "darwin" && HOST_PLATFORM !== "linux") throw new Error();
   const executable = value.executable;
-  if (typeof executable !== "string" || !path.isAbsolute(executable)) throw new Error();
+  if (typeof executable !== "string" || !pathIsAbsoluteIntrinsic(executable)) throw new Error();
   const executableArguments = snapshotStrings(value.executableArguments ?? [], MAX_ARGUMENTS);
   const names = snapshotStrings(value.envAllowlist ?? [], 64);
-  const seen = new Set<string>();
-  for (const name of names) {
+  const seen: string[] = [];
+  for (let index = 0; index < names.length; index += 1) {
+    const name = names[index]!;
     if (
       !ENVIRONMENT_NAME_PATTERN.test(name) ||
-      RESERVED_ENVIRONMENT_NAMES.has(name) ||
-      seen.has(name)
+      stringArrayContains(RESERVED_ENVIRONMENT_NAMES, name) ||
+      stringArrayContains(seen, name)
     ) {
       throw new Error();
     }
-    seen.add(name);
+    seen[seen.length] = name;
   }
   const timeoutMs = value.timeoutMs ?? DEFAULT_CODEX_APP_SERVER_TIMEOUT_MS;
   const outputLimitBytes =
     value.outputLimitBytes ?? DEFAULT_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES;
   if (
-    !Number.isSafeInteger(timeoutMs) ||
+    !numberIsSafeIntegerIntrinsic(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > 15 * 60_000 ||
-    !Number.isSafeInteger(outputLimitBytes) ||
+    !numberIsSafeIntegerIntrinsic(outputLimitBytes) ||
     outputLimitBytes < 1024 ||
     outputLimitBytes > MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES
   ) {
     throw new Error();
   }
-  return Object.freeze({
+  return freezeIntrinsic({
     executable,
-    executableArguments: Object.freeze(executableArguments),
-    envAllowlist: Object.freeze(names),
+    executableArguments: freezeIntrinsic(executableArguments),
+    envAllowlist: freezeIntrinsic(names),
     timeoutMs,
     outputLimitBytes,
   });
 }
 
 function snapshotStrings(value: readonly string[], limit: number): string[] {
-  if (!Array.isArray(value) || value.length > limit) throw new Error();
+  if (!arrayIsArrayIntrinsic(value) || value.length > limit) throw new Error();
   const output: string[] = [];
-  for (const entry of value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const entry = value[index];
     if (
       typeof entry !== "string" ||
       entry.length === 0 ||
-      Buffer.byteLength(entry, "utf8") > MAX_ARGUMENT_BYTES ||
+      bufferByteLengthIntrinsic(entry, "utf8") > MAX_ARGUMENT_BYTES ||
       entry.includes("\0")
     ) {
       throw new Error();
     }
-    output.push(entry);
+    output[output.length] = entry;
   }
   return output;
+}
+
+function stringArrayContains(values: readonly string[], expected: string): boolean {
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === expected) return true;
+  }
+  return false;
 }
 
 function snapshotRequest(value: CodexAppServerProcessRequest): RequestSnapshot {
@@ -304,12 +423,12 @@ function snapshotRequest(value: CodexAppServerProcessRequest): RequestSnapshot {
   ) {
     throw new Error();
   }
-  return Object.freeze({
+  return freezeIntrinsic({
     image: snapshotInput(value.image, true),
     schema: snapshotInput(value.schema, false),
     system: snapshotInput(value.system, false),
     instruction: snapshotInput(value.instruction, false),
-    requested: Object.freeze({ model, effort, maxTokens: null }),
+    requested: freezeIntrinsic({ model, effort, maxTokens: null }),
   });
 }
 
@@ -330,36 +449,35 @@ function snapshotInput(
   ) {
     throw new Error();
   }
-  return Object.freeze({
+  return freezeIntrinsic({
     sha256,
     mediaType,
-    readBytes: Function.prototype.bind.call(readBytes, value) as () => Promise<Uint8Array>,
+    readBytes: applyIntrinsic(bindIntrinsic, readBytes, [value]) as () => Promise<Uint8Array>,
   });
 }
 
 async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
-  const temporaryParent = await realpath(PRIVATE_TEMP_PARENT);
-  if (!path.isAbsolute(temporaryParent)) throw new Error();
-  const root = await mkdtemp(path.join(temporaryParent, "svbench-codex-"));
+  const temporaryParent = await realpathIntrinsic(PRIVATE_TEMP_PARENT);
+  if (!pathIsAbsoluteIntrinsic(temporaryParent)) throw new Error();
+  const root = await mkdtempIntrinsic(pathJoinIntrinsic(temporaryParent, "svbench-codex-"));
   try {
-    const canonicalRoot = await realpath(root);
-    if (path.dirname(canonicalRoot) !== temporaryParent) throw new Error();
-    await chmod(root, DIRECTORY_MODE);
+    const canonicalRoot = await realpathIntrinsic(root);
+    if (pathDirnameIntrinsic(canonicalRoot) !== temporaryParent) throw new Error();
+    await chmodIntrinsic(root, DIRECTORY_MODE);
     const directories = {
-      home: path.join(root, "home"),
-      codexHome: path.join(root, "codex-home"),
-      config: path.join(root, "config"),
-      cache: path.join(root, "cache"),
-      workspace: path.join(root, "workspace"),
-      executablePath: path.join(root, "empty-path"),
-      temporary: path.join(root, "tmp"),
+      home: pathJoinIntrinsic(root, "home"),
+      codexHome: pathJoinIntrinsic(root, "codex-home"),
+      config: pathJoinIntrinsic(root, "config"),
+      cache: pathJoinIntrinsic(root, "cache"),
+      workspace: pathJoinIntrinsic(root, "workspace"),
+      executablePath: pathJoinIntrinsic(root, "empty-path"),
+      temporary: pathJoinIntrinsic(root, "tmp"),
     };
-    await Promise.all(
-      Object.values(directories).map((directory) =>
-        mkdir(directory, { mode: DIRECTORY_MODE }),
-      ),
-    );
-    const environment = Object.create(null) as NodeJS.ProcessEnv;
+    const directoryValues = objectValuesIntrinsic(directories);
+    for (let index = 0; index < directoryValues.length; index += 1) {
+      await mkdirIntrinsic(directoryValues[index]!, { mode: DIRECTORY_MODE });
+    }
+    const environment = objectCreateIntrinsic(null) as NodeJS.ProcessEnv;
     environment.HOME = directories.home;
     environment.USERPROFILE = directories.home;
     environment.CODEX_HOME = directories.codexHome;
@@ -371,14 +489,18 @@ async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
     environment.TMPDIR = directories.temporary;
     environment.TMP = directories.temporary;
     environment.TEMP = directories.temporary;
-    return Object.freeze({
+    return freezeIntrinsic({
       root,
       workspace: directories.workspace,
-      catalog: path.join(root, "model-catalog.json"),
+      catalog: pathJoinIntrinsic(root, "model-catalog.json"),
       environment,
     });
   } catch {
-    await rm(root, { force: true, recursive: true }).catch(() => undefined);
+    try {
+      await rmIntrinsic(root, { force: true, recursive: true });
+    } catch {
+      // Preserve the stable workspace-creation error below.
+    }
     throw new Error();
   }
 }
@@ -389,19 +511,20 @@ async function readInput(
   timeoutMs: number,
   parentSignal: AbortSignal | undefined,
 ): Promise<Buffer> {
-  const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  parentSignal?.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(abort, timeoutMs);
+  const controller = createAbortController();
+  const controllerSignal = abortControllerSignal(controller);
+  const abort = (): void => abortController(controller);
+  addAbortSignalListener(parentSignal, abort);
+  const timer = setTimeoutIntrinsic(abort, timeoutMs);
   try {
     assertActive(parentSignal);
-    const value = await invokeLazyInput(input.readBytes, controller.signal);
-    if (!(value instanceof Uint8Array)) throw new Error();
+    const value = await invokeLazyInput(input.readBytes, controllerSignal);
+    if (!isUint8Array(value)) throw new Error();
     try {
-      if (value.byteLength > MAX_PROVIDER_INPUT_BYTES) throw new Error();
-      const bytes = Buffer.from(value);
-      materialized.push(bytes);
-      if (createHash("sha256").update(bytes).digest("hex") !== input.sha256) {
+      if (typedArrayByteLength(value) > MAX_PROVIDER_INPUT_BYTES) throw new Error();
+      const bytes = bufferFromIntrinsic(value);
+      materialized[materialized.length] = bytes;
+      if (sha256(bytes) !== input.sha256) {
         throw new Error();
       }
       return bytes;
@@ -409,8 +532,8 @@ async function readInput(
       zeroReturnedBytes(value);
     }
   } finally {
-    clearTimeout(timer);
-    parentSignal?.removeEventListener("abort", abort);
+    clearTimeoutIntrinsic(timer);
+    removeAbortSignalListener(parentSignal, abort);
   }
 }
 
@@ -419,25 +542,33 @@ function invokeLazyInput(
   signal: AbortSignal,
 ): Promise<Uint8Array> {
   assertActive(signal);
-  const pending = Promise.resolve().then(() => {
+  const pending = thenIntrinsicPromise(resolveIntrinsicPromise(undefined), () => {
     assertActive(signal);
-    return reader();
+    return invokeIntrinsicPromiseCallback<Uint8Array>(() => {
+      try {
+        return reader();
+      } finally {
+        restoreEventEmitterIntrinsics();
+      }
+    });
   });
-  return new Promise((resolve, reject) => {
+  return createIntrinsicPromise((resolve, reject) => {
     let settled = false;
-    const removeAbortListener = (): void => signal.removeEventListener("abort", abort);
+    const removeAbortListener = (): void => removeAbortSignalListener(signal, abort);
     const abort = (): void => {
       if (settled) return;
       settled = true;
       removeAbortListener();
       reject(new Error());
     };
-    signal.addEventListener("abort", abort, { once: true });
-    void pending.then(
+    addAbortSignalListener(signal, abort);
+    void thenIntrinsicPromise(
+      pending,
       (value) => {
+        restoreEventEmitterIntrinsics();
         if (settled) {
           try {
-            if (value instanceof Uint8Array) zeroReturnedBytes(value);
+            if (isUint8Array(value)) zeroReturnedBytes(value);
           } catch {
             // Disposal is best effort after the public process call has settled.
           }
@@ -448,25 +579,55 @@ function invokeLazyInput(
         resolve(value);
       },
       (error: unknown) => {
+        restoreEventEmitterIntrinsics();
         if (settled) return;
         settled = true;
         removeAbortListener();
         reject(error);
       },
     );
-    if (signal.aborted) abort();
+    if (isAbortSignalAborted(signal)) abort();
   });
 }
 
 function zeroReturnedBytes(value: Uint8Array): void {
-  Uint8Array.prototype.fill.call(value, 0);
+  applyIntrinsic(uint8ArrayFillIntrinsic, value, [0]);
+}
+
+function isUint8Array(value: unknown): value is Uint8Array {
+  return applyIntrinsic(functionHasInstanceIntrinsic, Uint8ArrayIntrinsic, [value]) as boolean;
+}
+
+function typedArrayByteLength(value: Uint8Array): number {
+  return applyIntrinsic(typedArrayByteLengthGetterIntrinsic, value, []) as number;
+}
+
+function sha256(value: Uint8Array): string {
+  const hash = createHashIntrinsic("sha256");
+  applyIntrinsic(hashUpdateIntrinsic, hash, [value]);
+  return applyIntrinsic(hashDigestIntrinsic, hash, ["hex"]) as string;
 }
 
 function createToolCatalog(requested: RequestedExecutionSettings & { model: string }): string {
-  const efforts = new Set(REASONING_EFFORTS);
-  if (requested.effort !== null) efforts.add(requested.effort);
+  const efforts: string[] = [];
+  for (let index = 0; index < REASONING_EFFORTS.length; index += 1) {
+    efforts[efforts.length] = REASONING_EFFORTS[index]!;
+  }
+  if (
+    requested.effort !== null &&
+    !stringArrayContains(efforts, requested.effort)
+  ) {
+    efforts[efforts.length] = requested.effort;
+  }
+  const supportedReasoningLevels: Array<{ effort: string; description: string }> = [];
+  for (let index = 0; index < efforts.length; index += 1) {
+    supportedReasoningLevels[supportedReasoningLevels.length] = {
+      effort: efforts[index]!,
+      description: "fixed extraction effort",
+    };
+  }
   const defaultEffort = requested.effort ?? "medium";
-  return `${JSON.stringify({
+  return `${stringifyJsonValue({
     models: [
       {
         slug: requested.model,
@@ -474,10 +635,7 @@ function createToolCatalog(requested: RequestedExecutionSettings & { model: stri
         display_name: requested.model,
         description: null,
         default_reasoning_level: defaultEffort,
-        supported_reasoning_levels: [...efforts].map((effort) => ({
-          effort,
-          description: "fixed extraction effort",
-        })),
+        supported_reasoning_levels: supportedReasoningLevels,
         shell_type: "disabled",
         visibility: "list",
         supported_in_api: true,
@@ -523,10 +681,19 @@ function appServerArguments(
   options: ValidatedOptions,
   workspace: PrivateWorkspace,
 ): string[] {
-  const arguments_ = [...options.executableArguments, "app-server", "--stdio", "--strict-config"];
-  for (const feature of DISABLED_FEATURES) arguments_.push("--disable", feature);
+  const arguments_: string[] = [];
+  for (let index = 0; index < options.executableArguments.length; index += 1) {
+    arguments_[arguments_.length] = options.executableArguments[index]!;
+  }
+  arguments_[arguments_.length] = "app-server";
+  arguments_[arguments_.length] = "--stdio";
+  arguments_[arguments_.length] = "--strict-config";
+  for (let index = 0; index < DISABLED_FEATURES.length; index += 1) {
+    arguments_[arguments_.length] = "--disable";
+    arguments_[arguments_.length] = DISABLED_FEATURES[index]!;
+  }
   const overrides = [
-    `model_catalog_json=${JSON.stringify(workspace.catalog)}`,
+    `model_catalog_json=${stringifyJsonValue(workspace.catalog)}`,
     'personality="none"',
     "include_permissions_instructions=false",
     "include_environment_context=false",
@@ -546,7 +713,10 @@ function appServerArguments(
     "hooks={}",
     "notify=[]",
   ];
-  for (const override of overrides) arguments_.push("-c", override);
+  for (let index = 0; index < overrides.length; index += 1) {
+    arguments_[arguments_.length] = "-c";
+    arguments_[arguments_.length] = overrides[index]!;
+  }
   return arguments_;
 }
 
@@ -559,15 +729,25 @@ async function runConnectedProcess(
   parentSignal: AbortSignal | undefined,
   startGuard: CodexAppServerProcessStartGuard | undefined,
 ): Promise<CodexAppServerProtocolResult> {
-  const controller = new AbortController();
-  const abort = (): void => controller.abort();
-  parentSignal?.addEventListener("abort", abort, { once: true });
-  const timer = setTimeout(abort, options.timeoutMs);
+  const controller = createAbortController();
+  const controllerSignal = abortControllerSignal(controller);
+  const guardController =
+    startGuard === undefined ? undefined : createAbortController();
+  const guardSignal =
+    guardController === undefined ? undefined : abortControllerSignal(guardController);
+  let abortRequested = false;
+  const abort = (): void => {
+    abortRequested = true;
+    abortController(controller);
+    abortController(guardController);
+  };
+  addAbortSignalListener(parentSignal, abort);
+  const timer = setTimeoutIntrinsic(abort, options.timeoutMs);
   let child: ChildProcessWithoutNullStreams | undefined;
   let close: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
   let termination: Promise<void> | undefined;
   const terminate = (): Promise<void> => {
-    if (child === undefined) return Promise.resolve();
+    if (child === undefined) return resolveIntrinsicPromise(undefined);
     if (termination === undefined) {
       termination = terminateProcessTree(child);
       destroyChildStreams(child);
@@ -577,23 +757,61 @@ async function runConnectedProcess(
   try {
     const arguments_ = appServerArguments(options, workspace);
     assertActive(parentSignal);
-    if (startGuard !== undefined) {
-      await startGuard(controller.signal);
-      assertActive(controller.signal);
-      assertActive(parentSignal);
+    let environment: NodeJS.ProcessEnv;
+    if (startGuard === undefined) {
+      environment = snapshotSpawnEnvironment(
+        snapshotAllowedEnvironment(options.envAllowlist),
+        workspace.environment,
+      );
+    } else {
+      let authorizationValue: CodexAppServerProcessStartAuthorization;
+      try {
+        authorizationValue = await invokeIntrinsicPromiseCallback<
+          CodexAppServerProcessStartAuthorization
+        >(() => {
+          try {
+            return startGuard(guardSignal!);
+          } finally {
+            restoreEventEmitterIntrinsics();
+          }
+        });
+      } finally {
+        restoreEventEmitterIntrinsics();
+      }
+      const authorization = snapshotStartAuthorization(
+        authorizationValue,
+        options.envAllowlist,
+      );
+      environment = snapshotSpawnEnvironment(
+        authorization.allowedEnvironment,
+        workspace.environment,
+      );
+      let finalizerResult: unknown;
+      try {
+        finalizerResult = invokeIntrinsicSynchronousCallback(() => authorization.finalize());
+      } finally {
+        restoreIntrinsicPromiseConstructor();
+        restoreEventEmitterIntrinsics();
+      }
+      if (finalizerResult !== undefined) {
+        ignoreIntrinsicPromiseRejection(finalizerResult);
+        throw new Error();
+      }
+      if (abortRequested) throw new Error();
     }
-    const environment = snapshotSpawnEnvironment(
-      options.envAllowlist,
-      workspace.environment,
-    );
-    child = spawn(options.executable, arguments_, {
+    restoreEventEmitterIntrinsics();
+    child = spawnIntrinsic(options.executable, arguments_, {
       cwd: workspace.workspace,
-      detached: process.platform !== "win32",
+      detached: SPAWN_DETACHED,
       env: environment,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
+    hardenEventEmitterInstance(child);
+    hardenEventEmitterInstance(child.stdin);
+    hardenEventEmitterInstance(child.stdout);
+    hardenEventEmitterInstance(child.stderr);
     close = waitForClose(child);
     const processConnection = new JsonlProcessConnection(
       child,
@@ -601,21 +819,21 @@ async function runConnectedProcess(
       close,
       terminate,
     );
-    const ready = await raceAbort(processConnection.receive(), controller.signal);
+    const ready = await raceAbort(processConnection.receive(), controllerSignal);
     assertIsolationReady(ready?.message);
-    const request = await prepareRequest(controller.signal);
+    const request = await prepareRequest(controllerSignal);
     const result = await runCodexAppServerProtocol(
       processConnection,
       request,
-      controller.signal,
+      controllerSignal,
     );
-    const status = await raceAbort(processConnection.waitForClose(), controller.signal);
+    const status = await raceAbort(processConnection.waitForClose(), controllerSignal);
     await terminate();
     if (status.code !== 0 || status.signal !== null) throw new Error();
     return result;
   } catch {
     if (child !== undefined) {
-      if (controller.signal.aborted) {
+      if (isAbortSignalAborted(controllerSignal)) {
         await waitForInterruptGrace(close);
       }
       if (close === undefined) {
@@ -626,11 +844,9 @@ async function runConnectedProcess(
     }
     throw new Error();
   } finally {
-    clearTimeout(timer);
-    parentSignal?.removeEventListener("abort", abort);
-    child?.stdin.destroy();
-    child?.stdout.destroy();
-    child?.stderr.destroy();
+    clearTimeoutIntrinsic(timer);
+    removeAbortSignalListener(parentSignal, abort);
+    if (child !== undefined) destroyChildStreams(child);
   }
 }
 
@@ -638,9 +854,9 @@ function assertIsolationReady(value: JsonValue | undefined): void {
   if (
     value === undefined ||
     value === null ||
-    Array.isArray(value) ||
+    arrayIsArrayIntrinsic(value) ||
     typeof value !== "object" ||
-    Object.keys(value).length !== 2 ||
+    objectKeysIntrinsic(value).length !== 2 ||
     value.method !== "svbench/isolation/ready"
   ) {
     throw new Error();
@@ -648,9 +864,9 @@ function assertIsolationReady(value: JsonValue | undefined): void {
   const params = value.params;
   if (
     params === null ||
-    Array.isArray(params) ||
+    arrayIsArrayIntrinsic(params) ||
     typeof params !== "object" ||
-    Object.keys(params).length !== 10 ||
+    objectKeysIntrinsic(params).length !== 10 ||
     params.protocol !== CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION ||
     params.codexCliVersion !== CODEX_APP_SERVER_CLI_VERSION ||
     params.managedConfig !== "disabled" ||
@@ -668,7 +884,7 @@ function assertIsolationReady(value: JsonValue | undefined): void {
 
 class JsonlProcessConnection implements CodexAppServerProtocolConnection {
   private readonly iterator: AsyncIterator<Buffer | string>;
-  private pending = Buffer.alloc(0);
+  private pending = bufferAllocIntrinsic(0);
   private pendingBytes = 0;
   private unread: Buffer | undefined;
   private outputBytes = 0;
@@ -682,32 +898,34 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
     close: Promise<{ code: number | null; signal: NodeJS.Signals | null }>,
     private readonly terminate: () => Promise<void>,
   ) {
-    this.iterator = child.stdout[Symbol.asyncIterator]();
+    this.iterator = applyIntrinsic(readableAsyncIteratorIntrinsic, child.stdout, []) as AsyncIterator<
+      Buffer | string
+    >;
     this.close = close;
-    child.once("error", () => this.fail());
-    child.stdin.once("error", () => this.fail());
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      this.stderrBytes += Buffer.byteLength(chunk);
+    applyIntrinsic(eventEmitterOnceIntrinsic, child, ["error", () => this.fail()]);
+    applyIntrinsic(eventEmitterOnceIntrinsic, child.stdin, ["error", () => this.fail()]);
+    applyIntrinsic(eventEmitterOnIntrinsic, child.stderr, ["data", (chunk: Buffer | string) => {
+      this.stderrBytes += bufferByteLengthIntrinsic(chunk);
       if (this.stderrBytes > MAX_STDERR_BYTES) this.fail();
-    });
+    }]);
   }
 
   async send(message: JsonValue): Promise<void> {
     if (this.failed) throw new Error();
-    const bytes = Buffer.from(`${JSON.stringify(message)}\n`, "utf8");
+    const bytes = bufferFromIntrinsic(`${stringifyJsonValue(message)}\n`, "utf8");
     try {
-      if (bytes.byteLength > this.outputLimitBytes) {
+      if (typedArrayByteLength(bytes) > this.outputLimitBytes) {
         this.fail();
         throw new Error();
       }
-      await new Promise<void>((resolve, reject) => {
-        this.child.stdin.write(bytes, (error) => {
+      await createIntrinsicPromise<void>((resolve, reject) => {
+        applyIntrinsic(writableWriteIntrinsic, this.child.stdin, [bytes, (error: Error | null | undefined) => {
           if (error === null || error === undefined) resolve();
           else reject(error);
-        });
+        }]);
       });
     } finally {
-      bytes.fill(0);
+      zeroReturnedBytes(bytes);
     }
   }
 
@@ -722,26 +940,37 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
           if (this.pendingBytes !== 0) throw new Error();
           return undefined;
         }
-        chunk = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
-        this.outputBytes += chunk.byteLength;
+        chunk = bufferIsBufferIntrinsic(next.value)
+          ? next.value
+          : bufferFromIntrinsic(next.value);
+        this.outputBytes += typedArrayByteLength(chunk);
         if (this.outputBytes > this.outputLimitBytes) {
           this.fail();
           throw new Error();
         }
       }
 
-      const newline = chunk.indexOf(0x0a);
+      const newline = applyIntrinsic(uint8ArrayIndexOfIntrinsic, chunk, [0x0a]) as number;
       if (newline === -1) {
         this.appendPending(chunk);
         continue;
       }
-      this.appendPending(chunk.subarray(0, newline));
-      if (newline + 1 < chunk.byteLength) this.unread = chunk.subarray(newline + 1);
+      this.appendPending(
+        applyIntrinsic(uint8ArraySubarrayIntrinsic, chunk, [0, newline]) as Buffer,
+      );
+      if (newline + 1 < typedArrayByteLength(chunk)) {
+        this.unread = applyIntrinsic(uint8ArraySubarrayIntrinsic, chunk, [
+          newline + 1,
+        ]) as Buffer;
+      }
       if (this.pendingBytes === 0 || this.pending[this.pendingBytes - 1] === 0x0d) {
         throw new Error();
       }
       try {
-        const line = this.pending.subarray(0, this.pendingBytes);
+        const line = applyIntrinsic(uint8ArraySubarrayIntrinsic, this.pending, [
+          0,
+          this.pendingBytes,
+        ]) as Buffer;
         return {
           message: normalizeJsonValue(
             parseJson(
@@ -754,33 +983,43 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
           byteLength: this.pendingBytes + 1,
         };
       } finally {
-        this.pending.fill(0, 0, this.pendingBytes);
+        applyIntrinsic(uint8ArrayFillIntrinsic, this.pending, [0, 0, this.pendingBytes]);
         this.pendingBytes = 0;
       }
     }
   }
 
   private appendPending(chunk: Buffer): void {
-    if (chunk.byteLength === 0) return;
-    const required = this.pendingBytes + chunk.byteLength;
+    const chunkByteLength = typedArrayByteLength(chunk);
+    if (chunkByteLength === 0) return;
+    const required = this.pendingBytes + chunkByteLength;
     if (required > MAX_JSONL_LINE_BYTES) {
       this.fail();
       throw new Error();
     }
-    if (required > this.pending.byteLength) {
-      let capacity = Math.max(4096, this.pending.byteLength);
-      while (capacity < required) capacity = Math.min(MAX_JSONL_LINE_BYTES, capacity * 2);
-      const grown = Buffer.allocUnsafe(capacity);
-      this.pending.copy(grown, 0, 0, this.pendingBytes);
-      this.pending.fill(0);
+    const pendingByteLength = typedArrayByteLength(this.pending);
+    if (required > pendingByteLength) {
+      let capacity = mathMaxIntrinsic(4096, pendingByteLength);
+      while (capacity < required) {
+        capacity = mathMinIntrinsic(MAX_JSONL_LINE_BYTES, capacity * 2);
+      }
+      const grown = bufferAllocUnsafeIntrinsic(capacity);
+      applyIntrinsic(uint8ArraySetIntrinsic, grown, [
+        applyIntrinsic(uint8ArraySubarrayIntrinsic, this.pending, [
+          0,
+          this.pendingBytes,
+        ]),
+        0,
+      ]);
+      zeroReturnedBytes(this.pending);
       this.pending = grown;
     }
-    chunk.copy(this.pending, this.pendingBytes);
+    applyIntrinsic(uint8ArraySetIntrinsic, this.pending, [chunk, this.pendingBytes]);
     this.pendingBytes = required;
   }
 
   closeInput(): void {
-    this.child.stdin.end();
+    applyIntrinsic(writableEndIntrinsic, this.child.stdin, []);
   }
 
   async waitForClose(): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
@@ -799,16 +1038,52 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
 function waitForClose(
   child: ChildProcessWithoutNullStreams,
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  return new Promise((resolve) => {
-    child.once("close", (code, childSignal) => resolve({ code, signal: childSignal }));
+  return createIntrinsicPromise((resolve) => {
+    applyIntrinsic(eventEmitterOnceIntrinsic, child, [
+      "close",
+      (code: number | null, childSignal: NodeJS.Signals | null) =>
+        resolve({ code, signal: childSignal }),
+    ]);
   });
+}
+
+function restoreEventEmitterIntrinsics(): void {
+  definePropertyIntrinsic(EventEmitter.prototype, "on", eventEmitterOnDescriptor);
+  definePropertyIntrinsic(EventEmitter.prototype, "once", eventEmitterOnceDescriptor);
+  definePropertyIntrinsic(EventEmitter.prototype, "emit", eventEmitterEmitDescriptor);
+  definePropertyIntrinsic(
+    EventEmitter.prototype,
+    "addListener",
+    eventEmitterAddListenerDescriptor,
+  );
+  definePropertyIntrinsic(
+    EventEmitter.prototype,
+    "removeListener",
+    eventEmitterRemoveListenerDescriptor,
+  );
+}
+
+function hardenEventEmitterInstance(value: EventEmitter): void {
+  definePropertyIntrinsic(value, "on", fixedMethod(eventEmitterOnIntrinsic));
+  definePropertyIntrinsic(value, "once", fixedMethod(eventEmitterOnceIntrinsic));
+  definePropertyIntrinsic(value, "emit", fixedMethod(eventEmitterEmitIntrinsic));
+  definePropertyIntrinsic(value, "addListener", fixedMethod(eventEmitterAddListenerIntrinsic));
+  definePropertyIntrinsic(
+    value,
+    "removeListener",
+    fixedMethod(eventEmitterRemoveListenerIntrinsic),
+  );
+}
+
+function fixedMethod(value: unknown): PropertyDescriptor {
+  return { configurable: false, enumerable: false, value, writable: false };
 }
 
 async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {
   const pid = child.pid;
   if (pid === undefined) return;
   try {
-    process.kill(-pid, "SIGKILL");
+    processKillIntrinsic(-pid, "SIGKILL");
   } catch (error) {
     if (objectWithCode(error).code !== "ESRCH") throw error;
   }
@@ -816,38 +1091,88 @@ async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Prom
 }
 
 function snapshotSpawnEnvironment(
-  allowlist: readonly string[],
+  allowed: readonly (readonly [string, string])[],
   privateEnvironment: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
-  const environment = Object.create(null) as NodeJS.ProcessEnv;
-  for (const name of allowlist) {
-    const value = process.env[name];
-    if (value !== undefined) environment[name] = value;
+  const environment = objectCreateIntrinsic(null) as NodeJS.ProcessEnv;
+  for (let index = 0; index < allowed.length; index += 1) {
+    const entry = allowed[index]!;
+    environment[entry[0]] = entry[1];
   }
-  for (const name of Object.keys(privateEnvironment)) {
+  const privateNames = objectKeysIntrinsic(privateEnvironment);
+  for (let index = 0; index < privateNames.length; index += 1) {
+    const name = privateNames[index]!;
     const value = privateEnvironment[name];
     if (value !== undefined) environment[name] = value;
   }
   return environment;
 }
 
+function snapshotAllowedEnvironment(
+  allowlist: readonly string[],
+): readonly (readonly [string, string])[] {
+  const allowed: Array<readonly [string, string]> = [];
+  for (let index = 0; index < allowlist.length; index += 1) {
+    const name = allowlist[index]!;
+    const value = process.env[name];
+    if (value !== undefined) {
+      allowed[allowed.length] = freezeIntrinsic([name, value]);
+    }
+  }
+  return freezeIntrinsic(allowed);
+}
+
+function snapshotStartAuthorization(
+  value: CodexAppServerProcessStartAuthorization,
+  allowlist: readonly string[],
+): CodexAppServerProcessStartAuthorization {
+  if (value === null || typeof value !== "object") throw new Error();
+  const finalize = value.finalize;
+  const source = value.allowedEnvironment;
+  if (typeof finalize !== "function" || !arrayIsArrayIntrinsic(source)) throw new Error();
+  const seen: string[] = [];
+  const allowed: Array<readonly [string, string]> = [];
+  for (let index = 0; index < source.length; index += 1) {
+    const entry = source[index];
+    if (!arrayIsArrayIntrinsic(entry)) throw new Error();
+    const length = entry.length;
+    const name = entry[0];
+    const environmentValue = entry[1];
+    if (
+      length !== 2 ||
+      typeof name !== "string" ||
+      typeof environmentValue !== "string" ||
+      !stringArrayContains(allowlist, name) ||
+      stringArrayContains(seen, name)
+    ) {
+      throw new Error();
+    }
+    seen[seen.length] = name;
+    allowed[allowed.length] = freezeIntrinsic([name, environmentValue]);
+  }
+  return freezeIntrinsic({
+    allowedEnvironment: freezeIntrinsic(allowed),
+    finalize: applyIntrinsic(bindIntrinsic, finalize, [undefined]),
+  });
+}
+
 async function waitForProcessGroupSettlement(processGroupId: number): Promise<void> {
-  const deadline = Date.now() + PROCESS_GROUP_SETTLE_TIMEOUT_MS;
+  const deadline = dateNowIntrinsic() + PROCESS_GROUP_SETTLE_TIMEOUT_MS;
   while (await processGroupHasLiveMember(processGroupId)) {
-    if (Date.now() >= deadline) throw new Error();
-    await new Promise<void>((resolve) => {
-      setTimeout(resolve, PROCESS_GROUP_SETTLE_INTERVAL_MS);
+    if (dateNowIntrinsic() >= deadline) throw new Error();
+    await createIntrinsicPromise<void>((resolve) => {
+      setTimeoutIntrinsic(resolve, PROCESS_GROUP_SETTLE_INTERVAL_MS);
     });
   }
 }
 
 async function processGroupHasLiveMember(processGroupId: number): Promise<boolean> {
   try {
-    process.kill(-processGroupId, 0);
+    processKillIntrinsic(-processGroupId, 0);
   } catch (error) {
     return processGroupProbeFailureIndicatesLive(error);
   }
-  if (process.platform !== "linux") return true;
+  if (HOST_PLATFORM !== "linux") return true;
   return linuxProcessGroupHasLiveMember(processGroupId);
 }
 
@@ -859,18 +1184,20 @@ export function processGroupProbeFailureIndicatesLive(error: unknown): boolean {
   throw error;
 }
 
-const DEFAULT_LINUX_PROCESS_TABLE: LinuxProcessTable = Object.freeze({
+const DEFAULT_LINUX_PROCESS_TABLE: LinuxProcessTable = freezeIntrinsic({
   async listProcessIds(): Promise<readonly string[]> {
     const processIds: string[] = [];
-    for (const entry of await readdir("/proc", { withFileTypes: true })) {
+    const entries = await readdirIntrinsic("/proc", { withFileTypes: true });
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index]!;
       if (entry.isDirectory() && /^[1-9][0-9]*$/u.test(entry.name)) {
-        processIds.push(entry.name);
+        processIds[processIds.length] = entry.name;
       }
     }
     return processIds;
   },
   async readProcessStat(processId: string): Promise<string> {
-    return readFile(`/proc/${processId}/stat`, "utf8");
+    return readFileIntrinsic(`/proc/${processId}/stat`, "utf8");
   },
 });
 
@@ -878,7 +1205,9 @@ export async function linuxProcessGroupHasLiveMember(
   processGroupId: number,
   processTable: LinuxProcessTable = DEFAULT_LINUX_PROCESS_TABLE,
 ): Promise<boolean> {
-  for (const processId of await processTable.listProcessIds()) {
+  const processIds = await processTable.listProcessIds();
+  for (let index = 0; index < processIds.length; index += 1) {
+    const processId = processIds[index]!;
     let source: string;
     try {
       source = await processTable.readProcessStat(processId);
@@ -921,14 +1250,14 @@ async function waitForInterruptGrace(
   if (close === undefined) return;
   let timer: NodeJS.Timeout | undefined;
   try {
-    await Promise.race([
+    await raceIntrinsicPromises(
       close,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, 50);
+      createIntrinsicPromise<void>((resolve) => {
+        timer = setTimeoutIntrinsic(resolve, 50);
       }),
-    ]);
+    );
   } finally {
-    if (timer !== undefined) clearTimeout(timer);
+    if (timer !== undefined) clearTimeoutIntrinsic(timer);
   }
 }
 
@@ -937,25 +1266,25 @@ function objectWithCode(value: unknown): { code?: string } {
 }
 
 function destroyChildStreams(child: ChildProcessWithoutNullStreams): void {
-  child.stdin.destroy();
-  child.stdout.destroy();
-  child.stderr.destroy();
+  applyIntrinsic(writableDestroyIntrinsic, child.stdin, []);
+  applyIntrinsic(readableDestroyIntrinsic, child.stdout, []);
+  applyIntrinsic(readableDestroyIntrinsic, child.stderr, []);
 }
 
 function assertActive(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw new Error();
+  if (isAbortSignalAborted(signal)) throw new Error();
 }
 
 async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) throw new Error();
+  if (isAbortSignalAborted(signal)) throw new Error();
   let rejectAbort!: () => void;
-  const aborted = new Promise<never>((_resolve, reject) => {
+  const aborted = createIntrinsicPromise<never>((_resolve, reject) => {
     rejectAbort = () => reject(new Error());
   });
-  signal.addEventListener("abort", rejectAbort, { once: true });
+  addAbortSignalListener(signal, rejectAbort);
   try {
-    return await Promise.race([promise, aborted]);
+    return await raceIntrinsicPromises(promise, aborted);
   } finally {
-    signal.removeEventListener("abort", rejectAbort);
+    removeAbortSignalListener(signal, rejectAbort);
   }
 }

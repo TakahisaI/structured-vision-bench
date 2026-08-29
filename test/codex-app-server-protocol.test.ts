@@ -397,6 +397,257 @@ test("sends one best-effort interrupt and closes input when aborted", async () =
   );
 });
 
+test(
+  "keeps protocol cancellation independent of a replaced Array iterator",
+  { timeout: 5_000 },
+  async () => {
+    const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      Symbol.iterator,
+    );
+    assert.ok(iteratorDescriptor?.value);
+    const connection = new SyntheticConnection("timeout");
+    const controller = new AbortController();
+    const unhandledRejections: unknown[] = [];
+    const recordUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections[unhandledRejections.length] = reason;
+    };
+    process.on("unhandledRejection", recordUnhandledRejection);
+
+    try {
+      Object.defineProperty(Array.prototype, Symbol.iterator, {
+        configurable: true,
+        writable: true,
+        value: function* (this: unknown[]): Generator<unknown> {
+          if (
+            this.length === 2 &&
+            this[0] instanceof Promise &&
+            this[1] instanceof Promise
+          ) {
+            yield this[0];
+            return;
+          }
+          for (let index = 0; index < this.length; index += 1) {
+            yield this[index];
+          }
+        },
+      });
+      const running = runCodexAppServerProtocol(
+        connection,
+        request(),
+        controller.signal,
+      );
+      await connection.turnAccepted;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      controller.abort();
+      await assert.rejects(running, /codex app-server protocol failed/u);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+      process.off("unhandledRejection", recordUnhandledRejection);
+    }
+
+    assert.deepEqual(unhandledRejections, []);
+    assert.equal(connection.closed, true);
+    assert.equal(
+      connection.sent.filter((message) => message.method === "turn/interrupt").length,
+      1,
+    );
+  },
+);
+
+test("shared Array iterator mutation cannot skip active flags or required keys", async () => {
+  const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+    Array.prototype,
+    Symbol.iterator,
+  );
+  const inheritedServiceTier = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "serviceTier",
+  );
+  assert.ok(iteratorDescriptor?.value);
+
+  try {
+    Object.defineProperty(Object.prototype, "serviceTier", {
+      configurable: true,
+      value: null,
+      writable: true,
+    });
+    Object.defineProperty(Array.prototype, Symbol.iterator, {
+      configurable: true,
+      writable: true,
+      value: function* (this: unknown[]): Generator<unknown> {
+        if (
+          (this.length === 1 && this[0] === "syntheticUnknownFlag") ||
+          this.some((value) => value === "serviceTier")
+        ) {
+          return;
+        }
+        for (let index = 0; index < this.length; index += 1) {
+          yield this[index];
+        }
+      },
+    });
+
+    const activeFlags = new SyntheticConnection("unknown-active-flag");
+    await assert.rejects(
+      runCodexAppServerProtocol(activeFlags, request()),
+      /codex app-server protocol failed/u,
+    );
+    assert.equal(activeFlags.closed, true);
+
+    const requiredKeys = new RequiredKeyDeletingConnection(
+      "success",
+      "serviceTier",
+      threadStartResultTarget,
+    );
+    await assert.rejects(
+      runCodexAppServerProtocol(requiredKeys, request()),
+      /codex app-server protocol failed/u,
+    );
+    assert.equal(requiredKeys.deleted, true);
+    assert.equal(requiredKeys.closed, true);
+  } finally {
+    Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+    if (inheritedServiceTier === undefined) {
+      delete (Object.prototype as { serviceTier?: unknown }).serviceTier;
+    } else {
+      Object.defineProperty(Object.prototype, "serviceTier", inheritedServiceTier);
+    }
+  }
+});
+
+test("shared Object.hasOwn mutation cannot supply a required inherited field", async () => {
+  const hasOwnDescriptor = Object.getOwnPropertyDescriptor(Object, "hasOwn");
+  const inheritedServiceTier = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "serviceTier",
+  );
+  assert.ok(hasOwnDescriptor?.value);
+
+  try {
+    Object.defineProperty(Object.prototype, "serviceTier", {
+      configurable: true,
+      value: null,
+      writable: true,
+    });
+    Object.defineProperty(Object, "hasOwn", {
+      configurable: true,
+      value: (value: object, key: PropertyKey) =>
+        key === "serviceTier" ||
+        Reflect.apply(hasOwnDescriptor.value as (value: object, key: PropertyKey) => boolean, Object, [
+          value,
+          key,
+        ]),
+      writable: true,
+    });
+
+    const connection = new RequiredKeyDeletingConnection(
+      "success",
+      "serviceTier",
+      threadStartResultTarget,
+    );
+    await assert.rejects(
+      runCodexAppServerProtocol(connection, request()),
+      /codex app-server protocol failed/u,
+    );
+    assert.equal(connection.deleted, true);
+    assert.equal(connection.closed, true);
+  } finally {
+    Object.defineProperty(Object, "hasOwn", hasOwnDescriptor);
+    if (inheritedServiceTier === undefined) {
+      delete (Object.prototype as { serviceTier?: unknown }).serviceTier;
+    } else {
+      Object.defineProperty(Object.prototype, "serviceTier", inheritedServiceTier);
+    }
+  }
+});
+
+test("protocol normalization and equality ignore replaced JSON and collection globals", async () => {
+  const stringifyDescriptor = Object.getOwnPropertyDescriptor(JSON, "stringify");
+  const freezeDescriptor = Object.getOwnPropertyDescriptor(Object, "freeze");
+  const mapDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "map");
+  const sortDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "sort");
+  assert.ok(stringifyDescriptor?.value);
+  assert.ok(freezeDescriptor?.value);
+  assert.ok(mapDescriptor?.value);
+  assert.ok(sortDescriptor?.value);
+  const originalStringify = stringifyDescriptor.value as typeof JSON.stringify;
+  let injectedStringifyCalls = 0;
+  let freezeCalls = 0;
+  let mapCalls = 0;
+  let sortCalls = 0;
+  let success: Awaited<ReturnType<typeof runCodexAppServerProtocol>> | undefined;
+  let mismatchRejected = false;
+
+  try {
+    Object.defineProperty(JSON, "stringify", {
+      configurable: true,
+      value(value: unknown, ...arguments_: unknown[]) {
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          (value as { method?: unknown }).method === "thread/start"
+        ) {
+          injectedStringifyCalls += 1;
+          return '{"baseInstructions":"synthetic injected"}';
+        }
+        return Reflect.apply(originalStringify, JSON, [value, ...arguments_]);
+      },
+      writable: true,
+    });
+    Object.defineProperty(Object, "freeze", {
+      configurable: true,
+      value(value: unknown) {
+        freezeCalls += 1;
+        return value;
+      },
+      writable: true,
+    });
+    Object.defineProperty(Array.prototype, "map", {
+      configurable: true,
+      value() {
+        mapCalls += 1;
+        return [];
+      },
+      writable: true,
+    });
+    Object.defineProperty(Array.prototype, "sort", {
+      configurable: true,
+      value() {
+        sortCalls += 1;
+        return this;
+      },
+      writable: true,
+    });
+
+    success = await runCodexAppServerProtocol(
+      new SyntheticConnection("success"),
+      request(),
+    );
+    try {
+      await runCodexAppServerProtocol(
+        new SyntheticConnection("thread-snapshot-mismatch"),
+        request(),
+      );
+    } catch {
+      mismatchRejected = true;
+    }
+  } finally {
+    Object.defineProperty(JSON, "stringify", stringifyDescriptor);
+    Object.defineProperty(Object, "freeze", freezeDescriptor);
+    Object.defineProperty(Array.prototype, "map", mapDescriptor);
+    Object.defineProperty(Array.prototype, "sort", sortDescriptor);
+  }
+
+  assert.deepEqual(success?.document, syntheticDocument());
+  assert.equal(mismatchRejected, true);
+  assert.equal(injectedStringifyCalls, 0);
+  assert.equal(freezeCalls, 0);
+  assert.equal(mapCalls, 0);
+  assert.equal(sortCalls, 0);
+});
+
 test("waits for a delayed interrupt send before closing input", async () => {
   const connection = new DelayedInterruptConnection();
   const controller = new AbortController();
@@ -559,7 +810,11 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
         method: "thread/status/changed",
         params: {
           threadId: "synthetic-thread",
-          status: { type: "active", activeFlags: [] },
+          status: {
+            type: "active",
+            activeFlags:
+              this.mode === "unknown-active-flag" ? ["syntheticUnknownFlag"] : [],
+          },
         },
       };
       if (this.mode === "turn-started-before-status") {
