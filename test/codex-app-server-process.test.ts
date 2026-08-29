@@ -310,6 +310,65 @@ test("rejects an internal abort requested by the synchronous finalizer", async (
   });
 });
 
+test("does not re-iterate the allowlisted environment after the synchronous finalizer", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const reads = readCounter();
+    const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      Symbol.iterator,
+    );
+    assert.ok(iteratorDescriptor?.value);
+    let targetIteratorCalls = 0;
+
+    try {
+      await runCodexAppServerProcess(
+        { ...options, envAllowlist: ["SVBENCH_ALLOWED_CANARY"] },
+        request(reads),
+        undefined,
+        async () => ({
+          allowedEnvironment: [
+            ["SVBENCH_ALLOWED_CANARY", "synthetic-explicit-canary"],
+          ],
+          finalize() {
+            Object.defineProperty(Array.prototype, Symbol.iterator, {
+              configurable: true,
+              writable: true,
+              value: function* (this: unknown[]): Generator<unknown> {
+                const first = this[0];
+                if (
+                  this.length === 1 &&
+                  Array.isArray(first) &&
+                  first[0] === "SVBENCH_ALLOWED_CANARY" &&
+                  first[1] === "synthetic-explicit-canary"
+                ) {
+                  targetIteratorCalls += 1;
+                  yield ["SVBENCH_PARENT_CANARY", "synthetic-injected-canary"];
+                  return;
+                }
+                for (let index = 0; index < this.length; index += 1) {
+                  yield this[index];
+                }
+              },
+            });
+            return undefined;
+          },
+        }),
+      );
+    } finally {
+      Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+    }
+
+    assert.equal(targetIteratorCalls, 0);
+    assert.deepEqual(reads, { image: 1, schema: 1, system: 1, instruction: 1 });
+    const boundary = (await readCapture(capture)).find(
+      (record) => record.phase === "app-server",
+    );
+    assert.ok(boundary);
+    assert.equal(boundary.allowedCanary, "synthetic-explicit-canary");
+    assert.equal(boundary.parentCanary, null);
+  });
+});
+
 test("does not read provider inputs before request and in-process isolation proof", async () => {
   for (const scenario of [
     { mode: "success", mutate: (value: CodexAppServerProcessRequest) => ({

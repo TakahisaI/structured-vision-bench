@@ -594,13 +594,20 @@ async function runConnectedProcess(
   try {
     const arguments_ = appServerArguments(options, workspace);
     assertActive(parentSignal);
-    let allowedEnvironment: readonly (readonly [string, string])[];
+    let environment: NodeJS.ProcessEnv;
     if (startGuard === undefined) {
-      allowedEnvironment = snapshotAllowedEnvironment(options.envAllowlist);
+      environment = snapshotSpawnEnvironment(
+        snapshotAllowedEnvironment(options.envAllowlist),
+        workspace.environment,
+      );
     } else {
       const authorization = snapshotStartAuthorization(
         await startGuard(guardController!.signal),
         options.envAllowlist,
+      );
+      environment = snapshotSpawnEnvironment(
+        authorization.allowedEnvironment,
+        workspace.environment,
       );
       const finalizerResult: unknown = authorization.finalize();
       if (finalizerResult !== undefined) {
@@ -608,12 +615,7 @@ async function runConnectedProcess(
         throw new Error();
       }
       if (abortRequested) throw new Error();
-      allowedEnvironment = authorization.allowedEnvironment;
     }
-    const environment = snapshotSpawnEnvironment(
-      allowedEnvironment,
-      workspace.environment,
-    );
     child = spawn(options.executable, arguments_, {
       cwd: workspace.workspace,
       detached: process.platform !== "win32",
