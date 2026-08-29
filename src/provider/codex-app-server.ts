@@ -12,6 +12,10 @@ import {
   isAbortSignalAborted,
   removeAbortSignalListener,
 } from "./abort-signal-intrinsics.js";
+import {
+  createIntrinsicPromise,
+  raceIntrinsicPromises,
+} from "./promise-intrinsics.js";
 import type { ProviderUsage, RequestedExecutionSettings } from "../runner/types.js";
 
 export const CODEX_APP_SERVER_CLI_VERSION = "0.149.1";
@@ -1130,14 +1134,13 @@ async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined
   if (signal === undefined) return promise;
   assertActive(signal);
   let rejectAbort!: (error: Error) => void;
-  const aborted = new Promise<never>((_resolve, reject) => {
+  const aborted = createIntrinsicPromise<never>((_resolve, reject) => {
     rejectAbort = reject;
   });
   const abort = (): void => rejectAbort(new Error());
   addAbortSignalListener(signal, abort);
-  void promise.catch(() => undefined);
   try {
-    return await Promise.race([promise, aborted]);
+    return await raceIntrinsicPromises(promise, aborted);
   } finally {
     removeAbortSignalListener(signal, abort);
   }

@@ -397,6 +397,65 @@ test("sends one best-effort interrupt and closes input when aborted", async () =
   );
 });
 
+test(
+  "keeps protocol cancellation independent of a replaced Array iterator",
+  { timeout: 5_000 },
+  async () => {
+    const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      Symbol.iterator,
+    );
+    assert.ok(iteratorDescriptor?.value);
+    const connection = new SyntheticConnection("timeout");
+    const controller = new AbortController();
+    const unhandledRejections: unknown[] = [];
+    const recordUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections[unhandledRejections.length] = reason;
+    };
+    process.on("unhandledRejection", recordUnhandledRejection);
+
+    try {
+      Object.defineProperty(Array.prototype, Symbol.iterator, {
+        configurable: true,
+        writable: true,
+        value: function* (this: unknown[]): Generator<unknown> {
+          if (
+            this.length === 2 &&
+            this[0] instanceof Promise &&
+            this[1] instanceof Promise
+          ) {
+            yield this[0];
+            return;
+          }
+          for (let index = 0; index < this.length; index += 1) {
+            yield this[index];
+          }
+        },
+      });
+      const running = runCodexAppServerProtocol(
+        connection,
+        request(),
+        controller.signal,
+      );
+      await connection.turnAccepted;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      controller.abort();
+      await assert.rejects(running, /codex app-server protocol failed/u);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+      process.off("unhandledRejection", recordUnhandledRejection);
+    }
+
+    assert.deepEqual(unhandledRejections, []);
+    assert.equal(connection.closed, true);
+    assert.equal(
+      connection.sent.filter((message) => message.method === "turn/interrupt").length,
+      1,
+    );
+  },
+);
+
 test("waits for a delayed interrupt send before closing input", async () => {
   const connection = new DelayedInterruptConnection();
   const controller = new AbortController();

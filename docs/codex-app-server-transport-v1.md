@@ -158,7 +158,10 @@ its private primitive abort state before spawning; the immutable child environme
 constructed from the authorization and private workspace before the finalizer runs. The client does
 not read consumer-reachable signal properties after the finalizer. The guard receives a dedicated relay signal,
 while timeout, cancellation, protocol, and input-read settlement retain a separate internal signal
-that consumer code never receives.
+that consumer code never receives. Promise construction and settlement on those internal paths use
+module-load-captured native Promise construction and `then`; they do not depend on the mutable global
+`Promise`, mutable Promise prototype methods, or iterable-based `Promise.race()` and `Promise.all()`
+after consumer code has run.
 
 Only the four extraction callbacks and requested model/effort/null max-tokens setting cross from
 the Provider into the process client. Approval, case and bundle identities, provenance, sanitizer

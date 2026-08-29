@@ -35,6 +35,13 @@ import {
   type CodexAppServerProtocolReceivedMessage,
   type CodexAppServerProtocolResult,
 } from "./codex-app-server.js";
+import {
+  createIntrinsicPromise,
+  ignoreIntrinsicPromiseRejection,
+  raceIntrinsicPromises,
+  resolveIntrinsicPromise,
+  thenIntrinsicPromise,
+} from "./promise-intrinsics.js";
 import type { RequestedExecutionSettings } from "../runner/types.js";
 
 export const CODEX_APP_SERVER_TOOL_PROFILE_VERSION = "codex-no-host-tools-v1";
@@ -388,14 +395,9 @@ async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
       temporary: path.join(root, "tmp"),
     };
     const directoryValues = objectValuesIntrinsic(directories);
-    const directoryCreations: Array<Promise<void>> = [];
     for (let index = 0; index < directoryValues.length; index += 1) {
-      directoryCreations[directoryCreations.length] = mkdir(
-        directoryValues[index]!,
-        { mode: DIRECTORY_MODE },
-      );
+      await mkdir(directoryValues[index]!, { mode: DIRECTORY_MODE });
     }
-    await Promise.all(directoryCreations);
     const environment = objectCreateIntrinsic(null) as NodeJS.ProcessEnv;
     environment.HOME = directories.home;
     environment.USERPROFILE = directories.home;
@@ -457,11 +459,11 @@ function invokeLazyInput(
   signal: AbortSignal,
 ): Promise<Uint8Array> {
   assertActive(signal);
-  const pending = Promise.resolve().then(() => {
+  const pending = thenIntrinsicPromise(resolveIntrinsicPromise(undefined), () => {
     assertActive(signal);
     return reader();
   });
-  return new Promise((resolve, reject) => {
+  return createIntrinsicPromise((resolve, reject) => {
     let settled = false;
     const removeAbortListener = (): void => removeAbortSignalListener(signal, abort);
     const abort = (): void => {
@@ -471,7 +473,8 @@ function invokeLazyInput(
       reject(new Error());
     };
     addAbortSignalListener(signal, abort);
-    void pending.then(
+    void thenIntrinsicPromise(
+      pending,
       (value) => {
         if (settled) {
           try {
@@ -639,7 +642,7 @@ async function runConnectedProcess(
   let close: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
   let termination: Promise<void> | undefined;
   const terminate = (): Promise<void> => {
-    if (child === undefined) return Promise.resolve();
+    if (child === undefined) return resolveIntrinsicPromise(undefined);
     if (termination === undefined) {
       termination = terminateProcessTree(child);
       destroyChildStreams(child);
@@ -666,7 +669,7 @@ async function runConnectedProcess(
       );
       const finalizerResult: unknown = authorization.finalize();
       if (finalizerResult !== undefined) {
-        void Promise.resolve(finalizerResult).catch(() => undefined);
+        ignoreIntrinsicPromiseRejection(finalizerResult);
         throw new Error();
       }
       if (abortRequested) throw new Error();
@@ -785,7 +788,7 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
         this.fail();
         throw new Error();
       }
-      await new Promise<void>((resolve, reject) => {
+      await createIntrinsicPromise<void>((resolve, reject) => {
         this.child.stdin.write(bytes, (error) => {
           if (error === null || error === undefined) resolve();
           else reject(error);
@@ -884,7 +887,7 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
 function waitForClose(
   child: ChildProcessWithoutNullStreams,
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
-  return new Promise((resolve) => {
+  return createIntrinsicPromise((resolve) => {
     child.once("close", (code, childSignal) => resolve({ code, signal: childSignal }));
   });
 }
@@ -970,7 +973,7 @@ async function waitForProcessGroupSettlement(processGroupId: number): Promise<vo
   const deadline = Date.now() + PROCESS_GROUP_SETTLE_TIMEOUT_MS;
   while (await processGroupHasLiveMember(processGroupId)) {
     if (Date.now() >= deadline) throw new Error();
-    await new Promise<void>((resolve) => {
+    await createIntrinsicPromise<void>((resolve) => {
       setTimeout(resolve, PROCESS_GROUP_SETTLE_INTERVAL_MS);
     });
   }
@@ -1060,12 +1063,12 @@ async function waitForInterruptGrace(
   if (close === undefined) return;
   let timer: NodeJS.Timeout | undefined;
   try {
-    await Promise.race([
+    await raceIntrinsicPromises(
       close,
-      new Promise<void>((resolve) => {
+      createIntrinsicPromise<void>((resolve) => {
         timer = setTimeout(resolve, 50);
       }),
-    ]);
+    );
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -1088,12 +1091,12 @@ function assertActive(signal: AbortSignal | undefined): void {
 async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (isAbortSignalAborted(signal)) throw new Error();
   let rejectAbort!: () => void;
-  const aborted = new Promise<never>((_resolve, reject) => {
+  const aborted = createIntrinsicPromise<never>((_resolve, reject) => {
     rejectAbort = () => reject(new Error());
   });
   addAbortSignalListener(signal, rejectAbort);
   try {
-    return await Promise.race([promise, aborted]);
+    return await raceIntrinsicPromises(promise, aborted);
   } finally {
     removeAbortSignalListener(signal, rejectAbort);
   }

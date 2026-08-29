@@ -369,6 +369,82 @@ test("does not re-iterate the allowlisted environment after the synchronous fina
   });
 });
 
+test(
+  "keeps cancellation and cleanup independent of a replaced Array iterator",
+  { timeout: 5_000 },
+  async () => {
+    await withFixture("isolation-hang-descendant", async ({ options, capture }) => {
+      const reads = readCounter();
+      const controller = new AbortController();
+      const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+        Array.prototype,
+        Symbol.iterator,
+      );
+      assert.ok(iteratorDescriptor?.value);
+      const unhandledRejections: unknown[] = [];
+      const recordUnhandledRejection = (reason: unknown): void => {
+        unhandledRejections[unhandledRejections.length] = reason;
+      };
+      process.on("unhandledRejection", recordUnhandledRejection);
+
+      let records: JsonObject[] = [];
+      try {
+        const running = runCodexAppServerProcess(
+          { ...options, timeoutMs: 10_000 },
+          request(reads),
+          controller.signal,
+          async () => ({
+            allowedEnvironment: [],
+            finalize() {
+              Object.defineProperty(Array.prototype, Symbol.iterator, {
+                configurable: true,
+                writable: true,
+                value: function* (this: unknown[]): Generator<unknown> {
+                  if (
+                    this.length === 2 &&
+                    this[0] instanceof Promise &&
+                    this[1] instanceof Promise
+                  ) {
+                    yield this[0];
+                    return;
+                  }
+                  for (let index = 0; index < this.length; index += 1) {
+                    yield this[index];
+                  }
+                },
+              });
+              return undefined;
+            },
+          }),
+        );
+        records = await waitForCapture(
+          capture,
+          (values) =>
+            values.some((value) => value.phase === "app-server") &&
+            values.some((value) => value.isolationDescendantPid !== undefined),
+        );
+        controller.abort();
+        await assert.rejects(running, stableProcessError);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } finally {
+        Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+        process.off("unhandledRejection", recordUnhandledRejection);
+      }
+
+      assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
+      assert.deepEqual(unhandledRejections, []);
+      const boundary = records.find((record) => record.phase === "app-server");
+      const descendant = records.find(
+        (record) => record.isolationDescendantPid !== undefined,
+      );
+      assert.ok(boundary);
+      assert.ok(descendant);
+      await assertMissing(String(boundary.root));
+      await assertProcessStopped(Number(descendant.isolationDescendantPid));
+    });
+  },
+);
+
 test("does not re-read the host platform after the synchronous finalizer", async () => {
   await withFixture("success-descendant", async ({ options, capture }) => {
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
