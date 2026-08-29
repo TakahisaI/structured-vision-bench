@@ -1,0 +1,8 @@
+{
+  "image": "image.svg",
+  "schema": "schema.json",
+  "system": "system.txt",
+  "instruction": "instruction.txt",
+  "truth": "truth.json",
+  "mockOutput": "mock-output.json"
+}

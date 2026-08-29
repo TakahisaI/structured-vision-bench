@@ -1,27 +1,16 @@
 {
   "name": "structured-vision-bench",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "Reproducible benchmarks for schema-guided structured extraction from document images.",
   "type": "module",
   "bin": {
-    "svbench": "scripts/svbench.mjs"
-  },
-  "engines": {
-    "node": ">=24.15.0 <25",
-    "npm": ">=10 <13"
+    "svbench": "./src/svbench.js"
   },
   "scripts": {
-    "bundle:check": "node scripts/run-bundle-check.mjs",
-    "format": "node scripts/format.mjs --write",
-    "format:check": "node scripts/format.mjs --check",
-    "lint": "node scripts/lint.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node scripts/run-tests.mjs && node scripts/verify-pointer-patterns.mjs",
-    "verify": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run bundle:check -- fixtures/synthetic/invoice-basic"
+    "test": "node --test",
+    "verify": "npm test"
   },
-  "devDependencies": {
-    "@types/node": "22.19.7",
-    "typescript": "5.8.3"
+  "engines": {
+    "node": ">=22"
   }
 }

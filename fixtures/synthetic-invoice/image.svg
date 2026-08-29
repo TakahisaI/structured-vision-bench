@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="240" role="img" aria-label="Synthetic invoice">
+  <rect width="640" height="240" fill="white"/>
+  <text x="30" y="50" font-size="24">SYNTHETIC INVOICE</text>
+  <text x="30" y="95" font-size="18">Invoice: SYNTH-001</text>
+  <text x="30" y="135" font-size="18">Synthetic item × 2</text>
+  <text x="30" y="180" font-size="18">Total: 42.50</text>
+</svg>
