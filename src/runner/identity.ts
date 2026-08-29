@@ -4,6 +4,10 @@ import {
   isSanitizerFindingPath,
   snapshotSanitizerFindingPathPatterns,
 } from "./sanitizer-finding-path.js";
+import {
+  snapshotSuiteAttemptContext,
+  type SuiteAttemptContext,
+} from "../suite/context.js";
 
 export const CASE_INPUT_IDENTITY_VERSION = 1 as const;
 export const ATTEMPT_IDENTITY_VERSION = 1 as const;
@@ -135,6 +139,7 @@ export type RunIdentityInput = {
   requirementVerifierVersion?: string | null;
   consumerSourceCommit?: string | null;
   requirementDecisionDigest?: string | null;
+  suiteContext?: SuiteAttemptContext;
 };
 
 /**
@@ -293,6 +298,7 @@ export function createSanitizerRequirementDecision(
  * contents or provider output.
  */
 export function computeRunIdentity(input: RunIdentityInput): string {
+  const suiteParts = suiteRunIdentityParts(input.suiteContext);
   return sha256([
     Buffer.from("svbench-run-v1", "ascii"),
     lengthPrefixedAscii(input.caseInputIdentityDigest),
@@ -325,7 +331,22 @@ export function computeRunIdentity(input: RunIdentityInput): string {
     optionalUtf8(input.requirementVerifierVersion),
     optionalUtf8(input.consumerSourceCommit),
     optionalAscii(input.requirementDecisionDigest),
+    ...suiteParts,
   ]);
+}
+
+function suiteRunIdentityParts(value: SuiteAttemptContext | undefined): Buffer[] {
+  if (value === undefined) return [];
+  const suite = snapshotSuiteAttemptContext(value);
+  return [
+    Buffer.from("svbench-suite-run-context-v1", "ascii"),
+    lengthPrefixedUtf8(String(suite.suiteVersion)),
+    lengthPrefixedUtf8(suite.suiteId),
+    lengthPrefixedAscii(suite.suiteDigest),
+    lengthPrefixedAscii(suite.suitePlanDigest),
+    lengthPrefixedAscii(suite.casePolicyMapDigest),
+    lengthPrefixedUtf8(String(suite.caseIndex)),
+  ];
 }
 
 function snapshotArtifactIdentityInput(input: ArtifactIdentityInput): ArtifactIdentityInput {

@@ -108,8 +108,13 @@ The v1 deterministic attempt key for zero-based indices is:
 c<caseIndex-base36>-r<repeatIndex-base36>
 ```
 
-The schema and reader jointly cap a plan at 10,000 slots. Attempt IDs, run IDs, formal attempt suite
-context, and ledger ownership are defined by later Issues.
+The schema and reader jointly cap a plan at 10,000 slots. `createSuiteAttemptContext()` projects a
+preflighted slot into the bounded formal-attempt context: suite version/ID, exact suite digest,
+suite-plan digest, case-policy-map digest, and zero-based case/repeat indices. The runner commits all
+of those values except repeat index into `runId`; repeat index enters the deterministic attempt key
+and therefore `attemptId`. Repeats of one case consequently share a run identity while retaining
+distinct attempt identities. Direct single-run attempts omit the suite block and preserve their
+existing identity bytes. Ledger ownership remains defined by later Issues.
 
 ## Public-data and CI boundary
 

@@ -195,6 +195,22 @@ Changing a requested execution or security setting produces a different run ID w
 The current development contract requires `run.phase`; attempts created before this Phase A field
 was introduced are intentionally incompatible with the current reader.
 
+For a preflighted suite slot, the runner appends the raw ASCII domain
+`svbench-suite-run-context-v1` and this exact tuple to the existing run tuple:
+
+```text
+LP_UTF8(decimal(suiteVersion))
+LP_UTF8(suiteId)
+LP_ASCII(suiteDigest)
+LP_ASCII(suitePlanDigest)
+LP_ASCII(casePolicyMapDigest)
+LP_UTF8(decimal(caseIndex))
+```
+
+The zero-based repeat index is deliberately excluded, so repeats of the same immutable case share
+one `runId`. Direct single-run callers append no suite bytes at all; their existing `runId` remains
+unchanged.
+
 ### Attempt instance identity
 
 `runId` identifies stable execution settings; it is not a uniqueness nonce. A caller selects one
@@ -214,6 +230,12 @@ behavior for callers that do not select a key. The same run with different keys 
 same run and key derives the same destination and is rejected as `attempt_exists` before provider
 invocation. `attemptKey`, `attemptId`, and `runId` are runner metadata and are not added to provider,
 approval, or sanitizer requests.
+
+Suite callers derive `attemptKey` as `c<caseIndex-base36>-r<repeatIndex-base36>`. The runner and
+reader require this exact key and record an optional `suite` block containing suite version/ID,
+exact suite digest, suite-plan digest, case-policy-map digest, case index, and repeat index. The
+reader recomputes the plan digest, run identity, attempt identity, and both digest-named directory
+anchors. A direct single-run omits `suite`; null, empty, and dummy suite identities are invalid.
 
 ### Post-sanitization artifact identity
 
@@ -284,6 +306,7 @@ A finalized attempt contains only:
 It records:
 
 - attempt identity, attempt/run/bundle versions, the caller key, and separate attempt/run IDs;
+- for a suite slot only, its verified suite/plan/map digests and zero-based case/repeat indices;
 - case ID, document kind, bundle manifest digest, and the four provider-input digests/media types;
 - the complete case input identity;
 - the consumer-owned sanitizer requirement decision and its decision digest;

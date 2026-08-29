@@ -49,6 +49,9 @@
     "runId": {
       "$ref": "#/$defs/digest"
     },
+    "suite": {
+      "$ref": "#/$defs/suiteContext"
+    },
     "bundleVersion": {
       "const": 1
     },
@@ -406,6 +409,47 @@
         },
         "requirementDecisionDigest": {
           "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "suiteContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "suiteVersion",
+        "suiteId",
+        "suiteDigest",
+        "suitePlanDigest",
+        "casePolicyMapDigest",
+        "caseIndex",
+        "repeatIndex"
+      ],
+      "properties": {
+        "suiteVersion": {
+          "const": 1
+        },
+        "suiteId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "suiteDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "suitePlanDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "casePolicyMapDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "caseIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        },
+        "repeatIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
         }
       }
     },

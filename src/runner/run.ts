@@ -78,6 +78,11 @@ import {
   parseJson,
   type JsonValue,
 } from "../bundle/json.js";
+import {
+  deriveSuiteAttemptKey,
+  snapshotSuiteAttemptContext,
+  type SuiteAttemptContext,
+} from "../suite/context.js";
 
 export const DEFAULT_HARNESS_VERSION = "structured-vision-bench-runner-v1";
 export const DEFAULT_ATTEMPT_KEY = "single";
@@ -138,7 +143,18 @@ type ValidatedSanitizerImplementation = Readonly<{
 
 export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
   const requested = normalizeRequestedSettings(options);
-  const attemptKey = normalizeAttemptKey(options.attemptKey);
+  const suiteContext = normalizeSuiteContext(options.suiteContext);
+  const selectedAttemptKey =
+    options.attemptKey === undefined && suiteContext !== undefined
+      ? deriveSuiteAttemptKey(suiteContext.caseIndex, suiteContext.repeatIndex)
+      : options.attemptKey;
+  const attemptKey = normalizeAttemptKey(selectedAttemptKey);
+  if (
+    suiteContext !== undefined &&
+    deriveSuiteAttemptKey(suiteContext.caseIndex, suiteContext.repeatIndex) !== attemptKey
+  ) {
+    throw new RunnerError("run_configuration_invalid", "suite attempt context is invalid");
+  }
   const phase = normalizeOptionalSetting(options.phase) ?? DEFAULT_EXECUTION_PHASE;
   const providerTimeoutMs = options.providerTimeoutMs;
   const approvalSettings = snapshotApprovalSettings(options.approval);
@@ -246,6 +262,7 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       requirementVerifierVersion: requirement.requirementVerifierVersion,
       consumerSourceCommit: requirement.consumerSourceCommit,
       requirementDecisionDigest: requirement.requirementDecisionDigest,
+      ...(suiteContext === undefined ? {} : { suiteContext }),
     });
     const attemptIdentity = computeAttemptIdentity({ runId, attemptKey });
 
@@ -317,6 +334,7 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
       attemptKey: attemptIdentity.attemptKey,
       attemptId: attemptIdentity.attemptId,
       runId,
+      ...(suiteContext === undefined ? {} : { suite: suiteContext }),
       bundleVersion: 1,
       caseId: loaded.caseId,
       documentKind: loaded.documentKind,
@@ -412,6 +430,17 @@ export async function runBundle(options: RunBundleOptions): Promise<RunResult> {
     }
   } finally {
     sanitizerSettings?.policyEnvelopeBytes?.fill(0);
+  }
+}
+
+function normalizeSuiteContext(
+  value: SuiteAttemptContext | undefined,
+): SuiteAttemptContext | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return snapshotSuiteAttemptContext(value);
+  } catch {
+    throw new RunnerError("run_configuration_invalid", "suite attempt context is invalid");
   }
 }
 
