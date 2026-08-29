@@ -358,7 +358,6 @@ function parseRunArguments(): RunArguments {
       maxTokens,
       timeoutMs: providerTimeoutMs,
       revalidateTransport: approvalPlan.revalidateTransport,
-      sanitizerRequired: sanitizerPlan.requirement.decision.sanitizerRequired,
     },
   );
   return {
@@ -392,7 +391,6 @@ function parseProvider(input: {
   maxTokens: number | null;
   timeoutMs: number | undefined;
   revalidateTransport: CodexAppServerTransportRevalidator | undefined;
-  sanitizerRequired: boolean;
 }): Provider {
   const hasCommandConfiguration = Object.entries(input).some(
     ([key, value]) => key !== "kind" && value !== undefined,
@@ -411,7 +409,6 @@ function parseProvider(input: {
       run.revalidateTransport === undefined ||
       run.model === null ||
       run.maxTokens !== null ||
-      run.sanitizerRequired ||
       (run.effort !== null && !CODEX_APP_SERVER_EFFORTS.has(run.effort))
     ) {
       throw new Error();

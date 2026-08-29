@@ -6,8 +6,7 @@ This repository-internal transport consists of a single-thread, single-turn prot
 isolated one-shot process client. The protocol core remains independent of process, filesystem,
 credentials, approval, and runner state. A separate public Provider wrapper binds this transport to
 one consumer-owned approval attestation. The combined transport is not a login client, credential
-adapter, autonomous coding agent, or general app-server client. CLI selection is Issue #17, and
-sanitizer-required execution is Issue #18.
+adapter, autonomous coding agent, or general app-server client.
 
 The client uses the documented app-server messages and exactly one ephemeral thread with one turn.
 Protocol-core tests use a deterministic in-memory connection. Process contract tests start only a
@@ -148,10 +147,12 @@ the private workspace and writes the fixed model catalog before invoking that Pr
 guard. After the guard confirms the exact attestation, current generation, signal, and expiry, no
 asynchronous operation occurs before `spawn()`. Allowlisted environment values are also read only
 after the guard succeeds and are synchronously snapshotted for that immediate spawn. Missing,
-denied, expired,
-changed, reused, or sanitizer/policy-required authorization fails before process start and before
-any of the four input callbacks. A later prepare aborts and waits for any in-flight invocation and
-its process/workspace cleanup before it can authorize another invocation.
+denied, expired, changed, or reused authorization fails before process start and before any of the
+four input callbacks. Sanitizer-required authorization must match the exact consumer decision but
+does not send policy or binding data to app-server; the runner applies the target-bound sanitizer
+after the strict document returns and before schema validation or publication. A later prepare
+aborts and waits for any in-flight invocation and its process/workspace cleanup before it can
+authorize another invocation.
 
 Only the four extraction callbacks and requested model/effort/null max-tokens setting cross from
 the Provider into the process client. Approval, case and bundle identities, provenance, sanitizer
@@ -169,11 +170,13 @@ parallel invocation, or fallback.
 ID, route, implementation version, Codex CLI version, isolation protocol, and hosted protocol are
 fixed by the implementation rather than caller options. `--effort` is optional and limited to the
 fixed supported effort labels. The hosted contract has no maximum-token field, so a non-null
-`--max-tokens` is invalid for this Provider. Policy-required CLI runs remain deferred and fail before
-runner execution.
+`--max-tokens` is invalid for this Provider. Policy-required runs use the target-bound command
+sanitizer options from [`docs/sanitizer-v1.md`](sanitizer-v1.md); only its sanitized response is
+eligible for the formal attempt.
 
-Automated CLI coverage uses only the synthetic bundle, deterministic fake approval command, and
-fake app-server. A maintainer manual smoke may use an upstream-supported logged-in process boundary,
+Automated CLI coverage uses only the synthetic bundle, deterministic fake approval and sanitizer
+commands, fictional policy, and fake app-server. A maintainer manual smoke may use an
+upstream-supported logged-in process boundary,
 but only with the checked-in fictional invoice image and a consumer-owned approval command that
 revalidates the exact selected runtime. A representative command shape is:
 

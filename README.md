@@ -8,12 +8,9 @@ teams that must keep real documents, truth data, prompts, provider credentials, 
 adapters outside a public repository.
 
 > **Status:** bundle v1 validation, the deterministic single-case mock runner, the Phase A command
-> provider, comparison reports, single-run approval protocol v1, and the private command sanitizer
-> protocol are available. Codex app-server support, suites/resume, and repeat policy remain tracked
-> in Issues [#3](https://github.com/TakahisaI/structured-vision-bench/issues/3),
-> [#5](https://github.com/TakahisaI/structured-vision-bench/issues/5), and
-> [#17](https://github.com/TakahisaI/structured-vision-bench/issues/17). App-server sanitizer
-> integration remains Issue #18.
+> provider, comparison reports, single-run approval protocol v1, the private command sanitizer,
+> and approval-bound Codex app-server single runs are available. Suites/resume and repeat policy
+> remain tracked in Issue [#5](https://github.com/TakahisaI/structured-vision-bench/issues/5).
 
 ## What belongs here
 
@@ -104,8 +101,8 @@ stdin only. See [`docs/sanitizer-v1.md`](docs/sanitizer-v1.md) for the protocol 
 contract.
 
 The Phase A command provider invokes a consumer-owned adapter from a private five-file request
-directory. It remains limited to policy-not-required single runs; its target-bound sanitizer
-integration is tracked separately in Issue #18.
+directory. It remains limited to policy-not-required single runs. Codex app-server runs may use the
+runner's target-bound sanitizer after extraction and before formal publication.
 Its local manifest and strict response contract are documented in
 [`docs/command-provider-v1.md`](docs/command-provider-v1.md). Local provenance and approval data are
 adapter-only context and must not be forwarded to a hosted model. Approved adapters reattest their

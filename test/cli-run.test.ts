@@ -40,6 +40,8 @@ const FAKE_CODEX_APP_SERVER = path.resolve(
   ".tmp/build/test/support/fake-codex-app-server.js",
 );
 const IMAGE_SHA256 = "dda43d98857bc0977a1bdc67e8005428c3af95ca73cddda69c9e8737eee03cc9";
+const RAW_PROVIDER_MARKER = "SYNTHETIC-RAW-PROVIDER-ONLY";
+const POLICY_MARKER = "SYNTHETIC-POLICY-CHILD-ONLY";
 
 test("fails closed before opening sanitizer policies on Windows", async () => {
   const syntheticPath = "synthetic-policy-path";
@@ -152,6 +154,7 @@ function requiredSanitizerArguments(input: {
   caseInputIdentityDigest: string;
   policyBindingDigest: string;
   sanitizerMode?: string;
+  timeoutMs?: number;
   allowedFailureCodes?: string[];
 }): string[] {
   const verifier = {
@@ -196,6 +199,9 @@ function requiredSanitizerArguments(input: {
     "synthetic_policy_required",
     "--requirement-decision-digest",
     decision.requirementDecisionDigest,
+    ...(input.timeoutMs === undefined
+      ? []
+      : ["--sanitizer-timeout-ms", String(input.timeoutMs)]),
     ...(input.allowedFailureCodes ?? []).flatMap((code) => [
       "--sanitizer-failure-code",
       code,
@@ -422,6 +428,7 @@ test("runs one approval-bound Codex app-server attempt from the public CLI", asy
       stopReason: null,
     });
     assert.equal(attempt.manifest.approval.applied, true);
+    assert.equal(attempt.manifest.sanitizer, undefined);
 
     const records = await readJsonLines(capture);
     const threadStart = records.find((record) => record.threadStart !== undefined);
@@ -447,6 +454,230 @@ test("runs one approval-bound Codex app-server attempt from the public CLI", asy
     assert.equal(typeof turn.outputSchema, "object");
     assert.equal(array(turn.input).length, 2);
   } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("publishes only target-bound sanitizer output from Codex app-server", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-codex-sanitizer-"));
+  const attempts = path.join(temporary, "attempts");
+  const capture = path.join(temporary, "capture.jsonl");
+  const policyPath = path.join(temporary, "synthetic-policy.json");
+  const identity = computeCaseInputIdentity({
+    caseId: "synthetic-invoice-basic",
+    documentKind: "synthetic_invoice",
+    preparedImage: { mediaType: "image/png", sha256: IMAGE_SHA256 },
+  });
+  const policyBytes = createSanitizerPolicyEnvelope({
+    target: identity,
+    policyVersion: 1,
+    policy: {
+      syntheticRule: "replace-invoice-number",
+      syntheticMarker: POLICY_MARKER,
+    },
+  });
+  const policyDigest = createHash("sha256").update(policyBytes).digest("hex");
+  const policyBindingDigest = computePolicyBindingDigest({
+    caseInputIdentityDigest: identity.digest,
+    policyVersion: 1,
+    policyDigest,
+  });
+  try {
+    await writeFile(policyPath, policyBytes, { mode: 0o600 });
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "run",
+        "--bundle",
+        FIXTURE,
+        ...codexAppServerArguments("provider-sanitizer-raw", capture),
+        "--attempt-root",
+        attempts,
+        ...approvalArguments("codex-stable"),
+        ...requiredSanitizerArguments({
+          policyPath,
+          policyDigest,
+          caseInputIdentityDigest: identity.digest,
+          policyBindingDigest,
+          sanitizerMode: "redact-provider-marker",
+        }),
+        "--json",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stdout);
+    assert.equal(result.stderr, "");
+    assert.equal(result.stdout.includes(RAW_PROVIDER_MARKER), false);
+    assert.equal(result.stdout.includes(POLICY_MARKER), false);
+
+    const summary = JSON.parse(result.stdout) as { attemptId: string };
+    const attempt = await readAttempt(path.join(attempts, summary.attemptId));
+    assert.equal(object(attempt.document).invoiceNumber, "INV-SYNTH-SANITIZED");
+    assert.equal(attempt.manifest.sanitizer?.id, "synthetic-command-sanitizer");
+    assert.equal(attempt.manifest.sanitizer?.policyDigest, policyDigest);
+    assert.equal(attempt.manifest.sanitizer?.policyBindingDigest, policyBindingDigest);
+    assert.equal(attempt.manifest.sanitizer?.policyTargetIdentityDigest, identity.digest);
+    assert.equal(attempt.manifest.sanitizer?.findings[0]?.path, "/invoiceNumber");
+    const published = JSON.stringify(attempt);
+    assert.equal(published.includes(RAW_PROVIDER_MARKER), false);
+    assert.equal(published.includes(POLICY_MARKER), false);
+    assert.equal(published.includes(policyPath), false);
+
+    const hostedWire = JSON.stringify(await readJsonLines(capture));
+    for (const prohibited of [
+      "synthetic-command-sanitizer",
+      POLICY_MARKER,
+      policyDigest,
+      policyBindingDigest,
+      identity.digest,
+    ]) {
+      assert.equal(hostedWire.includes(prohibited), false, prohibited);
+    }
+  } finally {
+    policyBytes.fill(0);
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("fails target-bound Codex sanitizer runs before publication on identity and process failures", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-codex-sanitizer-"));
+  const identity = computeCaseInputIdentity({
+    caseId: "synthetic-invoice-basic",
+    documentKind: "synthetic_invoice",
+    preparedImage: { mediaType: "image/png", sha256: IMAGE_SHA256 },
+  });
+  const otherIdentity = computeCaseInputIdentity({
+    caseId: "synthetic-other-case",
+    documentKind: "synthetic_invoice",
+    preparedImage: { mediaType: "image/png", sha256: IMAGE_SHA256 },
+  });
+  const policyBytes = createSanitizerPolicyEnvelope({
+    target: identity,
+    policyVersion: 1,
+    policy: { syntheticRule: "replace-invoice-number", syntheticMarker: POLICY_MARKER },
+  });
+  const swappedPolicyBytes = createSanitizerPolicyEnvelope({
+    target: identity,
+    policyVersion: 1,
+    policy: { syntheticRule: "different-synthetic-policy" },
+  });
+  const otherTargetBytes = createSanitizerPolicyEnvelope({
+    target: otherIdentity,
+    policyVersion: 1,
+    policy: { syntheticRule: "replace-invoice-number" },
+  });
+  const policyDigest = createHash("sha256").update(policyBytes).digest("hex");
+  const policyBindingDigest = computePolicyBindingDigest({
+    caseInputIdentityDigest: identity.digest,
+    policyVersion: 1,
+    policyDigest,
+  });
+  const cases: Array<{
+    name: string;
+    bytes: Buffer;
+    expectedCode: string;
+    providerStarts: boolean;
+    bindingDigest?: string;
+    sanitizerMode?: string;
+    timeoutMs?: number;
+  }> = [
+    {
+      name: "policy-swap",
+      bytes: swappedPolicyBytes,
+      expectedCode: "sanitizer_policy_identity_mismatch",
+      providerStarts: false,
+    },
+    {
+      name: "target-mismatch",
+      bytes: otherTargetBytes,
+      expectedCode: "sanitizer_policy_target_mismatch",
+      providerStarts: false,
+    },
+    {
+      name: "binding-mismatch",
+      bytes: policyBytes,
+      expectedCode: "sanitizer_policy_binding_mismatch",
+      providerStarts: false,
+      bindingDigest: "f".repeat(64),
+    },
+    {
+      name: "response-mismatch",
+      bytes: policyBytes,
+      expectedCode: "sanitizer_failed",
+      providerStarts: true,
+      sanitizerMode: "identity-mismatch",
+    },
+    {
+      name: "raw-error",
+      bytes: policyBytes,
+      expectedCode: "sanitizer_failed",
+      providerStarts: true,
+      sanitizerMode: "provider-raw-error",
+    },
+    {
+      name: "timeout",
+      bytes: policyBytes,
+      expectedCode: "sanitizer_timeout",
+      providerStarts: true,
+      sanitizerMode: "record-spawn-and-hang",
+      timeoutMs: 100,
+    },
+  ];
+  try {
+    for (const entry of cases) {
+      const attempts = path.join(temporary, `attempts-${entry.name}`);
+      const capture = path.join(temporary, `capture-${entry.name}.jsonl`);
+      const policyPath = path.join(temporary, `policy-${entry.name}.json`);
+      await writeFile(policyPath, entry.bytes, { mode: 0o600 });
+      const result = await runCliWithin(
+        [
+          "run",
+          "--bundle",
+          FIXTURE,
+          ...codexAppServerArguments("provider-sanitizer-raw", capture),
+          "--attempt-root",
+          attempts,
+          ...approvalArguments("codex-stable"),
+          ...requiredSanitizerArguments({
+            policyPath,
+            policyDigest,
+            caseInputIdentityDigest: identity.digest,
+            policyBindingDigest: entry.bindingDigest ?? policyBindingDigest,
+            ...(entry.sanitizerMode === undefined
+              ? {}
+              : { sanitizerMode: entry.sanitizerMode }),
+            ...(entry.timeoutMs === undefined ? {} : { timeoutMs: entry.timeoutMs }),
+          }),
+          "--json",
+        ],
+        4_000,
+      );
+      assert.equal(result.status, 1, `${entry.name}: ${result.stdout}`);
+      assert.equal(result.stderr, "");
+      assert.equal(
+        (JSON.parse(result.stdout) as { error: { code: string } }).error.code,
+        entry.expectedCode,
+      );
+      assert.equal(result.stdout.includes(RAW_PROVIDER_MARKER), false);
+      assert.equal(result.stdout.includes(POLICY_MARKER), false);
+      assert.deepEqual(
+        await readdir(attempts).catch((error: unknown) => {
+          if (objectWithCode(error).code === "ENOENT") return [];
+          throw error;
+        }),
+        [],
+      );
+      if (entry.providerStarts) {
+        assert.equal((await readFile(capture, "utf8")).length > 0, true);
+      } else {
+        await assert.rejects(readFile(capture), /ENOENT/u);
+      }
+    }
+  } finally {
+    policyBytes.fill(0);
+    swappedPolicyBytes.fill(0);
+    otherTargetBytes.fill(0);
     await rm(temporary, { recursive: true, force: true });
   }
 });
