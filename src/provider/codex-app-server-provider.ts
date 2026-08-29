@@ -34,9 +34,12 @@ const SAFE_LABEL_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 const MAX_OPTION_STRINGS = 64;
 const MAX_OPTION_STRING_BYTES = 4096;
 const ENVIRONMENT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+const DateIntrinsic = Date;
 const applyIntrinsic = Reflect.apply;
 const arrayIsArrayIntrinsic = Array.isArray;
 const bindIntrinsic = Function.prototype.bind;
+const dateNowIntrinsic = DateIntrinsic.now;
+const dateParseIntrinsic = DateIntrinsic.parse;
 const freezeIntrinsic = Object.freeze;
 const objectHasOwnIntrinsic = Object.hasOwn;
 const objectKeysIntrinsic = Object.keys;
@@ -581,7 +584,8 @@ function assertUsableApproval(approval: ApprovalResponse): void {
     !approval.approved ||
     (expiresAt !== undefined &&
       expiresAt !== null &&
-      Date.parse(expiresAt) <= Date.now())
+      applyIntrinsic(dateParseIntrinsic, DateIntrinsic, [expiresAt]) <=
+        applyIntrinsic(dateNowIntrinsic, DateIntrinsic, []))
   ) {
     throw new Error();
   }

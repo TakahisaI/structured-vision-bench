@@ -154,8 +154,9 @@ decision but does not send policy or binding data to app-server; the runner appl
 sanitizer after the strict document returns and before schema validation or publication. A later
 prepare aborts and waits for any in-flight invocation and its process/workspace cleanup before it can
 authorize another invocation. After the synchronous finalizer returns, the process client checks only
-its private primitive abort state before constructing the environment and spawning; it does not read
-consumer-reachable signal properties in that interval. The guard receives a dedicated relay signal,
+its private primitive abort state before spawning; the immutable child environment has already been
+constructed from the authorization and private workspace before the finalizer runs. The client does
+not read consumer-reachable signal properties after the finalizer. The guard receives a dedicated relay signal,
 while timeout, cancellation, protocol, and input-read settlement retain a separate internal signal
 that consumer code never receives.
 
@@ -291,7 +292,7 @@ that authorization, it synchronously reads the current allowlisted values, then 
 expiry, exact identity, generation, and abort state so time or side effects during the reads cannot
 cross the final boundary. The finalizer must return `undefined` synchronously; any other return is
 rejected before process start and any returned promise is settled without exposing its rejection. The client then
-builds the child environment and calls spawn without another callback or await. The process client
+checks only its private primitive abort state and calls spawn without another callback or await. The process client
 always replaces home, config,
 cache, path, and temporary-directory
 variables with its private paths. It does not locate, read, copy, transform, refresh, or print a

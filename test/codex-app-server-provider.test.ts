@@ -518,6 +518,73 @@ test("rechecks approval expiry after the final runtime read", async () => {
   });
 });
 
+test("shared clock mutation cannot revive an expired approval", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const nowDescriptor = Object.getOwnPropertyDescriptor(Date, "now");
+    const parseDescriptor = Object.getOwnPropertyDescriptor(Date, "parse");
+    assert.ok(nowDescriptor?.value);
+    assert.ok(parseDescriptor?.value);
+    const originalNow = nowDescriptor.value as typeof Date.now;
+    const expiresAt = originalNow() + 250;
+    const approval = {
+      ...syntheticApproval(),
+      expiresAt: new Date(expiresAt).toISOString(),
+    };
+    const direct = directInvocation(approval);
+    let calls = 0;
+    let clockReplaced = false;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual) => {
+        calls += 1;
+        if (calls === 2) {
+          Atomics.wait(
+            new Int32Array(new SharedArrayBuffer(4)),
+            0,
+            0,
+            Math.max(1, expiresAt - originalNow() + 1),
+          );
+          Object.defineProperties(Date, {
+            now: {
+              configurable: true,
+              writable: true,
+              value: () => 0,
+            },
+            parse: {
+              configurable: true,
+              writable: true,
+              value: () => 1,
+            },
+          });
+          clockReplaced = true;
+        }
+        return actual;
+      },
+    });
+
+    try {
+      await provider.prepareTransport!(direct.approval);
+      await assert.rejects(
+        provider.invoke(direct.request, direct.context),
+        stableProviderFailure,
+      );
+    } finally {
+      Object.defineProperty(Date, "now", nowDescriptor);
+      Object.defineProperty(Date, "parse", parseDescriptor);
+    }
+
+    assert.equal(clockReplaced, true);
+    assert.ok(originalNow() >= expiresAt);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.equal(await appServerStarts(capture), 0);
+  });
+});
+
 test("does not read a consumer-owned signal getter after final approval", async () => {
   await withFixture("provider-success", async ({ capture, options }) => {
     const expiresAt = Date.now() + 500;
