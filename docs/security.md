@@ -149,6 +149,16 @@ or oversized output, signals, overflow, abort, and timeout remain generic. Reque
 stderr buffers are zeroed best-effort on every path, and failed runs leave no formal attempt or
 private staging artifact after cleanup.
 
+The pure suite-run manifest boundary accepts only a preflighted plan and emits a value-free
+identity snapshot. It omits case IDs, document kinds, prepared-input fields, bundle and policy
+references, approval and sanitizer commands, raw values, and local paths. The strict reader bounds
+bytes before decoding, rejects duplicate or unknown members and malformed runtime objects, and
+recomputes case-policy, suite-plan, per-case run, per-repeat attempt, and outer suite-run identities.
+An expected suite-run ID can externally anchor the reader against a coordinated whole-manifest
+replacement. Creating or reading this snapshot never starts an external process or publishes a
+filesystem entry; those ownership and atomicity rules belong to the private suite-run directory
+contract.
+
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through
 the last pre-publication validation. Before provider work, the attempt-identity destination is claimed

@@ -27,6 +27,7 @@ import {
   snapshotSuiteAttemptContext,
   type SuiteAttemptContext,
 } from "./context.js";
+import { computeCasePolicyMapIdentityDigest } from "./case-policy-map-identity.js";
 
 const SUITE_FILE_NAME = "suite.json";
 const MAX_SUITE_BYTES = 4 * 1024 * 1024;
@@ -464,10 +465,6 @@ export function computeCasePolicyMapDigest(cases: readonly SuiteCasePlan[]): str
     throw new SuitePreflightError("suite_invalid", "suite case-policy mapping is invalid");
   }
   const safeCases = snapshot as unknown as readonly SuiteCasePlan[];
-  const parts = [
-    Buffer.from("svbench-case-policy-map-v1", "ascii"),
-    lengthPrefixedUtf8(String(safeCases.length)),
-  ];
   for (let index = 0; index < safeCases.length; index += 1) {
     const rawEntry: unknown = safeCases[index];
     try {
@@ -580,33 +577,23 @@ export function computeCasePolicyMapDigest(cases: readonly SuiteCasePlan[]): str
         caseIndex: index,
       });
     }
-    const entry = rawEntry as unknown as SuiteCasePlan;
-    const requirement = entry.sanitizerRequirement;
-    parts.push(
-      lengthPrefixedUtf8(String(entry.caseIndex)),
-      lengthPrefixedAscii(entry.caseInputIdentity.digest),
-      lengthPrefixedUtf8(String(requirement.sanitizerRequirementVersion)),
-      lengthPrefixedUtf8(requirement.sanitizerRequired ? "true" : "false"),
-      lengthPrefixedUtf8(requirement.policyRequired ? "true" : "false"),
-      lengthPrefixedUtf8(requirement.sanitizerRequirementReason),
-      lengthPrefixedUtf8(requirement.requirementVerifierId),
-      lengthPrefixedUtf8(requirement.requirementVerifierVersion),
-      optionalUtf8(requirement.consumerSourceCommit),
-      lengthPrefixedAscii(requirement.requirementDecisionDigest),
-    );
-    if (entry.policy === undefined) {
-      parts.push(lengthPrefixedUtf8("not-required"));
-    } else {
-      parts.push(
-        lengthPrefixedUtf8("required"),
-        lengthPrefixedUtf8(String(entry.policy.policyVersion)),
-        lengthPrefixedAscii(entry.policy.policyDigest),
-        lengthPrefixedAscii(entry.policy.policyTargetIdentityDigest),
-        lengthPrefixedAscii(entry.policy.policyBindingDigest),
-      );
-    }
   }
-  return digestParts(parts);
+  return computeCasePolicyMapIdentityDigest(
+    safeCases.map((entry) => ({
+      caseIndex: entry.caseIndex,
+      caseInputIdentityDigest: entry.caseInputIdentity.digest,
+      sanitizerRequirement: entry.sanitizerRequirement,
+      policy:
+        entry.policy === undefined
+          ? null
+          : {
+              policyVersion: entry.policy.policyVersion,
+              policyDigest: entry.policy.policyDigest,
+              policyTargetIdentityDigest: entry.policy.policyTargetIdentityDigest,
+              policyBindingDigest: entry.policy.policyBindingDigest,
+            },
+    })),
+  );
 }
 
 async function preflightCase(input: {
