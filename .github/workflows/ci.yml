@@ -2,17 +2,35 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  verify:
+    name: verify / Node ${{ matrix.node }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
-      - run: npm test
+          node-version: ${{ matrix.node }}
+
+      - name: Install development dependencies
+        run: npm install --no-package-lock --ignore-scripts --no-audit --no-fund
+
+      - name: Verify public contracts and synthetic fixtures
+        run: npm run verify
