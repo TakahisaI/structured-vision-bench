@@ -64,17 +64,20 @@ immutable schema-validated snapshot. It fixes every case and slot, derives the e
 run IDs and per-repeat attempt IDs, and excludes case IDs, input details, commands, and filesystem
 references. Its reader rederives the case-policy map, suite plan, run, attempt, and outer suite-run
 identities without starting external work. The private publisher self-validates canonical bytes,
-exclusively claims the digest-named directory, and makes `suite-run.json` visible with one
-no-replace hard link. Its strict reader treats only that exact private file set as a formal run. The
-mutable ledger, execution, resume, and report generation remain separate lifecycle components. See
+exclusively claims the digest-named directory, creates and syncs an empty private `slot-ledger/`,
+and makes `suite-run.json` visible with one no-replace hard link. Its strict reader accepts only the
+manifest-plus-ledger layout, strictly reads canonical sequence records, and reduces them to frozen
+slot state. Atomic append, execution, resume, and report generation remain separate lifecycle
+components. See
 [`docs/suite-v1.md`](suite-v1.md), [`docs/suite-run-v1.md`](suite-run-v1.md), and
 [`docs/suite-run-directory-v1.md`](suite-run-directory-v1.md).
 
 The pure suite-slot event contract binds every value-free transition to the immutable suite run and
 slot identities, chains records in one global sequence, and reduces them from implicit `pending`
-state without filesystem access. It preserves interruption and failure history while rejecting
-foreign identities, gaps, replay, illegal transitions, and unapproved failure codes. Filesystem
-ledger initialization, strict directory reads, and no-replace append remain later boundaries. See
+state without filesystem access. The private run-directory boundary now initializes and strictly
+reads that ledger before applying the reducer. It preserves interruption and failure history while
+rejecting foreign identities, gaps, replay, illegal transitions, and unapproved failure codes.
+No-replace append remains a later boundary. See
 [`docs/suite-slot-event-v1.md`](suite-slot-event-v1.md).
 
 ### Approval gate
