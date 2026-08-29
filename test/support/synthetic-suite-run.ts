@@ -1,5 +1,6 @@
 import {
   computeCaseInputIdentity,
+  computePolicyBindingDigest,
   createSanitizerRequirementDecision,
   type SanitizerRequirementVerifier,
 } from "../../src/runner/identity.js";
@@ -78,4 +79,90 @@ export function syntheticSuiteRunManifest(): SuiteRunManifest {
     slots: [{ caseIndex: 0, repeatIndex: 0, attemptKey: deriveSuiteAttemptKey(0, 0) }],
   };
   return createSuiteRunManifest(plan);
+}
+
+export function syntheticSanitizedSuiteRunManifest(failureCode: string): SuiteRunManifest {
+  const verifier: SanitizerRequirementVerifier = {
+    id: "synthetic-verifier",
+    version: "v1",
+    derive: () => ({
+      sanitizerRequired: true,
+      policyRequired: true,
+      sanitizerRequirementReason: "synthetic-required",
+      consumerSourceCommit: "synthetic-commit",
+    }),
+  };
+  const caseInputIdentity = computeCaseInputIdentity({
+    caseId: "synthetic-private-required-case",
+    documentKind: "synthetic-private-kind",
+    preparedImage: { mediaType: "image/png", sha256: DIGEST_A },
+  });
+  const sanitizerRequirement = createSanitizerRequirementDecision(
+    {
+      sanitizerRequired: true,
+      policyRequired: true,
+      sanitizerRequirementReason: "synthetic-required",
+      consumerSourceCommit: "synthetic-commit",
+    },
+    verifier,
+  );
+  const policyDigest = "d".repeat(64);
+  const cases: SuiteCasePlan[] = [
+    {
+      caseIndex: 0,
+      bundlePath: "SYNTHETIC_PRIVATE_REQUIRED_BUNDLE",
+      bundleManifestDigest: DIGEST_B,
+      caseInputIdentity,
+      sanitizerRequirement,
+      policy: {
+        path: "SYNTHETIC_PRIVATE_POLICY",
+        policyVersion: 1,
+        policyDigest,
+        policyTargetIdentityDigest: caseInputIdentity.digest,
+        policyBindingDigest: computePolicyBindingDigest({
+          caseInputIdentityDigest: caseInputIdentity.digest,
+          policyVersion: 1,
+          policyDigest,
+        }),
+      },
+    },
+  ];
+  const casePolicyMapDigest = computeCasePolicyMapDigest(cases);
+  const suiteDigest = "e".repeat(64);
+  return createSuiteRunManifest({
+    suiteVersion: 1,
+    suiteId: "synthetic-required-suite",
+    suiteDigest,
+    suitePlanDigest: computeSuitePlanDigest(suiteDigest, casePolicyMapDigest),
+    casePolicyMapDigest,
+    provider: {
+      id: "synthetic-provider",
+      route: "synthetic-route",
+      implementationVersion: "v1",
+      protocolVersion: "v1",
+      requested: { model: "synthetic-model", effort: null, maxTokens: 256 },
+    },
+    phase: "synthetic-phase",
+    repeat: 1,
+    requirementVerifier: {
+      id: verifier.id,
+      version: verifier.version,
+      consumerSourceCommit: "synthetic-commit",
+    },
+    sanitizer: {
+      command: {
+        executable: "/SYNTHETIC_PRIVATE_SANITIZER",
+        argv: [],
+        envAllowlist: [],
+        timeoutMs: 1_000,
+        outputLimitBytes: 4_096,
+      },
+      expectedSanitizerId: "synthetic-sanitizer",
+      expectedProtocolVersion: 1,
+      allowedFindingPathPatterns: ["/synthetic"],
+      failureCodes: [failureCode],
+    },
+    cases,
+    slots: [{ caseIndex: 0, repeatIndex: 0, attemptKey: deriveSuiteAttemptKey(0, 0) }],
+  });
 }

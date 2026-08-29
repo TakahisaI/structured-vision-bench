@@ -70,6 +70,13 @@ mutable ledger, execution, resume, and report generation remain separate lifecyc
 [`docs/suite-v1.md`](suite-v1.md), [`docs/suite-run-v1.md`](suite-run-v1.md), and
 [`docs/suite-run-directory-v1.md`](suite-run-directory-v1.md).
 
+The pure suite-slot event contract binds every value-free transition to the immutable suite run and
+slot identities, chains records in one global sequence, and reduces them from implicit `pending`
+state without filesystem access. It preserves interruption and failure history while rejecting
+foreign identities, gaps, replay, illegal transitions, and unapproved failure codes. Filesystem
+ledger initialization, strict directory reads, and no-replace append remain later boundaries. See
+[`docs/suite-slot-event-v1.md`](suite-slot-event-v1.md).
+
 ### Approval gate
 
 Approval v1 is a consumer-owned pre-transport decision boundary. After public bundle preflight and
