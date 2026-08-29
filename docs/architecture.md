@@ -63,9 +63,12 @@ After preflight, the pure suite-run manifest builder projects only value-free id
 immutable schema-validated snapshot. It fixes every case and slot, derives the existing per-case
 run IDs and per-repeat attempt IDs, and excludes case IDs, input details, commands, and filesystem
 references. Its reader rederives the case-policy map, suite plan, run, attempt, and outer suite-run
-identities without starting external work. Private run-directory publication, the mutable ledger,
-execution, resume, and report generation remain separate lifecycle components. See
-[`docs/suite-v1.md`](suite-v1.md) and [`docs/suite-run-v1.md`](suite-run-v1.md).
+identities without starting external work. The private publisher self-validates canonical bytes,
+exclusively claims the digest-named directory, and makes `suite-run.json` visible with one
+no-replace hard link. Its strict reader treats only that exact private file set as a formal run. The
+mutable ledger, execution, resume, and report generation remain separate lifecycle components. See
+[`docs/suite-v1.md`](suite-v1.md), [`docs/suite-run-v1.md`](suite-run-v1.md), and
+[`docs/suite-run-directory-v1.md`](suite-run-directory-v1.md).
 
 ### Approval gate
 

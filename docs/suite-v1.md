@@ -3,9 +3,10 @@
 Suite v1 is the immutable input contract for ordered multi-case execution. This revision defines
 the manifest, all-case preflight, case-policy mapping identity, and deterministic slot descriptors.
 The value-free immutable suite-run snapshot is defined in
-[`docs/suite-run-v1.md`](suite-run-v1.md). Neither contract executes approval, provider, or
-sanitizer processes. Private run-directory publication, the mutable slot ledger, attempt execution,
-resume, and reports remain separate Issues under #5.
+[`docs/suite-run-v1.md`](suite-run-v1.md), and its private atomic publication is defined in
+[`docs/suite-run-directory-v1.md`](suite-run-directory-v1.md). None of these contracts executes
+approval, provider, or sanitizer processes. The mutable slot ledger, attempt execution, resume, and
+reports remain separate Issues under #5.
 
 The machine-readable contract is [`schemas/suite-v1.schema.json`](../schemas/suite-v1.schema.json).
 Readers reject unknown members, duplicate JSON members, invalid UTF-8, non-finite numbers, unsafe
