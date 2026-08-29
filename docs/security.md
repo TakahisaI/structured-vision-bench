@@ -170,6 +170,18 @@ Portable Node.js cannot close the final same-UID path-swap window around link, u
 removal; as with attempt publication, an adversarial same-UID process in that syscall window is
 outside the harness threat model.
 
+Suite-slot append keeps staging outside the formal run layout in a random private same-filesystem
+sibling under the suite root. The caller fixes the expected sequence and previous event identity;
+the appender strictly rereads the current head and applies the pure reducer before creating staging
+and again immediately before publication. It writes, bounds, syncs, rereads, and byte-compares one
+canonical mode-0600 pending record. A no-replace hard link to the fixed five-digit ledger name is the
+only visibility point, so concurrent writers have one winner and losers never modify an existing
+record. After the link, the record, ledger, run, and root are verified and synced. Failure before
+that confirmation is reported as uncertain and never triggers destination cleanup. A legitimate
+later suffix does not invalidate the earlier writer's confirmation. Staging cleanup is
+identity-guarded, bounded, non-recursive, and limited to the appender's pending source and empty
+staging directory; replaced or foreign entries are left untouched.
+
 The pure suite-slot event contract records only suite/slot/attempt identities, canonical time,
 status, a preflighted value-free failure code, and derived outcome/event identities. It contains no
 case ID, document or policy value, path, or secret. Runtime builders and readers reject accessors,
