@@ -68,7 +68,8 @@ identities, attempt/run/artifact/case-input identities, exact formal document di
 value-free findings, and the explicit rescore reason.
 
 When the verified attempt belongs to a suite slot, comparison copies its verified suite context
-unchanged into `identity.suite`; it never reconstructs it from an untrusted case or report. Direct
+unchanged into `identity.suite`, including the distinct declared/effective repeat counts; it never
+reconstructs it from an untrusted case or report. Direct
 single-run comparisons omit that property rather than emitting a null or dummy suite identity.
 
 ## Classification and aggregation

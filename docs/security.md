@@ -153,7 +153,9 @@ The pure suite-run manifest boundary accepts only a preflighted plan and emits a
 identity snapshot. It omits case IDs, document kinds, prepared-input fields, bundle and policy
 references, approval and sanitizer commands, raw values, and local paths. The strict reader bounds
 bytes before decoding, rejects duplicate or unknown members and malformed runtime objects, and
-recomputes case-policy, suite-plan, per-case run, per-repeat attempt, and outer suite-run identities.
+recomputes case-policy, suite-plan (including the effective repeat override), per-case run,
+per-repeat attempt, and outer suite-run identities. The immutable manifest keeps declared and
+effective repeat distinct so an override cannot reuse overlapping slot identities.
 The private suite-run publisher canonicalizes and self-validates the snapshot before filesystem
 mutation. It exclusively claims one private digest-named directory, writes and syncs a complete
 manifest in a private same-filesystem sibling staging directory, creates and syncs an empty private

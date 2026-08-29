@@ -345,6 +345,8 @@ function suiteRunIdentityParts(value: SuiteAttemptContext | undefined): Buffer[]
     lengthPrefixedAscii(suite.suiteDigest),
     lengthPrefixedAscii(suite.suitePlanDigest),
     lengthPrefixedAscii(suite.casePolicyMapDigest),
+    lengthPrefixedUtf8(String(suite.declaredRepeat)),
+    lengthPrefixedUtf8(String(suite.effectiveRepeat)),
     lengthPrefixedUtf8(String(suite.caseIndex)),
   ];
 }

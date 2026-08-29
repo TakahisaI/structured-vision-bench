@@ -101,7 +101,11 @@ policy-target identity digest, and policy-binding digest. A not-required tuple e
 after its discriminator; no empty policy fields are synthesized.
 
 `suitePlanDigest` is SHA-256 over the raw ASCII domain `svbench-suite-plan-v1`, followed by the
-length-prefixed `suiteDigest` and length-prefixed `casePolicyMapDigest`. Consequently
+length-prefixed `suiteDigest`, length-prefixed `casePolicyMapDigest`, and length-prefixed decimal
+effective repeat count. The suite manifest's `repeat` remains the declared count. A fresh execution
+may supply a bounded override; the preflight plan and suite-run manifest expose this pair as
+`declaredRepeat` and `effectiveRepeat`, and derive the slot grid only from `effectiveRepeat`.
+Consequently
 provider/request settings, approval or sanitizer configuration, repeat, order, bundle expectations,
 requirement decisions, and policies cannot be changed while retaining the same plan identity.
 
@@ -113,11 +117,13 @@ c<caseIndex-base36>-r<repeatIndex-base36>
 
 The schema and reader jointly cap a plan at 10,000 slots. `createSuiteAttemptContext()` projects a
 preflighted slot into the bounded formal-attempt context: suite version/ID, exact suite digest,
-suite-plan digest, case-policy-map digest, and zero-based case/repeat indices. The runner commits all
-of those values except repeat index into `runId`; repeat index enters the deterministic attempt key
+suite-plan digest, case-policy-map digest, declared/effective repeat, and zero-based case/repeat
+indices. The runner commits all of those values except repeat index into `runId`; repeat index enters the deterministic attempt key
 and therefore `attemptId`. Repeats of one case consequently share a run identity while retaining
-distinct attempt identities. Direct single-run attempts omit the suite block and preserve their
-existing identity bytes. Ledger ownership remains defined by later Issues.
+distinct attempt identities. Two fresh plans whose effective repeat differs have different suite,
+run, and attempt identities even for an overlapping slot, so they cannot collide in one attempt
+root. Direct single-run attempts omit the suite block and preserve their existing identity bytes.
+Ledger ownership remains defined by later Issues.
 
 ## Public-data and CI boundary
 

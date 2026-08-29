@@ -11,7 +11,8 @@
     "suite",
     "provider",
     "phase",
-    "repeat",
+    "declaredRepeat",
+    "effectiveRepeat",
     "requirementVerifier",
     "approval",
     "sanitizer",
@@ -39,7 +40,12 @@
     "phase": {
       "$ref": "#/$defs/safeLabel"
     },
-    "repeat": {
+    "declaredRepeat": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "effectiveRepeat": {
       "type": "integer",
       "minimum": 1,
       "maximum": 1000

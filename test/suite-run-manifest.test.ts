@@ -45,25 +45,25 @@ test("builds deterministic value-free suite run bytes and validates the schema",
 
   assert.deepEqual(second, first);
   assert.deepEqual(secondBytes, firstBytes);
-  assert.equal(first.suiteRunId, "2b16533842fe5a7a56b78c32dd61dac28fc4840646a5c750b5b61e0bf5cba2b7");
+  assert.equal(first.suiteRunId, "213d6611f3951d9d5dabe5a5375e81462fcef14110007a8c89dcfd3002847442");
   assert.deepEqual(
     first.slots.map(({ runId, attemptId }) => ({ runId, attemptId })),
     [
       {
-        runId: "507e4b2d9343d3c8c16d72d05d13f3f74e883dc1562a7b019df4269bbb2d9b9a",
-        attemptId: "b2116be2b819a98426c26aa45263318b8500dddc6dd38f612d81929bb6e672b3",
+        runId: "d5f23f42ef26451f62bf10f0a970f7d819a7a1ca6dd4228d7db2e352d927bde7",
+        attemptId: "15cb3d09019ab5c87266a795f7c3e0c2c99e2e57656e3783379d168477dca0a6",
       },
       {
-        runId: "507e4b2d9343d3c8c16d72d05d13f3f74e883dc1562a7b019df4269bbb2d9b9a",
-        attemptId: "ea21c3a8668ceef3ca26320c9e8d92cf09121b2809d7677b826748b1a4ff8a59",
+        runId: "d5f23f42ef26451f62bf10f0a970f7d819a7a1ca6dd4228d7db2e352d927bde7",
+        attemptId: "7ab77d7564701a4fba11358136654ff99423cd09dd5177c7498cce1c564c46cc",
       },
       {
-        runId: "6f8576ac3249f8936316cf2b010ba3c522aae6417959910d67f2a6adbe69d745",
-        attemptId: "4639844bfd88268d2d9139f9307d059a53bd8e7d91b80396d77ed43e37101910",
+        runId: "49da4fa6576e9c9bdeae616a21e4902954d51afa82327f1b551b1ce864cb8554",
+        attemptId: "f86bef99db39ccdfed4cea55a7bf7d383030eb49d2b5fca945c78d812c6654e0",
       },
       {
-        runId: "6f8576ac3249f8936316cf2b010ba3c522aae6417959910d67f2a6adbe69d745",
-        attemptId: "0f29ee02ea2a2aadc06b07119db04cf1abb0bd006ae75bd3d9356cd38792a97d",
+        runId: "49da4fa6576e9c9bdeae616a21e4902954d51afa82327f1b551b1ce864cb8554",
+        attemptId: "9a110441f8e6d544f320af0b8330e8b036b524cb298075b95d5acbbcbd1d3bbd",
       },
     ],
   );
@@ -133,7 +133,11 @@ test("represents an approval-free policy-free suite without placeholder identiti
   delete plan.sanitizer;
   plan.suiteDigest = "e".repeat(64);
   plan.casePolicyMapDigest = computeCasePolicyMapDigest(plan.cases);
-  plan.suitePlanDigest = computeSuitePlanDigest(plan.suiteDigest, plan.casePolicyMapDigest);
+  plan.suitePlanDigest = computeSuitePlanDigest(
+    plan.suiteDigest,
+    plan.casePolicyMapDigest,
+    plan.effectiveRepeat,
+  );
 
   const manifest = createSuiteRunManifest(plan);
   assert.equal(manifest.approval, null);
@@ -154,6 +158,31 @@ test("fixes case run identities and separates repeat attempt identities", () => 
   assert.equal(manifest.slots[3]!.attemptKey, "c1-r1");
   assert.equal(manifest.cases[0]!.policy, null);
   assert.notEqual(manifest.cases[1]!.policy, null);
+});
+
+test("binds declared and effective repeat into run and attempt identities", () => {
+  const declared = syntheticPlan();
+  const overridden = structuredClone(declared) as Mutable<SuitePreflightPlan>;
+  overridden.effectiveRepeat = 3;
+  overridden.suitePlanDigest = computeSuitePlanDigest(
+    overridden.suiteDigest,
+    overridden.casePolicyMapDigest,
+    overridden.effectiveRepeat,
+  );
+  overridden.slots = overridden.cases.flatMap((_entry, caseIndex) =>
+    Array.from({ length: overridden.effectiveRepeat }, (_unused, repeatIndex) => ({
+      caseIndex,
+      repeatIndex,
+      attemptKey: deriveSuiteAttemptKey(caseIndex, repeatIndex),
+    })),
+  );
+  const first = createSuiteRunManifest(declared);
+  const second = createSuiteRunManifest(overridden);
+  assert.equal(second.declaredRepeat, 2);
+  assert.equal(second.effectiveRepeat, 3);
+  assert.notEqual(second.suiteRunId, first.suiteRunId);
+  assert.notEqual(second.slots[0]!.runId, first.slots[0]!.runId);
+  assert.notEqual(second.slots[0]!.attemptId, first.slots[0]!.attemptId);
 });
 
 test("rejects immutable field, derived slot, and outer identity tampering", () => {
@@ -398,7 +427,7 @@ function syntheticPlan(): SuitePreflightPlan {
     suiteVersion: 1,
     suiteId: "synthetic-suite",
     suiteDigest,
-    suitePlanDigest: computeSuitePlanDigest(suiteDigest, casePolicyMapDigest),
+    suitePlanDigest: computeSuitePlanDigest(suiteDigest, casePolicyMapDigest, repeat),
     casePolicyMapDigest,
     provider: {
       id: "synthetic-provider",
@@ -408,7 +437,8 @@ function syntheticPlan(): SuitePreflightPlan {
       requested: { model: "synthetic-model", effort: "medium", maxTokens: 512 },
     },
     phase: "synthetic-phase",
-    repeat,
+    declaredRepeat: repeat,
+    effectiveRepeat: repeat,
     requirementVerifier: {
       id: verifier.id,
       version: verifier.version,
@@ -489,9 +519,10 @@ function oversizedEscapedProjectionPlan(): SuitePreflightPlan {
   const repeat = 10;
   return {
     ...base,
-    suitePlanDigest: computeSuitePlanDigest(base.suiteDigest, casePolicyMapDigest),
+    suitePlanDigest: computeSuitePlanDigest(base.suiteDigest, casePolicyMapDigest, repeat),
     casePolicyMapDigest,
-    repeat,
+    declaredRepeat: repeat,
+    effectiveRepeat: repeat,
     requirementVerifier: {
       id: verifier.id,
       version: verifier.version,

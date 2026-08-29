@@ -109,7 +109,8 @@ test("preflights a mixed suite and derives an immutable ordered plan", async () 
   await withSuite(async (fixture) => {
     const plan = await preflightFixture(fixture);
     assert.equal(plan.suiteId, "synthetic-suite");
-    assert.equal(plan.repeat, 2);
+    assert.equal(plan.declaredRepeat, 2);
+    assert.equal(plan.effectiveRepeat, 2);
     assert.equal(plan.cases.length, 3);
     assert.equal(plan.slots.length, 6);
     assert.deepEqual(
@@ -142,6 +143,8 @@ test("preflights a mixed suite and derives an immutable ordered plan", async () 
       suiteDigest: plan.suiteDigest,
       suitePlanDigest: plan.suitePlanDigest,
       casePolicyMapDigest: plan.casePolicyMapDigest,
+      declaredRepeat: 2,
+      effectiveRepeat: 2,
       caseIndex: 0,
       repeatIndex: 1,
     });
@@ -239,6 +242,70 @@ test("suite plan identities cover order, repeat, and case-policy mapping", async
     assert.equal(repeated.casePolicyMapDigest, reordered.casePolicyMapDigest);
     assert.notEqual(repeated.suitePlanDigest, reordered.suitePlanDigest);
     assert.equal(repeated.slots.length, 9);
+  });
+});
+
+test("applies a bounded repeat override without changing the declared suite", async () => {
+  await withSuite(async (fixture) => {
+    const declared = await preflightFixture(fixture);
+    const overridden = await preflightSuite(fixture.root, {
+      requirementVerifier: fixture.verifier,
+      repeatOverride: 3,
+    });
+    assert.equal(overridden.declaredRepeat, 2);
+    assert.equal(overridden.effectiveRepeat, 3);
+    assert.equal(overridden.suiteDigest, declared.suiteDigest);
+    assert.notEqual(overridden.suitePlanDigest, declared.suitePlanDigest);
+    assert.equal(overridden.slots.length, 9);
+    assert.deepEqual(overridden.slots.slice(0, 3), [
+      { caseIndex: 0, repeatIndex: 0, attemptKey: "c0-r0" },
+      { caseIndex: 0, repeatIndex: 1, attemptKey: "c0-r1" },
+      { caseIndex: 0, repeatIndex: 2, attemptKey: "c0-r2" },
+    ]);
+    for (const repeatOverride of [0, 1001, 1.5, Number.NaN]) {
+      await assert.rejects(
+        preflightSuite(fixture.root, {
+          requirementVerifier: fixture.verifier,
+          repeatOverride,
+        }),
+        (error: unknown) =>
+          error instanceof SuitePreflightError && error.code === "suite_slot_invalid",
+      );
+    }
+
+    let accessorReads = 0;
+    const accessorOptions = { requirementVerifier: fixture.verifier };
+    Object.defineProperty(accessorOptions, "repeatOverride", {
+      enumerable: true,
+      get: () => {
+        accessorReads += 1;
+        return 3;
+      },
+    });
+    await assert.rejects(
+      preflightSuite(fixture.root, accessorOptions),
+      (error: unknown) =>
+        error instanceof SuitePreflightError && error.code === "suite_slot_invalid",
+    );
+    assert.equal(accessorReads, 0);
+
+    const marker = "synthetic-private-path-marker";
+    const hostileOptions = new Proxy(
+      { requirementVerifier: fixture.verifier },
+      {
+        getOwnPropertyDescriptor: (_target, property) => {
+          if (property === "repeatOverride") throw new Error(marker);
+          return Reflect.getOwnPropertyDescriptor(_target, property);
+        },
+      },
+    );
+    await assert.rejects(
+      preflightSuite(fixture.root, hostileOptions),
+      (error: unknown) =>
+        error instanceof SuitePreflightError &&
+        error.code === "suite_slot_invalid" &&
+        !error.message.includes(marker),
+    );
   });
 });
 
@@ -473,11 +540,11 @@ test("case policy map identity uses the v1 fixed vector", () => {
 
 test("suite plan identity uses the v1 fixed vector", () => {
   assert.equal(
-    computeSuitePlanDigest("a".repeat(64), "b".repeat(64)),
-    "94c0fbc55f3961b2959f4a1e9f2bc18f2b671ede56d5269822312fd37aae3ede",
+    computeSuitePlanDigest("a".repeat(64), "b".repeat(64), 2),
+    "3da70c3600592889fc8cbef187898c7fe218cb15cdfee21893be0c92c126935a",
   );
   assert.throws(
-    () => computeSuitePlanDigest("synthetic-invalid", "b".repeat(64)),
+    () => computeSuitePlanDigest("synthetic-invalid", "b".repeat(64), 2),
     (error: unknown) => error instanceof SuitePreflightError && error.code === "suite_invalid",
   );
 });

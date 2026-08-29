@@ -1310,6 +1310,8 @@ function parseSuiteContext(value: JsonValue | undefined): SuiteAttemptContext | 
     "suiteDigest",
     "suitePlanDigest",
     "casePolicyMapDigest",
+    "declaredRepeat",
+    "effectiveRepeat",
     "caseIndex",
     "repeatIndex",
   ]);

@@ -204,6 +204,8 @@ LP_UTF8(suiteId)
 LP_ASCII(suiteDigest)
 LP_ASCII(suitePlanDigest)
 LP_ASCII(casePolicyMapDigest)
+LP_UTF8(decimal(declaredRepeat))
+LP_UTF8(decimal(effectiveRepeat))
 LP_UTF8(decimal(caseIndex))
 ```
 
@@ -233,7 +235,8 @@ approval, or sanitizer requests.
 
 Suite callers derive `attemptKey` as `c<caseIndex-base36>-r<repeatIndex-base36>`. The runner and
 reader require this exact key and record an optional `suite` block containing suite version/ID,
-exact suite digest, suite-plan digest, case-policy-map digest, case index, and repeat index. The
+exact suite digest, suite-plan digest, case-policy-map digest, declared/effective repeat, case index,
+and repeat index. The
 reader recomputes the plan digest, run identity, attempt identity, and both digest-named directory
 anchors. A direct single-run omits `suite`; null, empty, and dummy suite identities are invalid.
 

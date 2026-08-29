@@ -44,7 +44,7 @@ test("creates deterministic canonical event bytes and validates the schema", asy
   assert.deepEqual(second, event);
   assert.deepEqual(encodeSuiteSlotEvent(second), encodeSuiteSlotEvent(event));
   assert.equal(event.eventId, computeSuiteSlotEventId(event));
-  assert.equal(event.eventId, "b6e2992791930149bcfbfa5e8e9a29a1441160cab5781a994cf99ec83dfc8056");
+  assert.equal(event.eventId, "dfbdc421bed4fffcad0dca1bd09df4b1f9f68fb7e816f99b6087a6c9ccc57373");
   assert.deepEqual(readSuiteSlotEvent(encodeSuiteSlotEvent(event)), event);
   assert.equal(Object.isFrozen(event), true);
   assert.equal(
@@ -55,7 +55,7 @@ test("creates deterministic canonical event bytes and validates the schema", asy
       suiteRunId: event.suiteRunId,
       sequence: 0,
       previousEventId: null,
-      eventId: "b6e2992791930149bcfbfa5e8e9a29a1441160cab5781a994cf99ec83dfc8056",
+      eventId: "dfbdc421bed4fffcad0dca1bd09df4b1f9f68fb7e816f99b6087a6c9ccc57373",
       recordedAt: "2026-01-02T03:04:05.006Z",
       caseIndex: 0,
       repeatIndex: 0,
@@ -166,7 +166,7 @@ test("reduces success and preserves interrupted history across resume", () => {
   );
   assert.equal(
     succeeded.outcomeIdentityDigest,
-    "aae6b3af26587b1554844ff338d3ec9a10e30364858efee242669c4b27afe433",
+    "f7d5c8d04ad86845532c07f1c424d3605c5bf1c6319d7a457d89c59f3dd2088e",
   );
   const outcomeTamper = JSON.parse(
     encodeSuiteSlotEvent(succeeded).toString("utf8"),

@@ -9,6 +9,8 @@ export type SuiteAttemptContext = Readonly<{
   suiteDigest: string;
   suitePlanDigest: string;
   casePolicyMapDigest: string;
+  declaredRepeat: number;
+  effectiveRepeat: number;
   caseIndex: number;
   repeatIndex: number;
 }>;
@@ -34,12 +36,16 @@ export function deriveSuiteAttemptKey(caseIndex: number, repeatIndex: number): s
 export function computeSuitePlanDigest(
   suiteDigest: string,
   casePolicyMapDigest: string,
+  effectiveRepeat: number,
 ): string {
   if (
     typeof suiteDigest !== "string" ||
     typeof casePolicyMapDigest !== "string" ||
     !DIGEST_PATTERN.test(suiteDigest) ||
-    !DIGEST_PATTERN.test(casePolicyMapDigest)
+    !DIGEST_PATTERN.test(casePolicyMapDigest) ||
+    !Number.isSafeInteger(effectiveRepeat) ||
+    effectiveRepeat < 1 ||
+    effectiveRepeat > 1000
   ) {
     throw new Error("suite plan identity is invalid");
   }
@@ -47,6 +53,7 @@ export function computeSuitePlanDigest(
     .update(Buffer.from("svbench-suite-plan-v1", "ascii"))
     .update(lengthPrefixedAscii(suiteDigest))
     .update(lengthPrefixedAscii(casePolicyMapDigest))
+    .update(lengthPrefixedAscii(String(effectiveRepeat)))
     .digest("hex");
 }
 
@@ -60,6 +67,8 @@ export function snapshotSuiteAttemptContext(value: unknown): SuiteAttemptContext
       "suiteDigest",
       "suitePlanDigest",
       "casePolicyMapDigest",
+      "declaredRepeat",
+      "effectiveRepeat",
       "caseIndex",
       "repeatIndex",
     ] as const;
@@ -75,6 +84,8 @@ export function snapshotSuiteAttemptContext(value: unknown): SuiteAttemptContext
     const suiteDigest = ownDataValue(value, "suiteDigest");
     const suitePlanDigest = ownDataValue(value, "suitePlanDigest");
     const casePolicyMapDigest = ownDataValue(value, "casePolicyMapDigest");
+    const declaredRepeat = ownDataValue(value, "declaredRepeat");
+    const effectiveRepeat = ownDataValue(value, "effectiveRepeat");
     const caseIndex = ownDataValue(value, "caseIndex");
     const repeatIndex = ownDataValue(value, "repeatIndex");
     if (
@@ -87,13 +98,24 @@ export function snapshotSuiteAttemptContext(value: unknown): SuiteAttemptContext
       !DIGEST_PATTERN.test(suitePlanDigest) ||
       typeof casePolicyMapDigest !== "string" ||
       !DIGEST_PATTERN.test(casePolicyMapDigest) ||
-      computeSuitePlanDigest(suiteDigest, casePolicyMapDigest) !== suitePlanDigest ||
+      !Number.isSafeInteger(declaredRepeat) ||
+      (declaredRepeat as number) < 1 ||
+      (declaredRepeat as number) > 1000 ||
+      !Number.isSafeInteger(effectiveRepeat) ||
+      (effectiveRepeat as number) < 1 ||
+      (effectiveRepeat as number) > 1000 ||
+      computeSuitePlanDigest(
+        suiteDigest,
+        casePolicyMapDigest,
+        effectiveRepeat as number,
+      ) !== suitePlanDigest ||
       !Number.isSafeInteger(caseIndex) ||
       (caseIndex as number) < 0 ||
       (caseIndex as number) > 999 ||
       !Number.isSafeInteger(repeatIndex) ||
       (repeatIndex as number) < 0 ||
-      (repeatIndex as number) > 999
+      (repeatIndex as number) > 999 ||
+      (repeatIndex as number) >= (effectiveRepeat as number)
     ) {
       throw new Error();
     }
@@ -104,6 +126,8 @@ export function snapshotSuiteAttemptContext(value: unknown): SuiteAttemptContext
       suiteDigest,
       suitePlanDigest,
       casePolicyMapDigest,
+      declaredRepeat: declaredRepeat as number,
+      effectiveRepeat: effectiveRepeat as number,
       caseIndex: caseIndex as number,
       repeatIndex: repeatIndex as number,
     });

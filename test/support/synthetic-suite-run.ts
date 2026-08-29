@@ -59,7 +59,7 @@ export function syntheticSuiteRunManifest(): SuiteRunManifest {
     suiteVersion: 1,
     suiteId: "synthetic-suite",
     suiteDigest,
-    suitePlanDigest: computeSuitePlanDigest(suiteDigest, casePolicyMapDigest),
+    suitePlanDigest: computeSuitePlanDigest(suiteDigest, casePolicyMapDigest, 1),
     casePolicyMapDigest,
     provider: {
       id: "synthetic-provider",
@@ -69,7 +69,8 @@ export function syntheticSuiteRunManifest(): SuiteRunManifest {
       requested: { model: "synthetic-model", effort: null, maxTokens: 256 },
     },
     phase: "synthetic-phase",
-    repeat: 1,
+    declaredRepeat: 1,
+    effectiveRepeat: 1,
     requirementVerifier: {
       id: verifier.id,
       version: verifier.version,
@@ -133,7 +134,7 @@ export function syntheticSanitizedSuiteRunManifest(failureCode: string): SuiteRu
     suiteVersion: 1,
     suiteId: "synthetic-required-suite",
     suiteDigest,
-    suitePlanDigest: computeSuitePlanDigest(suiteDigest, casePolicyMapDigest),
+    suitePlanDigest: computeSuitePlanDigest(suiteDigest, casePolicyMapDigest, 1),
     casePolicyMapDigest,
     provider: {
       id: "synthetic-provider",
@@ -143,7 +144,8 @@ export function syntheticSanitizedSuiteRunManifest(failureCode: string): SuiteRu
       requested: { model: "synthetic-model", effort: null, maxTokens: 256 },
     },
     phase: "synthetic-phase",
-    repeat: 1,
+    declaredRepeat: 1,
+    effectiveRepeat: 1,
     requirementVerifier: {
       id: verifier.id,
       version: verifier.version,

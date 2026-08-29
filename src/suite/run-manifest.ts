@@ -106,7 +106,8 @@ export type SuiteRunManifestIdentity = Readonly<{
     }>;
   }>;
   phase: string;
-  repeat: number;
+  declaredRepeat: number;
+  effectiveRepeat: number;
   requirementVerifier: Readonly<{
     id: string;
     version: string;
@@ -157,7 +158,8 @@ export function createSuiteRunManifest(plan: SuitePreflightPlan): SuiteRunManife
       "casePolicyMapDigest",
       "provider",
       "phase",
-      "repeat",
+      "declaredRepeat",
+      "effectiveRepeat",
       "requirementVerifier",
       ...(source.approval === undefined ? [] : ["approval"]),
       ...(source.sanitizer === undefined ? [] : ["sanitizer"]),
@@ -184,7 +186,8 @@ export function createSuiteRunManifest(plan: SuitePreflightPlan): SuiteRunManife
       },
       provider: source.provider,
       phase: source.phase,
-      repeat: source.repeat,
+      declaredRepeat: source.declaredRepeat,
+      effectiveRepeat: source.effectiveRepeat,
       requirementVerifier: source.requirementVerifier,
       approval: projectApproval(source.approval),
       sanitizer: projectSanitizer(source.sanitizer),
@@ -199,7 +202,8 @@ export function createSuiteRunManifest(plan: SuitePreflightPlan): SuiteRunManife
       suite: identity.suite,
       provider: identity.provider,
       phase: identity.phase,
-      repeat: identity.repeat,
+      declaredRepeat: identity.declaredRepeat,
+      effectiveRepeat: identity.effectiveRepeat,
       requirementVerifier: identity.requirementVerifier,
       approval: identity.approval,
       sanitizer: identity.sanitizer,
@@ -352,7 +356,8 @@ function snapshotManifest(value: unknown, verifyIdentity: boolean): SuiteRunMani
       "suite",
       "provider",
       "phase",
-      "repeat",
+      "declaredRepeat",
+      "effectiveRepeat",
       "requirementVerifier",
       "approval",
       "sanitizer",
@@ -369,7 +374,8 @@ function snapshotManifest(value: unknown, verifyIdentity: boolean): SuiteRunMani
     suite: source.suite,
     provider: source.provider,
     phase: source.phase,
-    repeat: source.repeat,
+    declaredRepeat: source.declaredRepeat,
+    effectiveRepeat: source.effectiveRepeat,
     requirementVerifier: source.requirementVerifier,
     approval: source.approval,
     sanitizer: source.sanitizer,
@@ -390,7 +396,8 @@ function snapshotManifest(value: unknown, verifyIdentity: boolean): SuiteRunMani
     suite: identity.suite,
     provider: identity.provider,
     phase: identity.phase,
-    repeat: identity.repeat,
+    declaredRepeat: identity.declaredRepeat,
+    effectiveRepeat: identity.effectiveRepeat,
     requirementVerifier: identity.requirementVerifier,
     approval: identity.approval,
     sanitizer: identity.sanitizer,
@@ -411,7 +418,8 @@ function snapshotIdentity(
       "suite",
       "provider",
       "phase",
-      "repeat",
+      "declaredRepeat",
+      "effectiveRepeat",
       "requirementVerifier",
       "approval",
       "sanitizer",
@@ -421,11 +429,12 @@ function snapshotIdentity(
     value.suiteRunManifestVersion !== 1 ||
     value.suiteRunIdentityVersion !== 1 ||
     !isSafeLabel(value.phase) ||
-    !isBoundedInteger(value.repeat, 1, MAX_REPEATS)
+    !isBoundedInteger(value.declaredRepeat, 1, MAX_REPEATS) ||
+    !isBoundedInteger(value.effectiveRepeat, 1, MAX_REPEATS)
   ) {
     throw invalidManifest();
   }
-  const suite = snapshotSuite(requiredJson(value, "suite"));
+  const suite = snapshotSuite(requiredJson(value, "suite"), value.effectiveRepeat);
   const provider = snapshotProvider(requiredJson(value, "provider"));
   const verifier = snapshotRequirementVerifier(requiredJson(value, "requirementVerifier"));
   const approval = value.approval === null
@@ -442,11 +451,13 @@ function snapshotIdentity(
   const slots = snapshotSlots(
     requiredJson(value, "slots"),
     cases.length,
-    value.repeat,
+    value.effectiveRepeat,
     {
       suite,
       provider,
       phase: value.phase,
+      declaredRepeat: value.declaredRepeat,
+      effectiveRepeat: value.effectiveRepeat,
       approval,
       sanitizer,
       cases,
@@ -459,7 +470,8 @@ function snapshotIdentity(
     suite,
     provider,
     phase: value.phase,
-    repeat: value.repeat,
+    declaredRepeat: value.declaredRepeat,
+    effectiveRepeat: value.effectiveRepeat,
     requirementVerifier: verifier,
     approval,
     sanitizer,
@@ -468,7 +480,10 @@ function snapshotIdentity(
   });
 }
 
-function snapshotSuite(value: JsonValue): SuiteRunManifestIdentity["suite"] {
+function snapshotSuite(
+  value: JsonValue,
+  effectiveRepeat: number,
+): SuiteRunManifestIdentity["suite"] {
   if (
     !isJsonObject(value) ||
     !hasExactKeys(value, [
@@ -483,7 +498,11 @@ function snapshotSuite(value: JsonValue): SuiteRunManifestIdentity["suite"] {
     !isDigest(value.suiteDigest) ||
     !isDigest(value.suitePlanDigest) ||
     !isDigest(value.casePolicyMapDigest) ||
-    computeSuitePlanDigest(value.suiteDigest, value.casePolicyMapDigest) !==
+    computeSuitePlanDigest(
+      value.suiteDigest,
+      value.casePolicyMapDigest,
+      effectiveRepeat,
+    ) !==
       value.suitePlanDigest
   ) {
     throw invalidManifest();
@@ -777,6 +796,8 @@ function snapshotSlots(
     suite: SuiteRunManifestIdentity["suite"];
     provider: SuiteRunManifestIdentity["provider"];
     phase: string;
+    declaredRepeat: number;
+    effectiveRepeat: number;
     approval: SuiteRunManifestIdentity["approval"];
     sanitizer: SuiteRunManifestIdentity["sanitizer"];
     cases: readonly SuiteRunCaseIdentity[];
@@ -840,6 +861,8 @@ function computeCaseRunId(
     suite: SuiteRunManifestIdentity["suite"];
     provider: SuiteRunManifestIdentity["provider"];
     phase: string;
+    declaredRepeat: number;
+    effectiveRepeat: number;
     approval: SuiteRunManifestIdentity["approval"];
     sanitizer: SuiteRunManifestIdentity["sanitizer"];
   }>,
@@ -896,6 +919,8 @@ function computeCaseRunId(
       suiteDigest: context.suite.suiteDigest,
       suitePlanDigest: context.suite.suitePlanDigest,
       casePolicyMapDigest: context.suite.casePolicyMapDigest,
+      declaredRepeat: context.declaredRepeat,
+      effectiveRepeat: context.effectiveRepeat,
       caseIndex: entry.caseIndex,
       repeatIndex: 0,
     },

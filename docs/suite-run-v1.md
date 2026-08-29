@@ -17,7 +17,8 @@ identities.
 The manifest fixes:
 
 - suite version, ID, exact suite digest, suite-plan digest, and case-policy-map digest;
-- provider route and requested settings, phase, repeat, and requirement-verifier identity;
+- provider route and requested settings, phase, suite-declared repeat, bounded effective repeat,
+  and requirement-verifier identity;
 - approval gate, protocol, snapshot, runtime-binding, scope, and phase identities when configured;
 - sanitizer ID, protocol, finding-path allowlist identity, canonical patterns, and value-free
   failure-code allowlist when required by at least one case;
@@ -40,8 +41,9 @@ binding and the common finding-path allowlist digest.
 
 Each case's `casePolicyMapDigest` is independently recomputed from the identity-only case entries
 using the `svbench-case-policy-map-v1` tuple defined by
-[`docs/suite-v1.md`](suite-v1.md). `suitePlanDigest` is then recomputed from the exact suite digest
-and that mapping digest.
+[`docs/suite-v1.md`](suite-v1.md). `suitePlanDigest` is then recomputed from the exact suite digest,
+that mapping digest, and the effective repeat. The manifest preserves the suite-declared repeat
+separately while deriving its complete slot grid from the effective repeat.
 
 For each case, the reader reconstructs the exact existing `svbench-run-v1` input, including suite
 context. Repeat index is excluded from `runId`; therefore repeats of one case share a run identity.
@@ -60,13 +62,13 @@ order. The identity input therefore does not depend on caller object member orde
 The v1 fixed vector used by the synthetic mixed-suite contract test is:
 
 ```text
-case 0 runId = 507e4b2d9343d3c8c16d72d05d13f3f74e883dc1562a7b019df4269bbb2d9b9a
-case 0 repeat 0 attemptId = b2116be2b819a98426c26aa45263318b8500dddc6dd38f612d81929bb6e672b3
-case 0 repeat 1 attemptId = ea21c3a8668ceef3ca26320c9e8d92cf09121b2809d7677b826748b1a4ff8a59
-case 1 runId = 6f8576ac3249f8936316cf2b010ba3c522aae6417959910d67f2a6adbe69d745
-case 1 repeat 0 attemptId = 4639844bfd88268d2d9139f9307d059a53bd8e7d91b80396d77ed43e37101910
-case 1 repeat 1 attemptId = 0f29ee02ea2a2aadc06b07119db04cf1abb0bd006ae75bd3d9356cd38792a97d
-suiteRunId = 2b16533842fe5a7a56b78c32dd61dac28fc4840646a5c750b5b61e0bf5cba2b7
+case 0 runId = d5f23f42ef26451f62bf10f0a970f7d819a7a1ca6dd4228d7db2e352d927bde7
+case 0 repeat 0 attemptId = 15cb3d09019ab5c87266a795f7c3e0c2c99e2e57656e3783379d168477dca0a6
+case 0 repeat 1 attemptId = 7ab77d7564701a4fba11358136654ff99423cd09dd5177c7498cce1c564c46cc
+case 1 runId = 49da4fa6576e9c9bdeae616a21e4902954d51afa82327f1b551b1ce864cb8554
+case 1 repeat 0 attemptId = f86bef99db39ccdfed4cea55a7bf7d383030eb49d2b5fca945c78d812c6654e0
+case 1 repeat 1 attemptId = 9a110441f8e6d544f320af0b8330e8b036b524cb298075b95d5acbbcbd1d3bbd
+suiteRunId = 213d6611f3951d9d5dabe5a5375e81462fcef14110007a8c89dcfd3002847442
 ```
 
 The encoder emits compact JSON in the same fixed order plus one trailing newline. Equal preflight

@@ -54,8 +54,10 @@ function suiteContext(repeatIndex: number): SuiteAttemptContext {
     suiteVersion: 1,
     suiteId: "synthetic-suite",
     suiteDigest: SUITE_DIGEST,
-    suitePlanDigest: computeSuitePlanDigest(SUITE_DIGEST, CASE_POLICY_MAP_DIGEST),
+    suitePlanDigest: computeSuitePlanDigest(SUITE_DIGEST, CASE_POLICY_MAP_DIGEST, 2),
     casePolicyMapDigest: CASE_POLICY_MAP_DIGEST,
+    declaredRepeat: 2,
+    effectiveRepeat: 2,
     caseIndex: 0,
     repeatIndex,
   });
@@ -72,21 +74,21 @@ test("computes a fixed suite plan and suite-bound run identity", () => {
   };
   assert.equal(
     context.suitePlanDigest,
-    "94c0fbc55f3961b2959f4a1e9f2bc18f2b671ede56d5269822312fd37aae3ede",
+    "3da70c3600592889fc8cbef187898c7fe218cb15cdfee21893be0c92c126935a",
   );
   assert.equal(
     computeRunIdentity({
       ...directInput,
       suiteContext: context,
     }),
-    "850d589ebe879a52447c63997ffe70384230d218417eec131bb9dbd7e5d10ce6",
+    "d5f6047fd9fa04af837f64efed3c9018318dbc9a255ce25cc5c4b706116e388c",
   );
   assert.equal(
     computeRunIdentity({
       ...directInput,
       suiteContext: suiteContext(1),
     }),
-    "850d589ebe879a52447c63997ffe70384230d218417eec131bb9dbd7e5d10ce6",
+    "d5f6047fd9fa04af837f64efed3c9018318dbc9a255ce25cc5c4b706116e388c",
   );
   assert.equal(
     computeRunIdentity(directInput),
@@ -98,11 +100,11 @@ test("computes a fixed suite plan and suite-bound run identity", () => {
     snapshotSuiteAttemptContext({
       ...context,
       suiteDigest: "e".repeat(64),
-      suitePlanDigest: computeSuitePlanDigest("e".repeat(64), context.casePolicyMapDigest),
+      suitePlanDigest: computeSuitePlanDigest("e".repeat(64), context.casePolicyMapDigest, 2),
     }),
     snapshotSuiteAttemptContext({
       ...context,
-      suitePlanDigest: computeSuitePlanDigest(context.suiteDigest, "f".repeat(64)),
+      suitePlanDigest: computeSuitePlanDigest(context.suiteDigest, "f".repeat(64), 2),
       casePolicyMapDigest: "f".repeat(64),
     }),
   ]) {
@@ -213,17 +215,39 @@ test("rejects malformed suite contexts before provider work", async () => {
       (error: unknown) =>
         error instanceof RunnerError && error.code === "run_configuration_invalid",
     );
-    const malformed = {
+    const outOfGrid = {
       ...suiteContext(0),
-      suiteId: ["synthetic-suite"],
-      suiteDigest: [SUITE_DIGEST],
-      suitePlanDigest: [computeSuitePlanDigest(SUITE_DIGEST, CASE_POLICY_MAP_DIGEST)],
-      casePolicyMapDigest: [CASE_POLICY_MAP_DIGEST],
+      suitePlanDigest: computeSuitePlanDigest(
+        SUITE_DIGEST,
+        CASE_POLICY_MAP_DIGEST,
+        1,
+      ),
+      declaredRepeat: 2,
+      effectiveRepeat: 1,
+      repeatIndex: 1,
     } as never;
     await assert.rejects(
       runBundle({
         bundleDirectory: FIXTURE,
         attemptRoot: path.join(temporary, "attempts-c"),
+        provider,
+        sanitizerRequirement: SANITIZER_REQUIREMENT,
+        suiteContext: outOfGrid,
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "run_configuration_invalid",
+    );
+    const malformed = {
+      ...suiteContext(0),
+      suiteId: ["synthetic-suite"],
+      suiteDigest: [SUITE_DIGEST],
+      suitePlanDigest: [computeSuitePlanDigest(SUITE_DIGEST, CASE_POLICY_MAP_DIGEST, 2)],
+      casePolicyMapDigest: [CASE_POLICY_MAP_DIGEST],
+    } as never;
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: FIXTURE,
+        attemptRoot: path.join(temporary, "attempts-d"),
         provider,
         sanitizerRequirement: SANITIZER_REQUIREMENT,
         suiteContext: malformed,
@@ -236,7 +260,9 @@ test("rejects malformed suite contexts before provider work", async () => {
       [new String(SUITE_DIGEST), CASE_POLICY_MAP_DIGEST],
       [{ synthetic: SUITE_DIGEST }, CASE_POLICY_MAP_DIGEST],
     ]) {
-      assert.throws(() => computeSuitePlanDigest(suiteDigest as never, casePolicyMapDigest as never));
+      assert.throws(() =>
+        computeSuitePlanDigest(suiteDigest as never, casePolicyMapDigest as never, 2),
+      );
     }
     let accessorReads = 0;
     const accessorContext = { ...suiteContext(0) };
@@ -272,6 +298,16 @@ test("reader rejects suite tampering and coordinated identity rehashing", async 
       (manifest) => { (manifest.suite! as MutableSuiteContext).casePolicyMapDigest = "d".repeat(64); },
       (manifest) => { (manifest.suite! as MutableSuiteContext).caseIndex = 1; },
       (manifest) => { (manifest.suite! as MutableSuiteContext).repeatIndex = 1; },
+      (manifest) => {
+        const suite = manifest.suite! as MutableSuiteContext;
+        suite.effectiveRepeat = 1;
+        suite.suitePlanDigest = computeSuitePlanDigest(
+          suite.suiteDigest,
+          suite.casePolicyMapDigest,
+          suite.effectiveRepeat,
+        );
+        suite.repeatIndex = 1;
+      },
       (manifest) => { (manifest.suite! as MutableSuiteContext).suitePlanDigest = "e".repeat(64); },
       (manifest) => {
         (manifest.suite! as unknown as Record<string, unknown>).suiteId = ["synthetic-suite"];

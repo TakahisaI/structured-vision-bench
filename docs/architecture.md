@@ -61,7 +61,8 @@ identity, verifies every required policy target/binding, and derives an immutabl
 plus deterministic slot descriptors. Not-required cases have no policy or sanitizer placeholder.
 After preflight, the pure suite-run manifest builder projects only value-free identities into an
 immutable schema-validated snapshot. It fixes every case and slot, derives the existing per-case
-run IDs and per-repeat attempt IDs, and excludes case IDs, input details, commands, and filesystem
+run IDs and per-repeat attempt IDs. It commits the suite-declared repeat and the bounded effective
+repeat separately, derives slots from the effective count, and excludes case IDs, input details, commands, and filesystem
 references. Its reader rederives the case-policy map, suite plan, run, attempt, and outer suite-run
 identities without starting external work. The private publisher self-validates canonical bytes,
 exclusively claims the digest-named directory, creates and syncs an empty private `slot-ledger/`,

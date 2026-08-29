@@ -155,7 +155,8 @@ export type SuitePreflightPlan = Readonly<{
     }>;
   }>;
   phase: string;
-  repeat: number;
+  declaredRepeat: number;
+  effectiveRepeat: number;
   requirementVerifier: Readonly<{
     id: string;
     version: string;
@@ -245,6 +246,7 @@ export async function preflightSuite(
     requirementVerifier: SanitizerRequirementVerifier;
     suiteSchemaPath?: string;
     bundleSchemaPath?: string;
+    repeatOverride?: number;
   },
 ): Promise<SuitePreflightPlan> {
   const suiteRoot = await resolveSuiteRoot(suiteDirectory);
@@ -270,7 +272,8 @@ export async function preflightSuite(
     );
   }
   const suiteDigest = digest(suiteBytes);
-  if (manifest.cases.length * manifest.repeat > MAX_SUITE_SLOTS) {
+  const effectiveRepeat = readEffectiveRepeat(options, manifest.repeat);
+  if (manifest.cases.length * effectiveRepeat > MAX_SUITE_SLOTS) {
     throw new SuitePreflightError("suite_slot_invalid", "suite slot plan is invalid");
   }
 
@@ -305,8 +308,12 @@ export async function preflightSuite(
   }
 
   const casePolicyMapDigest = computeCasePolicyMapDigest(cases);
-  const slots = deriveSuiteSlots(cases.length, manifest.repeat);
-  const suitePlanDigest = computeSuitePlanDigest(suiteDigest, casePolicyMapDigest);
+  const slots = deriveSuiteSlots(cases.length, effectiveRepeat);
+  const suitePlanDigest = computeSuitePlanDigest(
+    suiteDigest,
+    casePolicyMapDigest,
+    effectiveRepeat,
+  );
 
   const plan: SuitePreflightPlan = {
     suiteVersion: 1,
@@ -322,7 +329,8 @@ export async function preflightSuite(
       requested: Object.freeze({ ...manifest.provider.requested }),
     }),
     phase: manifest.phase,
-    repeat: manifest.repeat,
+    declaredRepeat: manifest.repeat,
+    effectiveRepeat,
     requirementVerifier: Object.freeze({ ...manifest.requirementVerifier }),
     ...(approval === undefined ? {} : { approval }),
     ...(sanitizer === undefined ? {} : { sanitizer }),
@@ -348,9 +356,10 @@ export function deriveSuiteAttemptKey(caseIndex: number, repeatIndex: number): s
 export function computeSuitePlanDigest(
   suiteDigest: string,
   casePolicyMapDigest: string,
+  effectiveRepeat: number,
 ): string {
   try {
-    return computeSuitePlanDigestV1(suiteDigest, casePolicyMapDigest);
+    return computeSuitePlanDigestV1(suiteDigest, casePolicyMapDigest, effectiveRepeat);
   } catch {
     throw new SuitePreflightError("suite_invalid", "suite plan identity is invalid");
   }
@@ -380,11 +389,29 @@ export function createSuiteAttemptContext(
       suiteDigest: plan.suiteDigest,
       suitePlanDigest: plan.suitePlanDigest,
       casePolicyMapDigest: plan.casePolicyMapDigest,
+      declaredRepeat: plan.declaredRepeat,
+      effectiveRepeat: plan.effectiveRepeat,
       caseIndex: slotSnapshot.caseIndex,
       repeatIndex: slotSnapshot.repeatIndex,
     });
   } catch {
     throw new SuitePreflightError("suite_invalid", "suite attempt context is invalid");
+  }
+}
+
+function readEffectiveRepeat(
+  options: { repeatOverride?: number },
+  declaredRepeat: number,
+): number {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(options, "repeatOverride");
+    if (descriptor === undefined) return declaredRepeat;
+    if (!("value" in descriptor) || !descriptor.enumerable) throw new Error();
+    const value = descriptor.value;
+    if (!Number.isSafeInteger(value) || value < 1 || value > 1000) throw new Error();
+    return value;
+  } catch {
+    throw new SuitePreflightError("suite_slot_invalid", "suite repeat override is invalid");
   }
 }
 

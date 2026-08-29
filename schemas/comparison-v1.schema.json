@@ -205,6 +205,8 @@
         "suiteDigest",
         "suitePlanDigest",
         "casePolicyMapDigest",
+        "declaredRepeat",
+        "effectiveRepeat",
         "caseIndex",
         "repeatIndex"
       ],
@@ -223,6 +225,16 @@
         },
         "casePolicyMapDigest": {
           "$ref": "#/$defs/digest"
+        },
+        "declaredRepeat": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "effectiveRepeat": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
         },
         "caseIndex": {
           "type": "integer",
