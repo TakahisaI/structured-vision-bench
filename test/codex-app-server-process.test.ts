@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import childProcess from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import fsPromises from "node:fs/promises";
 import { mkdtemp, readFile, rm, stat, watch, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
@@ -581,6 +582,65 @@ test(
 
       assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
       assert.deepEqual(unhandledRejections, []);
+      const boundary = records.find((record) => record.phase === "app-server");
+      const descendant = records.find(
+        (record) => record.isolationDescendantPid !== undefined,
+      );
+      assert.ok(boundary);
+      assert.ok(descendant);
+      await assertMissing(String(boundary.root));
+      await assertProcessStopped(Number(descendant.isolationDescendantPid));
+    });
+  },
+);
+
+test(
+  "uses the captured close listener after the finalizer mutates EventEmitter.once",
+  { timeout: 5_000 },
+  async () => {
+    await withFixture("isolation-hang-descendant", async ({ options, capture }) => {
+      const onceDescriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, "once");
+      assert.ok(onceDescriptor?.value);
+      const controller = new AbortController();
+      let records: JsonObject[] = [];
+
+      try {
+        const running = runCodexAppServerProcess(
+          { ...options, timeoutMs: 10_000 },
+          request(readCounter()),
+          controller.signal,
+          async () => ({
+            allowedEnvironment: [],
+            finalize() {
+              Object.defineProperty(EventEmitter.prototype, "once", {
+                configurable: true,
+                value(this: EventEmitter, event: string | symbol, listener: (...args: unknown[]) => void) {
+                  if (event !== "close") {
+                    return Reflect.apply(onceDescriptor.value as (...args: unknown[]) => unknown, this, [
+                      event,
+                      listener,
+                    ]) as EventEmitter;
+                  }
+                  return this;
+                },
+                writable: true,
+              });
+              return undefined;
+            },
+          }),
+        );
+        records = await waitForCapture(
+          capture,
+          (values) =>
+            values.some((value) => value.phase === "app-server") &&
+            values.some((value) => value.isolationDescendantPid !== undefined),
+        );
+        controller.abort();
+        await assert.rejects(running, stableProcessError);
+      } finally {
+        Object.defineProperty(EventEmitter.prototype, "once", onceDescriptor);
+      }
+
       const boundary = records.find((record) => record.phase === "app-server");
       const descendant = records.find(
         (record) => record.isolationDescendantPid !== undefined,

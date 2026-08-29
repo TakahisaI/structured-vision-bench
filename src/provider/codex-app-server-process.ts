@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   chmod,
   mkdir,
@@ -11,6 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { Readable, Writable } from "node:stream";
 
 import {
   decodeUtf8Strict,
@@ -38,6 +40,7 @@ import {
 import {
   createIntrinsicPromise,
   ignoreIntrinsicPromiseRejection,
+  invokeIntrinsicPromiseCallback,
   raceIntrinsicPromises,
   resolveIntrinsicPromise,
   restoreIntrinsicPromiseConstructor,
@@ -68,6 +71,11 @@ const mkdtempIntrinsic = mkdtemp;
 const objectCreateIntrinsic = Object.create;
 const objectKeysIntrinsic = Object.keys;
 const objectValuesIntrinsic = Object.values;
+const eventEmitterOnIntrinsic = EventEmitter.prototype.on;
+const eventEmitterOnceIntrinsic = EventEmitter.prototype.once;
+const pathDirnameIntrinsic = path.dirname;
+const pathIsAbsoluteIntrinsic = path.isAbsolute;
+const pathJoinIntrinsic = path.join;
 const processKillIntrinsic = applyIntrinsic(bindIntrinsic, process.kill, [
   process,
 ]) as typeof process.kill;
@@ -77,6 +85,11 @@ const realpathIntrinsic = realpath;
 const rmIntrinsic = rm;
 const setTimeoutIntrinsic = setTimeout;
 const spawnIntrinsic = spawn;
+const readableAsyncIteratorIntrinsic = Readable.prototype[Symbol.asyncIterator];
+const readableDestroyIntrinsic = Readable.prototype.destroy;
+const writableDestroyIntrinsic = Writable.prototype.destroy;
+const writableEndIntrinsic = Writable.prototype.end;
+const writableWriteIntrinsic = Writable.prototype.write;
 const writeFileIntrinsic = writeFile;
 const MAX_STDERR_BYTES = 1024 * 1024;
 export const MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
@@ -285,7 +298,7 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
   // unverifiable; a taskkill-by-PID fallback is not a durable tree identity.
   if (HOST_PLATFORM !== "darwin" && HOST_PLATFORM !== "linux") throw new Error();
   const executable = value.executable;
-  if (typeof executable !== "string" || !path.isAbsolute(executable)) throw new Error();
+  if (typeof executable !== "string" || !pathIsAbsoluteIntrinsic(executable)) throw new Error();
   const executableArguments = snapshotStrings(value.executableArguments ?? [], MAX_ARGUMENTS);
   const names = snapshotStrings(value.envAllowlist ?? [], 64);
   const seen: string[] = [];
@@ -396,20 +409,20 @@ function snapshotInput(
 
 async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
   const temporaryParent = await realpathIntrinsic(PRIVATE_TEMP_PARENT);
-  if (!path.isAbsolute(temporaryParent)) throw new Error();
-  const root = await mkdtempIntrinsic(path.join(temporaryParent, "svbench-codex-"));
+  if (!pathIsAbsoluteIntrinsic(temporaryParent)) throw new Error();
+  const root = await mkdtempIntrinsic(pathJoinIntrinsic(temporaryParent, "svbench-codex-"));
   try {
     const canonicalRoot = await realpathIntrinsic(root);
-    if (path.dirname(canonicalRoot) !== temporaryParent) throw new Error();
+    if (pathDirnameIntrinsic(canonicalRoot) !== temporaryParent) throw new Error();
     await chmodIntrinsic(root, DIRECTORY_MODE);
     const directories = {
-      home: path.join(root, "home"),
-      codexHome: path.join(root, "codex-home"),
-      config: path.join(root, "config"),
-      cache: path.join(root, "cache"),
-      workspace: path.join(root, "workspace"),
-      executablePath: path.join(root, "empty-path"),
-      temporary: path.join(root, "tmp"),
+      home: pathJoinIntrinsic(root, "home"),
+      codexHome: pathJoinIntrinsic(root, "codex-home"),
+      config: pathJoinIntrinsic(root, "config"),
+      cache: pathJoinIntrinsic(root, "cache"),
+      workspace: pathJoinIntrinsic(root, "workspace"),
+      executablePath: pathJoinIntrinsic(root, "empty-path"),
+      temporary: pathJoinIntrinsic(root, "tmp"),
     };
     const directoryValues = objectValuesIntrinsic(directories);
     for (let index = 0; index < directoryValues.length; index += 1) {
@@ -430,7 +443,7 @@ async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
     return freezeIntrinsic({
       root,
       workspace: directories.workspace,
-      catalog: path.join(root, "model-catalog.json"),
+      catalog: pathJoinIntrinsic(root, "model-catalog.json"),
       environment,
     });
   } catch {
@@ -482,7 +495,7 @@ function invokeLazyInput(
   assertActive(signal);
   const pending = thenIntrinsicPromise(resolveIntrinsicPromise(undefined), () => {
     assertActive(signal);
-    return reader();
+    return invokeIntrinsicPromiseCallback<Uint8Array>(() => reader());
   });
   return createIntrinsicPromise((resolve, reject) => {
     let settled = false;
@@ -681,7 +694,9 @@ async function runConnectedProcess(
       );
     } else {
       const authorization = snapshotStartAuthorization(
-        await startGuard(guardSignal!),
+        await invokeIntrinsicPromiseCallback<CodexAppServerProcessStartAuthorization>(() =>
+          startGuard(guardSignal!),
+        ),
         options.envAllowlist,
       );
       environment = snapshotSpawnEnvironment(
@@ -742,9 +757,7 @@ async function runConnectedProcess(
   } finally {
     clearTimeoutIntrinsic(timer);
     removeAbortSignalListener(parentSignal, abort);
-    child?.stdin.destroy();
-    child?.stdout.destroy();
-    child?.stderr.destroy();
+    if (child !== undefined) destroyChildStreams(child);
   }
 }
 
@@ -796,14 +809,16 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
     close: Promise<{ code: number | null; signal: NodeJS.Signals | null }>,
     private readonly terminate: () => Promise<void>,
   ) {
-    this.iterator = child.stdout[Symbol.asyncIterator]();
+    this.iterator = applyIntrinsic(readableAsyncIteratorIntrinsic, child.stdout, []) as AsyncIterator<
+      Buffer | string
+    >;
     this.close = close;
-    child.once("error", () => this.fail());
-    child.stdin.once("error", () => this.fail());
-    child.stderr.on("data", (chunk: Buffer | string) => {
+    applyIntrinsic(eventEmitterOnceIntrinsic, child, ["error", () => this.fail()]);
+    applyIntrinsic(eventEmitterOnceIntrinsic, child.stdin, ["error", () => this.fail()]);
+    applyIntrinsic(eventEmitterOnIntrinsic, child.stderr, ["data", (chunk: Buffer | string) => {
       this.stderrBytes += Buffer.byteLength(chunk);
       if (this.stderrBytes > MAX_STDERR_BYTES) this.fail();
-    });
+    }]);
   }
 
   async send(message: JsonValue): Promise<void> {
@@ -815,10 +830,10 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
         throw new Error();
       }
       await createIntrinsicPromise<void>((resolve, reject) => {
-        this.child.stdin.write(bytes, (error) => {
+        applyIntrinsic(writableWriteIntrinsic, this.child.stdin, [bytes, (error: Error | null | undefined) => {
           if (error === null || error === undefined) resolve();
           else reject(error);
-        });
+        }]);
       });
     } finally {
       bytes.fill(0);
@@ -894,7 +909,7 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
   }
 
   closeInput(): void {
-    this.child.stdin.end();
+    applyIntrinsic(writableEndIntrinsic, this.child.stdin, []);
   }
 
   async waitForClose(): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
@@ -914,7 +929,11 @@ function waitForClose(
   child: ChildProcessWithoutNullStreams,
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
   return createIntrinsicPromise((resolve) => {
-    child.once("close", (code, childSignal) => resolve({ code, signal: childSignal }));
+    applyIntrinsic(eventEmitterOnceIntrinsic, child, [
+      "close",
+      (code: number | null, childSignal: NodeJS.Signals | null) =>
+        resolve({ code, signal: childSignal }),
+    ]);
   });
 }
 
@@ -1105,9 +1124,9 @@ function objectWithCode(value: unknown): { code?: string } {
 }
 
 function destroyChildStreams(child: ChildProcessWithoutNullStreams): void {
-  child.stdin.destroy();
-  child.stdout.destroy();
-  child.stderr.destroy();
+  applyIntrinsic(writableDestroyIntrinsic, child.stdin, []);
+  applyIntrinsic(readableDestroyIntrinsic, child.stdout, []);
+  applyIntrinsic(readableDestroyIntrinsic, child.stderr, []);
 }
 
 function assertActive(signal: AbortSignal | undefined): void {

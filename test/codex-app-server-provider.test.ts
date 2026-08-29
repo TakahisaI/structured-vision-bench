@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -449,6 +449,151 @@ test("invocation settlement uses the module-load Promise constructor", async () 
     }
 
     assert.equal(revalidations, 2);
+  });
+});
+
+test("revalidation settlement restores captured Promise metadata", async (context) => {
+  await context.test("species mutation", async () => {
+    await withFixture("provider-success", async ({ options }) => {
+      const speciesDescriptor = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
+      const thenDescriptor = Object.getOwnPropertyDescriptor(Promise.prototype, "then");
+      assert.ok(speciesDescriptor);
+      assert.ok(thenDescriptor?.value);
+      let speciesCalls = 0;
+      let thenReads = 0;
+      const direct = directInvocation();
+      const provider = createCodexAppServerProvider({
+        process: options,
+        revalidateTransport: (approval) => {
+          Object.defineProperty(Promise, Symbol.species, {
+            configurable: true,
+            value: function SyntheticSpecies(
+              executor: ConstructorParameters<PromiseConstructor>[0],
+            ): Promise<unknown> {
+              speciesCalls += 1;
+              return new Promise(executor);
+            },
+          });
+          Object.defineProperty(Promise.prototype, "then", {
+            configurable: true,
+            get() {
+              thenReads += 1;
+              throw new Error("synthetic then access");
+            },
+          });
+          return Promise.resolve(approval);
+        },
+      });
+
+      try {
+        await provider.prepareTransport!(direct.approval);
+        await provider.invoke(direct.request, direct.context);
+      } finally {
+        Object.defineProperty(Promise, Symbol.species, speciesDescriptor);
+        Object.defineProperty(Promise.prototype, "then", thenDescriptor);
+      }
+
+      assert.equal(speciesCalls, 0);
+      assert.equal(thenReads, 0);
+    });
+  });
+
+  await context.test("rejected Promise with hostile constructor getter", async () => {
+    await withFixture("provider-success", async ({ options }) => {
+      const constructorDescriptor = Object.getOwnPropertyDescriptor(
+        Promise.prototype,
+        "constructor",
+      );
+      assert.ok(constructorDescriptor);
+      const unhandledRejections: unknown[] = [];
+      const recordUnhandledRejection = (reason: unknown): void => {
+        unhandledRejections[unhandledRejections.length] = reason;
+      };
+      process.on("unhandledRejection", recordUnhandledRejection);
+      const direct = directInvocation();
+      const provider = createCodexAppServerProvider({
+        process: options,
+        revalidateTransport: () => {
+          const rejected = Promise.reject(new Error("synthetic rejected revalidation"));
+          Object.defineProperty(Promise.prototype, "constructor", {
+            configurable: true,
+            get() {
+              throw new Error("synthetic constructor access");
+            },
+          });
+          return rejected;
+        },
+      });
+
+      try {
+        await assert.rejects(
+          provider.prepareTransport!(direct.approval),
+          /codex app-server transport preparation failed/u,
+        );
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } finally {
+        Object.defineProperty(Promise.prototype, "constructor", constructorDescriptor);
+        process.off("unhandledRejection", recordUnhandledRejection);
+      }
+
+      assert.deepEqual(unhandledRejections, []);
+    });
+  });
+});
+
+test("private workspace paths use module-load path functions", async () => {
+  await withFixture("provider-success", async ({ options, capture, root }) => {
+    const joinDescriptor = Object.getOwnPropertyDescriptor(path, "join");
+    const dirnameDescriptor = Object.getOwnPropertyDescriptor(path, "dirname");
+    assert.ok(joinDescriptor?.value);
+    assert.ok(dirnameDescriptor?.value);
+    let joinCalls = 0;
+    let dirnameCalls = 0;
+    const canonicalTemporaryParent = await realpath("/tmp");
+    const direct = directInvocation();
+    let revalidations = 0;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (approval) => {
+        revalidations += 1;
+        if (revalidations === 1) {
+          Object.defineProperty(path, "join", {
+            configurable: true,
+            value: (..._parts: string[]) => {
+              joinCalls += 1;
+              return `${root}/synthetic-outside-workspace`;
+            },
+            writable: true,
+          });
+          Object.defineProperty(path, "dirname", {
+            configurable: true,
+            value: (_value: string) => {
+              dirnameCalls += 1;
+              return "/tmp";
+            },
+            writable: true,
+          });
+        }
+        return approval;
+      },
+    });
+
+    try {
+      await provider.prepareTransport!(direct.approval);
+      await provider.invoke(direct.request, direct.context);
+    } finally {
+      Object.defineProperty(path, "join", joinDescriptor);
+      Object.defineProperty(path, "dirname", dirnameDescriptor);
+    }
+
+    assert.equal(joinCalls, 0);
+    assert.equal(dirnameCalls, 0);
+    const boundary = (await readCapture(capture)).find(
+      (record) => record.phase === "app-server",
+    );
+    assert.ok(boundary);
+    assert.equal(path.dirname(String(boundary.root)), canonicalTemporaryParent);
+    assert.match(path.basename(String(boundary.root)), /^svbench-codex-/u);
   });
 });
 

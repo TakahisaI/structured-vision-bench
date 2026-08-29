@@ -517,6 +517,52 @@ test("shared Array iterator mutation cannot skip active flags or required keys",
   }
 });
 
+test("shared Object.hasOwn mutation cannot supply a required inherited field", async () => {
+  const hasOwnDescriptor = Object.getOwnPropertyDescriptor(Object, "hasOwn");
+  const inheritedServiceTier = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "serviceTier",
+  );
+  assert.ok(hasOwnDescriptor?.value);
+
+  try {
+    Object.defineProperty(Object.prototype, "serviceTier", {
+      configurable: true,
+      value: null,
+      writable: true,
+    });
+    Object.defineProperty(Object, "hasOwn", {
+      configurable: true,
+      value: (value: object, key: PropertyKey) =>
+        key === "serviceTier" ||
+        Reflect.apply(hasOwnDescriptor.value as (value: object, key: PropertyKey) => boolean, Object, [
+          value,
+          key,
+        ]),
+      writable: true,
+    });
+
+    const connection = new RequiredKeyDeletingConnection(
+      "success",
+      "serviceTier",
+      threadStartResultTarget,
+    );
+    await assert.rejects(
+      runCodexAppServerProtocol(connection, request()),
+      /codex app-server protocol failed/u,
+    );
+    assert.equal(connection.deleted, true);
+    assert.equal(connection.closed, true);
+  } finally {
+    Object.defineProperty(Object, "hasOwn", hasOwnDescriptor);
+    if (inheritedServiceTier === undefined) {
+      delete (Object.prototype as { serviceTier?: unknown }).serviceTier;
+    } else {
+      Object.defineProperty(Object.prototype, "serviceTier", inheritedServiceTier);
+    }
+  }
+});
+
 test("waits for a delayed interrupt send before closing input", async () => {
   const connection = new DelayedInterruptConnection();
   const controller = new AbortController();

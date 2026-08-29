@@ -161,10 +161,12 @@ while timeout, cancellation, protocol, and input-read settlement retain a separa
 that consumer code never receives. Promise construction and settlement on those internal paths use
 module-load-captured native Promise construction and `then`; they do not depend on the mutable global
 `Promise`, mutable Promise prototype methods, or iterable-based `Promise.race()` and `Promise.all()`
-after consumer code has run. Invocation settlement, process spawn and cleanup, timeout scheduling,
-process-group inspection, and required protocol-field validation likewise use module-load-captured
-primitives or indexed traversal rather than consumer-replaceable globals, live Node built-in export
-bindings, or shared Array iterators.
+after consumer code has run. Consumer-returned native Promises have their constructor, captured
+`then`, and species metadata restored and hardened before internal settlement observes them.
+Invocation settlement, private-path derivation, process spawn and cleanup, close-event registration,
+timeout scheduling, process-group inspection, and required protocol-field validation likewise use
+module-load-captured primitives or indexed traversal rather than consumer-replaceable globals, live
+Node built-in export bindings, or shared Array iterators.
 
 Only the four extraction callbacks and requested model/effort/null max-tokens setting cross from
 the Provider into the process client. Approval, case and bundle identities, provenance, sanitizer
@@ -289,7 +291,8 @@ Each invocation creates one mode-0700 temporary root under the canonical system 
 ambient temporary-directory variables, with separate empty workspace, home,
 `CODEX_HOME`, config home, cache, temporary directory, and executable search path. The child cwd is
 the empty workspace, never a consumer repository, bundle directory, or their parent. The child
-environment starts empty. A caller may explicitly allowlist bounded environment names needed by an
+environment starts empty. Temporary-root containment and all derived private paths use path
+operations captured before consumer code can run. A caller may explicitly allowlist bounded environment names needed by an
 upstream-supported logged-in process boundary. Configuration snapshots and validates only those
 names. The final revalidation continuation captures their values into an immutable spawn
 authorization only after abort, usability, exact-identity, and generation checks succeed;
@@ -336,7 +339,8 @@ stdout are bounded; stderr is counted and discarded. Raw process output, documen
 and private paths never enter normal errors. Success requires the protocol end-of-stream and exit
 status zero. Success as well as protocol failure, crash, overflow, timeout, or cancellation then
 terminates the durable POSIX process group, waits until no live same-group member remains, waits for
-the leader close, zeroes materialized input copies, and removes the private root before the promise
+the leader close through captured event-registration primitives, zeroes materialized input copies,
+and removes the private root before the promise
 settles. Linux settlement enumerates process-group membership and treats only dead or zombie
 members as stopped. Process entries hidden by procfs access controls are ignored because spawned
 same-owner group members remain readable; a probe failure cannot bypass the leader-close wait. The

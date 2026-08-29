@@ -38,6 +38,8 @@ const MAX_ACTIVE_ITEMS = 16;
 const CLIENT_NAME = "structured_vision_bench";
 const CLIENT_TITLE = "structured-vision-bench";
 const CLIENT_VERSION = "1";
+const objectHasOwnIntrinsic = Object.hasOwn;
+const pathIsAbsoluteIntrinsic = path.isAbsolute;
 
 export type CodexAppServerProtocolConnection = Readonly<{
   send(message: JsonValue): Promise<void>;
@@ -292,7 +294,7 @@ function snapshotRequest(value: CodexAppServerProtocolRequest): {
     typeof workspace !== "string" ||
     workspace.length === 0 ||
     workspace.length > MAX_WORKSPACE_PATH_LENGTH ||
-    !path.isAbsolute(workspace) ||
+    !pathIsAbsoluteIntrinsic(workspace) ||
     !mediaType.startsWith("image/") ||
     !Buffer.isBuffer(bytes) ||
     bytes.byteLength > MAX_PROVIDER_INPUT_BYTES ||
@@ -420,7 +422,7 @@ function applyTurnNotification(
   thread: { respondedModel: string | null; effectiveEffort: string | null },
   expectedUserContent: JsonValue[],
 ): void {
-  if (accumulator.result !== undefined || Object.hasOwn(message, "id")) {
+  if (accumulator.result !== undefined || objectHasOwnIntrinsic(message, "id")) {
     throw new Error();
   }
   const method = message.method;
@@ -536,7 +538,7 @@ function validateInitializeResponse(message: Record<string, JsonValue>): void {
   if (
     typeof result.userAgent !== "string" ||
     typeof result.codexHome !== "string" ||
-    !path.isAbsolute(result.codexHome) ||
+    !pathIsAbsoluteIntrinsic(result.codexHome) ||
     typeof result.platformFamily !== "string" ||
     typeof result.platformOs !== "string"
   ) {
@@ -633,7 +635,7 @@ async function collectTurnStart(
   const accumulator = createTurnAccumulator();
   for (let count = 1; count <= MAX_PROTOCOL_EVENTS; count += 1) {
     const message = await nextMessage(connection, receiveBudget, signal);
-    if (Object.hasOwn(message, "id")) {
+    if (objectHasOwnIntrinsic(message, "id")) {
       if (responseTurnId !== undefined) throw new Error();
       responseTurnId = validateTurnStartResponseMessage(message);
       onTurnId(responseTurnId);
@@ -690,8 +692,8 @@ function validateTurnStartResponseMessage(
 ): string {
   if (
     message.id !== 3 ||
-    Object.hasOwn(message, "error") ||
-    !Object.hasOwn(message, "result")
+    objectHasOwnIntrinsic(message, "error") ||
+    !objectHasOwnIntrinsic(message, "result")
   ) {
     throw new Error();
   }
@@ -906,8 +908,8 @@ async function nextResponse(
   const message = await nextMessage(connection, receiveBudget, signal);
   if (
     message.id !== id ||
-    Object.hasOwn(message, "error") ||
-    !Object.hasOwn(message, "result")
+    objectHasOwnIntrinsic(message, "error") ||
+    !objectHasOwnIntrinsic(message, "result")
   ) {
     throw new Error();
   }
@@ -921,7 +923,7 @@ async function nextNotification(
   signal: AbortSignal | undefined,
 ): Promise<Record<string, JsonValue>> {
   const message = await nextMessage(connection, receiveBudget, signal);
-  if (Object.hasOwn(message, "id") || message.method !== method) throw new Error();
+  if (objectHasOwnIntrinsic(message, "id") || message.method !== method) throw new Error();
   return message;
 }
 
@@ -1006,7 +1008,7 @@ function snapshotRequested(value: unknown): RequestedExecutionSettings {
   const requested = requiredObject(value);
   const model = requiredNullableSafeLabel(requested, "model");
   const effort = requiredNullableSafeLabel(requested, "effort");
-  if (!Object.hasOwn(requested, "maxTokens")) throw new Error();
+  if (!objectHasOwnIntrinsic(requested, "maxTokens")) throw new Error();
   const maxTokens = requested.maxTokens;
   if (
     maxTokens !== null &&
@@ -1078,7 +1080,7 @@ function assertRequiredKeys(
 ): void {
   for (let index = 0; index < keys.length; index += 1) {
     const key = keys[index]!;
-    if (!Object.hasOwn(object, key)) throw new Error();
+    if (!objectHasOwnIntrinsic(object, key)) throw new Error();
   }
 }
 
@@ -1103,7 +1105,7 @@ function requiredNullableSafeLabel(
   object: Record<string, JsonValue>,
   key: string,
 ): string | null {
-  if (!Object.hasOwn(object, key)) throw new Error();
+  if (!objectHasOwnIntrinsic(object, key)) throw new Error();
   return nullableSafeLabel(object[key]);
 }
 

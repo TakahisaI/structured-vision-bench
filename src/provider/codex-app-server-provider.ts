@@ -15,7 +15,10 @@ import {
   type CodexAppServerProcessRequest,
   type CodexAppServerProcessStartAuthorization,
 } from "./codex-app-server-process.js";
-import { createIntrinsicPromise } from "./promise-intrinsics.js";
+import {
+  createIntrinsicPromise,
+  invokeIntrinsicPromiseCallback,
+} from "./promise-intrinsics.js";
 import type {
   ApprovalResponse,
   Provider,
@@ -44,6 +47,7 @@ const dateParseIntrinsic = DateIntrinsic.parse;
 const freezeIntrinsic = Object.freeze;
 const objectHasOwnIntrinsic = Object.hasOwn;
 const objectKeysIntrinsic = Object.keys;
+const pathIsAbsoluteIntrinsic = path.isAbsolute;
 const RESERVED_ENVIRONMENT_NAMES = freezeIntrinsic([
   "APPDATA",
   "CODEX_HOME",
@@ -160,7 +164,9 @@ export function createCodexAppServerProvider(
           async (processSignal): Promise<CodexAppServerProcessStartAuthorization> => {
             assertActive(processSignal);
             const revalidated = snapshotApproval(
-              await options.revalidateTransport(claimed.approval, processSignal),
+              await invokeIntrinsicPromiseCallback<ApprovalResponse>(() =>
+                options.revalidateTransport(claimed.approval, processSignal),
+              ),
             );
             assertActive(processSignal);
             assertUsableApproval(revalidated);
@@ -229,7 +235,7 @@ function validateOptions(value: CodexAppServerProviderOptions): ValidatedOptions
       processOptions === null ||
       typeof processOptions !== "object" ||
       typeof processOptions.executable !== "string" ||
-      !path.isAbsolute(processOptions.executable) ||
+      !pathIsAbsoluteIntrinsic(processOptions.executable) ||
       typeof revalidateTransport !== "function"
     ) {
       throw new Error();
@@ -315,7 +321,9 @@ async function revalidate(
 ): Promise<ApprovalResponse> {
   assertActive(signal);
   const actual = snapshotApproval(
-    await options.revalidateTransport(expected, signal),
+    await invokeIntrinsicPromiseCallback<ApprovalResponse>(() =>
+      options.revalidateTransport(expected, signal),
+    ),
   );
   assertActive(signal);
   assertUsableApproval(actual);
