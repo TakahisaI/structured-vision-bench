@@ -2,8 +2,9 @@
 
 The suite run manifest is the immutable, value-free identity snapshot produced from a fully
 preflighted suite plan. It is a pure contract: creating, encoding, and reading it does not create a
-directory or start an approval, provider, or sanitizer process. Private atomic publication and the
-mutable slot ledger are separate lifecycle contracts.
+directory or start an approval, provider, or sanitizer process. Its private atomic publication is
+defined in [`docs/suite-run-directory-v1.md`](suite-run-directory-v1.md); the mutable slot ledger is
+a separate lifecycle contract.
 
 The machine-readable shape is
 [`schemas/suite-run-v1.schema.json`](../schemas/suite-run-v1.schema.json). The strict reader also
@@ -83,9 +84,9 @@ duplicate members, partial or concatenated JSON, unknown members, sparse arrays,
 runtime builder input, schema-invalid values, and every identity mismatch. It returns fresh deeply
 frozen data.
 
-An external run-directory owner may pass an expected `suiteRunId`. This anchor rejects a
-coordinated, internally self-consistent replacement of the whole manifest. The filesystem contract
-that captures and protects that anchor is defined by the follow-up private publication work.
+The private run-directory reader passes the digest-named parent basename as expected `suiteRunId`.
+This external anchor rejects a coordinated, internally self-consistent replacement of the whole
+manifest.
 
 Failures expose only `suite_run_manifest_invalid` or `suite_run_identity_mismatch`; diagnostics do
 not include a field value, digest, case identifier, or path.

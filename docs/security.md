@@ -154,10 +154,18 @@ identity snapshot. It omits case IDs, document kinds, prepared-input fields, bun
 references, approval and sanitizer commands, raw values, and local paths. The strict reader bounds
 bytes before decoding, rejects duplicate or unknown members and malformed runtime objects, and
 recomputes case-policy, suite-plan, per-case run, per-repeat attempt, and outer suite-run identities.
-An expected suite-run ID can externally anchor the reader against a coordinated whole-manifest
-replacement. Creating or reading this snapshot never starts an external process or publishes a
-filesystem entry; those ownership and atomicity rules belong to the private suite-run directory
-contract.
+The private suite-run publisher canonicalizes and self-validates the snapshot before filesystem
+mutation. It exclusively claims one private digest-named directory, writes and syncs a complete
+manifest in a private same-filesystem sibling staging directory, then uses a no-replace hard link as
+the sole formal visibility point. The reader anchors the manifest to the parent basename and accepts
+only an exact mode-0700 directory containing one mode-0600 `suite-run.json`. Both sides use
+no-follow regular-file/directory opens, owner and device/inode revalidation, bounded reads, and
+stable value-free errors. Incomplete claims, owner markers, unknown entries, symlinks, mode drift,
+partial bytes, and identity drift are not formal runs. Unpublished cleanup is non-recursive and
+identity-guarded; cleanup after the final link is best effort and cannot reverse publication.
+Portable Node.js cannot close the final same-UID path-swap window around link, unlink, and directory
+removal; as with attempt publication, an adversarial same-UID process in that syscall window is
+outside the harness threat model.
 
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through
