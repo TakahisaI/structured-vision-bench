@@ -198,6 +198,30 @@ test("treats an empty chain as all manifest slots pending", () => {
   assert.deepEqual(reduced.slots[0]!.history, []);
 });
 
+test("accepts a pre-epoch first event and still rejects timestamp rollback", () => {
+  const manifest = syntheticSuiteRunManifest();
+  const running = createEvent(manifest, null, {
+    recordedAt: "1969-12-31T23:59:59.000Z",
+    previousStatus: "pending",
+    status: "running",
+  });
+  const reopened = readSuiteSlotEvent(encodeSuiteSlotEvent(running));
+
+  assert.deepEqual(reopened, running);
+  assert.equal(reduceSuiteSlotEvents(manifest, [reopened]).slots[0]!.status, "running");
+
+  const rollback = createEvent(manifest, reopened, {
+    recordedAt: "1969-12-31T23:59:58.999Z",
+    previousStatus: "running",
+    status: "failed",
+    failureCode: "provider_failed",
+  });
+  assert.throws(
+    () => reduceSuiteSlotEvents(manifest, [reopened, rollback]),
+    isEventError("suite_slot_event_chain_invalid"),
+  );
+});
+
 test("rejects gaps, forks, foreign slots, timestamp rollback, and illegal transitions", () => {
   const manifest = syntheticSuiteRunManifest();
   const running = createEvent(manifest, null, {

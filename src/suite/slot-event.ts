@@ -214,7 +214,7 @@ export function reduceSuiteSlotEvents(
       ...(manifestSnapshot.sanitizer?.failureCodes ?? []),
     ]);
     let previousEventId: string | null = null;
-    let previousTime = -1;
+    let previousTime = Number.NEGATIVE_INFINITY;
 
     for (let sequence = 0; sequence < events.length; sequence += 1) {
       const event = events[sequence]!;
