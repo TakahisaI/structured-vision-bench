@@ -11,11 +11,15 @@ if (tests.length === 0) {
   process.exit(1);
 }
 
-const result = spawnSync(process.execPath, ["--test", ...tests], {
-  cwd: process.cwd(),
-  encoding: "utf8",
-  stdio: "inherit",
-});
+const result = spawnSync(
+  process.execPath,
+  ["--test", "--test-concurrency=1", ...tests],
+  {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    stdio: "inherit",
+  },
+);
 if (result.error) throw result.error;
 process.exit(result.status ?? 1);
 
