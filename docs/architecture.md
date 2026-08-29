@@ -67,8 +67,9 @@ identities without starting external work. The private publisher self-validates 
 exclusively claims the digest-named directory, creates and syncs an empty private `slot-ledger/`,
 and makes `suite-run.json` visible with one no-replace hard link. Its strict reader accepts only the
 manifest-plus-ledger layout, strictly reads canonical sequence records, and reduces them to frozen
-slot state. Atomic append, execution, resume, and report generation remain separate lifecycle
-components. See
+slot state. Its separate atomic appender writes a complete canonical record in private
+same-filesystem staging and makes only the fixed sequence name visible with a no-replace hard link.
+Execution, resume decisions, and report generation remain separate lifecycle components. See
 [`docs/suite-v1.md`](suite-v1.md), [`docs/suite-run-v1.md`](suite-run-v1.md), and
 [`docs/suite-run-directory-v1.md`](suite-run-directory-v1.md).
 
@@ -77,7 +78,9 @@ slot identities, chains records in one global sequence, and reduces them from im
 state without filesystem access. The private run-directory boundary now initializes and strictly
 reads that ledger before applying the reducer. It preserves interruption and failure history while
 rejecting foreign identities, gaps, replay, illegal transitions, and unapproved failure codes.
-No-replace append remains a later boundary. See
+The append boundary fixes the expected sequence and previous event identity, lets one concurrent
+writer win the fixed destination, and reports post-link durability uncertainty without removing the
+record. See
 [`docs/suite-slot-event-v1.md`](suite-slot-event-v1.md).
 
 ### Approval gate
