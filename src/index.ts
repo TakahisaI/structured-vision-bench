@@ -38,3 +38,4 @@ export * from "./runner/run.js";
 export * from "./runner/sanitizer.js";
 export * from "./runner/types.js";
 export * from "./suite/preflight.js";
+export * from "./suite/run-manifest.js";

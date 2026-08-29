@@ -1,0 +1,428 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TakahisaI/structured-vision-bench/schemas/suite-run-v1.schema.json",
+  "title": "Structured Vision Bench suite run manifest v1",
+  "description": "Value-free immutable identity for one preflighted suite run.",
+  "type": "object",
+  "required": [
+    "suiteRunManifestVersion",
+    "suiteRunIdentityVersion",
+    "suiteRunId",
+    "suite",
+    "provider",
+    "phase",
+    "repeat",
+    "requirementVerifier",
+    "approval",
+    "sanitizer",
+    "cases",
+    "slots"
+  ],
+  "properties": {
+    "suiteRunManifestVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "suiteRunIdentityVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "suiteRunId": {
+      "$ref": "#/$defs/digest"
+    },
+    "suite": {
+      "$ref": "#/$defs/suite"
+    },
+    "provider": {
+      "$ref": "#/$defs/provider"
+    },
+    "phase": {
+      "$ref": "#/$defs/safeLabel"
+    },
+    "repeat": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "requirementVerifier": {
+      "$ref": "#/$defs/requirementVerifier"
+    },
+    "approval": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "required",
+        "gateId",
+        "protocolVersion",
+        "snapshotDigest",
+        "runtimeBindingIdentity",
+        "runtimeBindingDigest",
+        "approvedScopeIdentity",
+        "approvedScopeDigest",
+        "phase"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "gateId": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "snapshotDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "runtimeBindingIdentity": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "runtimeBindingDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "approvedScopeIdentity": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "approvedScopeDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "phase": {
+          "$ref": "#/$defs/safeLabel"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sanitizer": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "id",
+        "protocolVersion",
+        "findingPathAllowlistVersion",
+        "findingPathAllowlistDigest",
+        "allowedFindingPathPatterns",
+        "failureCodes"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "findingPathAllowlistVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "findingPathAllowlistDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "allowedFindingPathPatterns": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "maxLength": 1024
+          },
+          "uniqueItems": true
+        },
+        "failureCodes": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/safeLabel"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    },
+    "slots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "$ref": "#/$defs/slot"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "safeLabel": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "nullableSafeLabel": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "suite": {
+      "type": "object",
+      "required": [
+        "suiteVersion",
+        "suiteId",
+        "suiteDigest",
+        "suitePlanDigest",
+        "casePolicyMapDigest"
+      ],
+      "properties": {
+        "suiteVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "suiteId": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "suiteDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "suitePlanDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "casePolicyMapDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "additionalProperties": false
+    },
+    "provider": {
+      "type": "object",
+      "required": [
+        "id",
+        "route",
+        "implementationVersion",
+        "protocolVersion",
+        "requested"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "route": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "implementationVersion": {
+          "$ref": "#/$defs/nullableSafeLabel"
+        },
+        "protocolVersion": {
+          "$ref": "#/$defs/nullableSafeLabel"
+        },
+        "requested": {
+          "type": "object",
+          "required": [
+            "model",
+            "effort",
+            "maxTokens"
+          ],
+          "properties": {
+            "model": {
+              "$ref": "#/$defs/nullableSafeLabel"
+            },
+            "effort": {
+              "$ref": "#/$defs/nullableSafeLabel"
+            },
+            "maxTokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "requirementVerifier": {
+      "type": "object",
+      "required": [
+        "id",
+        "version",
+        "consumerSourceCommit"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "version": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "consumerSourceCommit": {
+          "$ref": "#/$defs/nullableSafeLabel"
+        }
+      },
+      "additionalProperties": false
+    },
+    "case": {
+      "type": "object",
+      "required": [
+        "caseIndex",
+        "bundleManifestDigest",
+        "caseInputIdentityVersion",
+        "caseInputIdentityDigest",
+        "sanitizerRequirement",
+        "policy"
+      ],
+      "properties": {
+        "caseIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        },
+        "bundleManifestDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "caseInputIdentityVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "caseInputIdentityDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "sanitizerRequirement": {
+          "$ref": "#/$defs/sanitizerRequirement"
+        },
+        "policy": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "required": [
+            "policyVersion",
+            "policyDigest",
+            "policyTargetIdentityDigest",
+            "policyBindingDigest"
+          ],
+          "properties": {
+            "policyVersion": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "policyDigest": {
+              "$ref": "#/$defs/digest"
+            },
+            "policyTargetIdentityDigest": {
+              "$ref": "#/$defs/digest"
+            },
+            "policyBindingDigest": {
+              "$ref": "#/$defs/digest"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "sanitizerRequirement": {
+      "type": "object",
+      "required": [
+        "sanitizerRequirementVersion",
+        "sanitizerRequired",
+        "policyRequired",
+        "sanitizerRequirementReason",
+        "requirementVerifierId",
+        "requirementVerifierVersion",
+        "consumerSourceCommit",
+        "requirementDecisionDigest"
+      ],
+      "properties": {
+        "sanitizerRequirementVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "sanitizerRequired": {
+          "type": "boolean"
+        },
+        "policyRequired": {
+          "type": "boolean"
+        },
+        "sanitizerRequirementReason": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "requirementVerifierId": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "requirementVerifierVersion": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "consumerSourceCommit": {
+          "$ref": "#/$defs/nullableSafeLabel"
+        },
+        "requirementDecisionDigest": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "additionalProperties": false
+    },
+    "slot": {
+      "type": "object",
+      "required": [
+        "caseIndex",
+        "repeatIndex",
+        "attemptKey",
+        "runIdentityVersion",
+        "runId",
+        "attemptIdentityVersion",
+        "attemptId"
+      ],
+      "properties": {
+        "caseIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        },
+        "repeatIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        },
+        "attemptKey": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "runIdentityVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "runId": {
+          "$ref": "#/$defs/digest"
+        },
+        "attemptIdentityVersion": {
+          "type": "integer",
+          "const": 1
+        },
+        "attemptId": {
+          "$ref": "#/$defs/digest"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

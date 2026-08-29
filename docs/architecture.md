@@ -59,8 +59,13 @@ sanitizer, or provider process can start, it inspects every bundle manifest and 
 metadata without opening provider input contents, recomputes every case-input and requirement
 identity, verifies every required policy target/binding, and derives an immutable case-policy map
 plus deterministic slot descriptors. Not-required cases have no policy or sanitizer placeholder.
-Execution, formal-attempt suite context, ledger, resume, and report generation are separate
-lifecycle components. See [`docs/suite-v1.md`](suite-v1.md).
+After preflight, the pure suite-run manifest builder projects only value-free identities into an
+immutable schema-validated snapshot. It fixes every case and slot, derives the existing per-case
+run IDs and per-repeat attempt IDs, and excludes case IDs, input details, commands, and filesystem
+references. Its reader rederives the case-policy map, suite plan, run, attempt, and outer suite-run
+identities without starting external work. Private run-directory publication, the mutable ledger,
+execution, resume, and report generation remain separate lifecycle components. See
+[`docs/suite-v1.md`](suite-v1.md) and [`docs/suite-run-v1.md`](suite-run-v1.md).
 
 ### Approval gate
 
