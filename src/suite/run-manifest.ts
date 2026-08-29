@@ -192,7 +192,7 @@ export function createSuiteRunManifest(plan: SuitePreflightPlan): SuiteRunManife
       slots: source.slots,
     }, true);
     const suiteRunId = computeIdentityDigest(identity);
-    return Object.freeze({
+    const manifest = Object.freeze({
       suiteRunManifestVersion: identity.suiteRunManifestVersion,
       suiteRunIdentityVersion: identity.suiteRunIdentityVersion,
       suiteRunId,
@@ -206,6 +206,8 @@ export function createSuiteRunManifest(plan: SuitePreflightPlan): SuiteRunManife
       cases: identity.cases,
       slots: identity.slots,
     });
+    encodeCanonicalManifest(manifest);
+    return manifest;
   } catch (error) {
     if (error instanceof SuiteRunManifestError) throw error;
     throw invalidManifest();
@@ -227,13 +229,17 @@ export function computeSuiteRunIdentity(manifest: SuiteRunManifest): string {
 export function encodeSuiteRunManifest(manifest: SuiteRunManifest): Buffer {
   try {
     const snapshot = snapshotManifest(manifest, true);
-    const bytes = Buffer.from(`${JSON.stringify(snapshot)}\n`, "utf8");
-    if (bytes.length > MAX_SUITE_RUN_MANIFEST_BYTES) throw invalidManifest();
-    return bytes;
+    return encodeCanonicalManifest(snapshot);
   } catch (error) {
     if (error instanceof SuiteRunManifestError) throw error;
     throw invalidManifest();
   }
+}
+
+function encodeCanonicalManifest(manifest: SuiteRunManifest): Buffer {
+  const bytes = Buffer.from(`${JSON.stringify(manifest)}\n`, "utf8");
+  if (bytes.length > MAX_SUITE_RUN_MANIFEST_BYTES) throw invalidManifest();
+  return bytes;
 }
 
 /** Strictly reads suite-run bytes without opening files or starting external work. */

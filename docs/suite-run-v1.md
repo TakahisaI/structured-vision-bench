@@ -71,12 +71,17 @@ suiteRunId = 2b16533842fe5a7a56b78c32dd61dac28fc4840646a5c750b5b61e0bf5cba2b7
 The encoder emits compact JSON in the same fixed order plus one trailing newline. Equal preflight
 plans consequently produce byte-for-byte equal manifest files. The reader accepts insignificant
 JSON whitespace and member order but always reconstructs the same canonical identity object.
+The builder measures that canonical encoded form, including JSON escape expansion and the trailing
+newline, before returning. A projection whose bytes would exceed 4 MiB is rejected with
+`suite_run_manifest_invalid`; consequently every successful builder result is accepted by the
+official encoder's size boundary.
 
 ## Reader boundary
 
-The reader bounds input at 4 MiB before UTF-8 decoding, rejects a BOM, invalid UTF-8, duplicate
-members, partial or concatenated JSON, unknown members, sparse arrays, accessors in runtime builder
-input, schema-invalid values, and every identity mismatch. It returns fresh deeply frozen data.
+The reader bounds input at 4 MiB before UTF-8 decoding or copying, rejects a BOM, invalid UTF-8,
+duplicate members, partial or concatenated JSON, unknown members, sparse arrays, accessors in
+runtime builder input, schema-invalid values, and every identity mismatch. It returns fresh deeply
+frozen data.
 
 An external run-directory owner may pass an expected `suiteRunId`. This anchor rejects a
 coordinated, internally self-consistent replacement of the whole manifest. The filesystem contract

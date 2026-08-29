@@ -97,6 +97,13 @@ test("builds deterministic value-free suite run bytes and validates the schema",
   }
 });
 
+test("builder rejects a public-limit projection whose escaped canonical bytes exceed 4 MiB", () => {
+  assert.throws(
+    () => createSuiteRunManifest(oversizedEscapedProjectionPlan()),
+    isManifestError("suite_run_manifest_invalid"),
+  );
+});
+
 test("represents an approval-free policy-free suite without placeholder identities", () => {
   const plan = structuredClone(syntheticPlan()) as Mutable<SuitePreflightPlan>;
   const verifier: SanitizerRequirementVerifier = {
@@ -441,6 +448,69 @@ function syntheticPlan(): SuitePreflightPlan {
     cases,
     slots: cases.flatMap((_, caseIndex) =>
       Array.from({ length: repeat }, (_unused, repeatIndex) => ({
+        caseIndex,
+        repeatIndex,
+        attemptKey: deriveSuiteAttemptKey(caseIndex, repeatIndex),
+      })),
+    ),
+  };
+}
+
+function oversizedEscapedProjectionPlan(): SuitePreflightPlan {
+  const base = syntheticPlan();
+  const requiredTemplate = base.cases[1]!;
+  const longReason = "r".repeat(64);
+  const longCommit = "c".repeat(64);
+  const verifier: SanitizerRequirementVerifier = {
+    id: "v".repeat(64),
+    version: "w".repeat(64),
+    derive: () => ({
+      sanitizerRequired: true,
+      policyRequired: true,
+      sanitizerRequirementReason: longReason,
+      consumerSourceCommit: longCommit,
+    }),
+  };
+  const requirement = createSanitizerRequirementDecision(
+    {
+      sanitizerRequired: true,
+      policyRequired: true,
+      sanitizerRequirementReason: longReason,
+      consumerSourceCommit: longCommit,
+    },
+    verifier,
+  );
+  const cases = Array.from({ length: 1_000 }, (_unused, caseIndex) => ({
+    ...structuredClone(requiredTemplate),
+    caseIndex,
+    sanitizerRequirement: requirement,
+  }));
+  const casePolicyMapDigest = computeCasePolicyMapDigest(cases);
+  const repeat = 10;
+  return {
+    ...base,
+    suitePlanDigest: computeSuitePlanDigest(base.suiteDigest, casePolicyMapDigest),
+    casePolicyMapDigest,
+    repeat,
+    requirementVerifier: {
+      id: verifier.id,
+      version: verifier.version,
+      consumerSourceCommit: longCommit,
+    },
+    sanitizer: {
+      ...base.sanitizer!,
+      allowedFindingPathPatterns: Array.from(
+        { length: 100 },
+        (_unused, index) => `/${"\u0000".repeat(1_020)}${index.toString().padStart(3, "0")}`,
+      ),
+      failureCodes: Array.from(
+        { length: 100 },
+        (_unused, index) => `${"f".repeat(61)}${index.toString().padStart(3, "0")}`,
+      ),
+    },
+    cases,
+    slots: cases.flatMap((_unused, caseIndex) =>
+      Array.from({ length: repeat }, (_slot, repeatIndex) => ({
         caseIndex,
         repeatIndex,
         attemptKey: deriveSuiteAttemptKey(caseIndex, repeatIndex),
