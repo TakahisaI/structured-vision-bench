@@ -1,0 +1,2 @@
+Read the synthetic invoice. Preserve the printed line order, copy the invoice number and date exactly,
+and return all monetary values as integer Japanese yen amounts. The document is entirely fictional.

@@ -1,1 +1,0 @@
-Return only JSON that follows the supplied schema.
