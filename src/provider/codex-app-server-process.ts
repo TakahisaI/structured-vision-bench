@@ -21,7 +21,9 @@ import {
 import { MAX_PROVIDER_INPUT_BYTES } from "../bundle/validate-bundle.js";
 import {
   abortController,
+  abortControllerSignal,
   addAbortSignalListener,
+  createAbortController,
   isAbortSignalAborted,
   removeAbortSignalListener,
 } from "./abort-signal-intrinsics.js";
@@ -45,6 +47,13 @@ const DIRECTORY_MODE = 0o700;
 const FILE_MODE = 0o600;
 const HOST_PLATFORM = process.platform;
 const SPAWN_DETACHED = HOST_PLATFORM !== "win32";
+const applyIntrinsic = Reflect.apply;
+const arrayIsArrayIntrinsic = Array.isArray;
+const bindIntrinsic = Function.prototype.bind;
+const freezeIntrinsic = Object.freeze;
+const objectCreateIntrinsic = Object.create;
+const objectKeysIntrinsic = Object.keys;
+const objectValuesIntrinsic = Object.values;
 const MAX_STDERR_BYTES = 1024 * 1024;
 export const MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
 const PRIVATE_TEMP_PARENT = "/tmp";
@@ -56,7 +65,7 @@ const MAX_JSONL_LINE_BYTES = CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES + 1024 
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/u;
 const SAFE_LABEL_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
 const ENVIRONMENT_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
-const RESERVED_ENVIRONMENT_NAMES = new Set([
+const RESERVED_ENVIRONMENT_NAMES = freezeIntrinsic([
   "APPDATA",
   "CODEX_HOME",
   "HOME",
@@ -69,7 +78,7 @@ const RESERVED_ENVIRONMENT_NAMES = new Set([
   "XDG_CACHE_HOME",
   "XDG_CONFIG_HOME",
 ]);
-const DISABLED_FEATURES = Object.freeze([
+const DISABLED_FEATURES = freezeIntrinsic([
   "apps",
   "code_mode",
   "code_mode_host",
@@ -88,7 +97,7 @@ const DISABLED_FEATURES = Object.freeze([
   "unified_exec",
   "view_image",
 ]);
-const REASONING_EFFORTS = Object.freeze([
+const REASONING_EFFORTS = freezeIntrinsic([
   "none",
   "minimal",
   "low",
@@ -232,7 +241,9 @@ export async function runCodexAppServerProcess(
   } catch {
     throw new Error("codex app-server process failed");
   } finally {
-    for (const bytes of materialized) bytes.fill(0);
+    for (let index = 0; index < materialized.length; index += 1) {
+      materialized[index]!.fill(0);
+    }
     if (workspace !== undefined) {
       try {
         await rm(workspace.root, { force: true, recursive: true });
@@ -253,16 +264,17 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
   if (typeof executable !== "string" || !path.isAbsolute(executable)) throw new Error();
   const executableArguments = snapshotStrings(value.executableArguments ?? [], MAX_ARGUMENTS);
   const names = snapshotStrings(value.envAllowlist ?? [], 64);
-  const seen = new Set<string>();
-  for (const name of names) {
+  const seen: string[] = [];
+  for (let index = 0; index < names.length; index += 1) {
+    const name = names[index]!;
     if (
       !ENVIRONMENT_NAME_PATTERN.test(name) ||
-      RESERVED_ENVIRONMENT_NAMES.has(name) ||
-      seen.has(name)
+      stringArrayContains(RESERVED_ENVIRONMENT_NAMES, name) ||
+      stringArrayContains(seen, name)
     ) {
       throw new Error();
     }
-    seen.add(name);
+    seen[seen.length] = name;
   }
   const timeoutMs = value.timeoutMs ?? DEFAULT_CODEX_APP_SERVER_TIMEOUT_MS;
   const outputLimitBytes =
@@ -277,19 +289,20 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
   ) {
     throw new Error();
   }
-  return Object.freeze({
+  return freezeIntrinsic({
     executable,
-    executableArguments: Object.freeze(executableArguments),
-    envAllowlist: Object.freeze(names),
+    executableArguments: freezeIntrinsic(executableArguments),
+    envAllowlist: freezeIntrinsic(names),
     timeoutMs,
     outputLimitBytes,
   });
 }
 
 function snapshotStrings(value: readonly string[], limit: number): string[] {
-  if (!Array.isArray(value) || value.length > limit) throw new Error();
+  if (!arrayIsArrayIntrinsic(value) || value.length > limit) throw new Error();
   const output: string[] = [];
-  for (const entry of value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const entry = value[index];
     if (
       typeof entry !== "string" ||
       entry.length === 0 ||
@@ -298,9 +311,16 @@ function snapshotStrings(value: readonly string[], limit: number): string[] {
     ) {
       throw new Error();
     }
-    output.push(entry);
+    output[output.length] = entry;
   }
   return output;
+}
+
+function stringArrayContains(values: readonly string[], expected: string): boolean {
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === expected) return true;
+  }
+  return false;
 }
 
 function snapshotRequest(value: CodexAppServerProcessRequest): RequestSnapshot {
@@ -317,12 +337,12 @@ function snapshotRequest(value: CodexAppServerProcessRequest): RequestSnapshot {
   ) {
     throw new Error();
   }
-  return Object.freeze({
+  return freezeIntrinsic({
     image: snapshotInput(value.image, true),
     schema: snapshotInput(value.schema, false),
     system: snapshotInput(value.system, false),
     instruction: snapshotInput(value.instruction, false),
-    requested: Object.freeze({ model, effort, maxTokens: null }),
+    requested: freezeIntrinsic({ model, effort, maxTokens: null }),
   });
 }
 
@@ -343,10 +363,10 @@ function snapshotInput(
   ) {
     throw new Error();
   }
-  return Object.freeze({
+  return freezeIntrinsic({
     sha256,
     mediaType,
-    readBytes: Function.prototype.bind.call(readBytes, value) as () => Promise<Uint8Array>,
+    readBytes: applyIntrinsic(bindIntrinsic, readBytes, [value]) as () => Promise<Uint8Array>,
   });
 }
 
@@ -367,12 +387,16 @@ async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
       executablePath: path.join(root, "empty-path"),
       temporary: path.join(root, "tmp"),
     };
-    await Promise.all(
-      Object.values(directories).map((directory) =>
-        mkdir(directory, { mode: DIRECTORY_MODE }),
-      ),
-    );
-    const environment = Object.create(null) as NodeJS.ProcessEnv;
+    const directoryValues = objectValuesIntrinsic(directories);
+    const directoryCreations: Array<Promise<void>> = [];
+    for (let index = 0; index < directoryValues.length; index += 1) {
+      directoryCreations[directoryCreations.length] = mkdir(
+        directoryValues[index]!,
+        { mode: DIRECTORY_MODE },
+      );
+    }
+    await Promise.all(directoryCreations);
+    const environment = objectCreateIntrinsic(null) as NodeJS.ProcessEnv;
     environment.HOME = directories.home;
     environment.USERPROFILE = directories.home;
     environment.CODEX_HOME = directories.codexHome;
@@ -384,7 +408,7 @@ async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
     environment.TMPDIR = directories.temporary;
     environment.TMP = directories.temporary;
     environment.TEMP = directories.temporary;
-    return Object.freeze({
+    return freezeIntrinsic({
       root,
       workspace: directories.workspace,
       catalog: path.join(root, "model-catalog.json"),
@@ -402,13 +426,14 @@ async function readInput(
   timeoutMs: number,
   parentSignal: AbortSignal | undefined,
 ): Promise<Buffer> {
-  const controller = new AbortController();
+  const controller = createAbortController();
+  const controllerSignal = abortControllerSignal(controller);
   const abort = (): void => abortController(controller);
   addAbortSignalListener(parentSignal, abort);
   const timer = setTimeout(abort, timeoutMs);
   try {
     assertActive(parentSignal);
-    const value = await invokeLazyInput(input.readBytes, controller.signal);
+    const value = await invokeLazyInput(input.readBytes, controllerSignal);
     if (!(value instanceof Uint8Array)) throw new Error();
     try {
       if (value.byteLength > MAX_PROVIDER_INPUT_BYTES) throw new Error();
@@ -476,8 +501,23 @@ function zeroReturnedBytes(value: Uint8Array): void {
 }
 
 function createToolCatalog(requested: RequestedExecutionSettings & { model: string }): string {
-  const efforts = new Set(REASONING_EFFORTS);
-  if (requested.effort !== null) efforts.add(requested.effort);
+  const efforts: string[] = [];
+  for (let index = 0; index < REASONING_EFFORTS.length; index += 1) {
+    efforts[efforts.length] = REASONING_EFFORTS[index]!;
+  }
+  if (
+    requested.effort !== null &&
+    !stringArrayContains(efforts, requested.effort)
+  ) {
+    efforts[efforts.length] = requested.effort;
+  }
+  const supportedReasoningLevels: Array<{ effort: string; description: string }> = [];
+  for (let index = 0; index < efforts.length; index += 1) {
+    supportedReasoningLevels[supportedReasoningLevels.length] = {
+      effort: efforts[index]!,
+      description: "fixed extraction effort",
+    };
+  }
   const defaultEffort = requested.effort ?? "medium";
   return `${JSON.stringify({
     models: [
@@ -487,10 +527,7 @@ function createToolCatalog(requested: RequestedExecutionSettings & { model: stri
         display_name: requested.model,
         description: null,
         default_reasoning_level: defaultEffort,
-        supported_reasoning_levels: [...efforts].map((effort) => ({
-          effort,
-          description: "fixed extraction effort",
-        })),
+        supported_reasoning_levels: supportedReasoningLevels,
         shell_type: "disabled",
         visibility: "list",
         supported_in_api: true,
@@ -536,8 +573,17 @@ function appServerArguments(
   options: ValidatedOptions,
   workspace: PrivateWorkspace,
 ): string[] {
-  const arguments_ = [...options.executableArguments, "app-server", "--stdio", "--strict-config"];
-  for (const feature of DISABLED_FEATURES) arguments_.push("--disable", feature);
+  const arguments_: string[] = [];
+  for (let index = 0; index < options.executableArguments.length; index += 1) {
+    arguments_[arguments_.length] = options.executableArguments[index]!;
+  }
+  arguments_[arguments_.length] = "app-server";
+  arguments_[arguments_.length] = "--stdio";
+  arguments_[arguments_.length] = "--strict-config";
+  for (let index = 0; index < DISABLED_FEATURES.length; index += 1) {
+    arguments_[arguments_.length] = "--disable";
+    arguments_[arguments_.length] = DISABLED_FEATURES[index]!;
+  }
   const overrides = [
     `model_catalog_json=${JSON.stringify(workspace.catalog)}`,
     'personality="none"',
@@ -559,7 +605,10 @@ function appServerArguments(
     "hooks={}",
     "notify=[]",
   ];
-  for (const override of overrides) arguments_.push("-c", override);
+  for (let index = 0; index < overrides.length; index += 1) {
+    arguments_[arguments_.length] = "-c";
+    arguments_[arguments_.length] = overrides[index]!;
+  }
   return arguments_;
 }
 
@@ -572,8 +621,12 @@ async function runConnectedProcess(
   parentSignal: AbortSignal | undefined,
   startGuard: CodexAppServerProcessStartGuard | undefined,
 ): Promise<CodexAppServerProtocolResult> {
-  const controller = new AbortController();
-  const guardController = startGuard === undefined ? undefined : new AbortController();
+  const controller = createAbortController();
+  const controllerSignal = abortControllerSignal(controller);
+  const guardController =
+    startGuard === undefined ? undefined : createAbortController();
+  const guardSignal =
+    guardController === undefined ? undefined : abortControllerSignal(guardController);
   let abortRequested = false;
   const abort = (): void => {
     abortRequested = true;
@@ -604,7 +657,7 @@ async function runConnectedProcess(
       );
     } else {
       const authorization = snapshotStartAuthorization(
-        await startGuard(guardController!.signal),
+        await startGuard(guardSignal!),
         options.envAllowlist,
       );
       environment = snapshotSpawnEnvironment(
@@ -633,21 +686,21 @@ async function runConnectedProcess(
       close,
       terminate,
     );
-    const ready = await raceAbort(processConnection.receive(), controller.signal);
+    const ready = await raceAbort(processConnection.receive(), controllerSignal);
     assertIsolationReady(ready?.message);
-    const request = await prepareRequest(controller.signal);
+    const request = await prepareRequest(controllerSignal);
     const result = await runCodexAppServerProtocol(
       processConnection,
       request,
-      controller.signal,
+      controllerSignal,
     );
-    const status = await raceAbort(processConnection.waitForClose(), controller.signal);
+    const status = await raceAbort(processConnection.waitForClose(), controllerSignal);
     await terminate();
     if (status.code !== 0 || status.signal !== null) throw new Error();
     return result;
   } catch {
     if (child !== undefined) {
-      if (isAbortSignalAborted(controller.signal)) {
+      if (isAbortSignalAborted(controllerSignal)) {
         await waitForInterruptGrace(close);
       }
       if (close === undefined) {
@@ -670,9 +723,9 @@ function assertIsolationReady(value: JsonValue | undefined): void {
   if (
     value === undefined ||
     value === null ||
-    Array.isArray(value) ||
+    arrayIsArrayIntrinsic(value) ||
     typeof value !== "object" ||
-    Object.keys(value).length !== 2 ||
+    objectKeysIntrinsic(value).length !== 2 ||
     value.method !== "svbench/isolation/ready"
   ) {
     throw new Error();
@@ -680,9 +733,9 @@ function assertIsolationReady(value: JsonValue | undefined): void {
   const params = value.params;
   if (
     params === null ||
-    Array.isArray(params) ||
+    arrayIsArrayIntrinsic(params) ||
     typeof params !== "object" ||
-    Object.keys(params).length !== 10 ||
+    objectKeysIntrinsic(params).length !== 10 ||
     params.protocol !== CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION ||
     params.codexCliVersion !== CODEX_APP_SERVER_CLI_VERSION ||
     params.managedConfig !== "disabled" ||
@@ -851,9 +904,14 @@ function snapshotSpawnEnvironment(
   allowed: readonly (readonly [string, string])[],
   privateEnvironment: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
-  const environment = Object.create(null) as NodeJS.ProcessEnv;
-  for (const [name, value] of allowed) environment[name] = value;
-  for (const name of Object.keys(privateEnvironment)) {
+  const environment = objectCreateIntrinsic(null) as NodeJS.ProcessEnv;
+  for (let index = 0; index < allowed.length; index += 1) {
+    const entry = allowed[index]!;
+    environment[entry[0]] = entry[1];
+  }
+  const privateNames = objectKeysIntrinsic(privateEnvironment);
+  for (let index = 0; index < privateNames.length; index += 1) {
+    const name = privateNames[index]!;
     const value = privateEnvironment[name];
     if (value !== undefined) environment[name] = value;
   }
@@ -864,11 +922,14 @@ function snapshotAllowedEnvironment(
   allowlist: readonly string[],
 ): readonly (readonly [string, string])[] {
   const allowed: Array<readonly [string, string]> = [];
-  for (const name of allowlist) {
+  for (let index = 0; index < allowlist.length; index += 1) {
+    const name = allowlist[index]!;
     const value = process.env[name];
-    if (value !== undefined) allowed.push(Object.freeze([name, value]));
+    if (value !== undefined) {
+      allowed[allowed.length] = freezeIntrinsic([name, value]);
+    }
   }
-  return Object.freeze(allowed);
+  return freezeIntrinsic(allowed);
 }
 
 function snapshotStartAuthorization(
@@ -878,12 +939,12 @@ function snapshotStartAuthorization(
   if (value === null || typeof value !== "object") throw new Error();
   const finalize = value.finalize;
   const source = value.allowedEnvironment;
-  if (typeof finalize !== "function" || !Array.isArray(source)) throw new Error();
-  const allowedNames = new Set(allowlist);
-  const seen = new Set<string>();
+  if (typeof finalize !== "function" || !arrayIsArrayIntrinsic(source)) throw new Error();
+  const seen: string[] = [];
   const allowed: Array<readonly [string, string]> = [];
-  for (const entry of source) {
-    if (!Array.isArray(entry)) throw new Error();
+  for (let index = 0; index < source.length; index += 1) {
+    const entry = source[index];
+    if (!arrayIsArrayIntrinsic(entry)) throw new Error();
     const length = entry.length;
     const name = entry[0];
     const environmentValue = entry[1];
@@ -891,17 +952,17 @@ function snapshotStartAuthorization(
       length !== 2 ||
       typeof name !== "string" ||
       typeof environmentValue !== "string" ||
-      !allowedNames.has(name) ||
-      seen.has(name)
+      !stringArrayContains(allowlist, name) ||
+      stringArrayContains(seen, name)
     ) {
       throw new Error();
     }
-    seen.add(name);
-    allowed.push(Object.freeze([name, environmentValue]));
+    seen[seen.length] = name;
+    allowed[allowed.length] = freezeIntrinsic([name, environmentValue]);
   }
-  return Object.freeze({
-    allowedEnvironment: Object.freeze(allowed),
-    finalize: Function.prototype.bind.call(finalize, undefined),
+  return freezeIntrinsic({
+    allowedEnvironment: freezeIntrinsic(allowed),
+    finalize: applyIntrinsic(bindIntrinsic, finalize, [undefined]),
   });
 }
 
@@ -933,12 +994,14 @@ export function processGroupProbeFailureIndicatesLive(error: unknown): boolean {
   throw error;
 }
 
-const DEFAULT_LINUX_PROCESS_TABLE: LinuxProcessTable = Object.freeze({
+const DEFAULT_LINUX_PROCESS_TABLE: LinuxProcessTable = freezeIntrinsic({
   async listProcessIds(): Promise<readonly string[]> {
     const processIds: string[] = [];
-    for (const entry of await readdir("/proc", { withFileTypes: true })) {
+    const entries = await readdir("/proc", { withFileTypes: true });
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index]!;
       if (entry.isDirectory() && /^[1-9][0-9]*$/u.test(entry.name)) {
-        processIds.push(entry.name);
+        processIds[processIds.length] = entry.name;
       }
     }
     return processIds;
@@ -952,7 +1015,9 @@ export async function linuxProcessGroupHasLiveMember(
   processGroupId: number,
   processTable: LinuxProcessTable = DEFAULT_LINUX_PROCESS_TABLE,
 ): Promise<boolean> {
-  for (const processId of await processTable.listProcessIds()) {
+  const processIds = await processTable.listProcessIds();
+  for (let index = 0; index < processIds.length; index += 1) {
+    const processId = processIds[index]!;
     let source: string;
     try {
       source = await processTable.readProcessStat(processId);

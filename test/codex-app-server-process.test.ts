@@ -422,6 +422,65 @@ test("does not re-read the host platform after the synchronous finalizer", async
   });
 });
 
+test("does not use a replaced Object.create for the spawn environment", async () => {
+  await withFixture("success", async ({ options }) => {
+    const createDescriptor = Object.getOwnPropertyDescriptor(Object, "create");
+    assert.ok(createDescriptor?.value);
+    const createIntrinsic = createDescriptor.value as typeof Object.create;
+    let targetCreateCalls = 0;
+    let postFinalizerTraps = 0;
+    let finalizerComplete = false;
+
+    try {
+      const result = await runCodexAppServerProcess(
+        options,
+        request(readCounter()),
+        undefined,
+        async () => {
+          Object.defineProperty(Object, "create", {
+            configurable: true,
+            value(
+              prototype: object | null,
+              properties?: PropertyDescriptorMap,
+            ): object {
+              const target =
+                properties === undefined
+                  ? Reflect.apply(createIntrinsic, Object, [prototype])
+                  : Reflect.apply(createIntrinsic, Object, [prototype, properties]);
+              if (prototype !== null || targetCreateCalls !== 0) return target;
+              targetCreateCalls += 1;
+              return new Proxy(target, {
+                getOwnPropertyDescriptor(proxyTarget, property) {
+                  if (finalizerComplete) postFinalizerTraps += 1;
+                  return Reflect.getOwnPropertyDescriptor(proxyTarget, property);
+                },
+                ownKeys(proxyTarget) {
+                  if (finalizerComplete) postFinalizerTraps += 1;
+                  return Reflect.ownKeys(proxyTarget);
+                },
+              });
+            },
+          });
+          return {
+            allowedEnvironment: [],
+            finalize() {
+              finalizerComplete = true;
+              Object.defineProperty(Object, "create", createDescriptor);
+              return undefined;
+            },
+          };
+        },
+      );
+      assert.equal(result.respondedModel, "synthetic-model");
+    } finally {
+      Object.defineProperty(Object, "create", createDescriptor);
+    }
+
+    assert.equal(targetCreateCalls, 0);
+    assert.equal(postFinalizerTraps, 0);
+  });
+});
+
 test("does not read provider inputs before request and in-process isolation proof", async () => {
   for (const scenario of [
     { mode: "success", mutate: (value: CodexAppServerProcessRequest) => ({

@@ -347,6 +347,67 @@ test("snapshots allowlisted runtime environment after the spawn guard", async ()
   });
 });
 
+test("shared Array iterator mutation cannot replace the environment allowlist", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const environmentName = "SVBENCH_ALLOWED_CANARY";
+    const replacementName = "SVBENCH_PARENT_CANARY";
+    const previousAllowed = process.env[environmentName];
+    const previousParent = process.env[replacementName];
+    process.env[environmentName] = "synthetic-runtime-a";
+    process.env[replacementName] = "synthetic-parent-canary";
+    const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      Symbol.iterator,
+    );
+    assert.ok(iteratorDescriptor?.value);
+    let calls = 0;
+    try {
+      const direct = directInvocation();
+      const provider = createCodexAppServerProvider({
+        process: { ...options, envAllowlist: [environmentName] },
+        revalidateTransport: async (approval) => {
+          calls += 1;
+          if (calls === 1) {
+            Object.defineProperty(Array.prototype, Symbol.iterator, {
+              configurable: true,
+              writable: true,
+              value: function* (this: unknown[]): Generator<unknown> {
+                if (this.length === 1 && this[0] === environmentName) {
+                  yield replacementName;
+                  return;
+                }
+                for (let index = 0; index < this.length; index += 1) {
+                  yield this[index];
+                }
+              },
+            });
+          }
+          return approval;
+        },
+      });
+
+      try {
+        await provider.prepareTransport!(direct.approval);
+        await provider.invoke(direct.request, direct.context);
+      } finally {
+        Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+      }
+
+      const boundary = (await readCapture(capture)).find(
+        (record) => record.phase === "app-server",
+      );
+      assert.ok(boundary);
+      assert.equal(boundary.allowedCanary, "synthetic-runtime-a");
+      assert.equal(boundary.parentCanary, null);
+      assert.equal(calls, 2);
+    } finally {
+      Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+      restoreEnvironment(environmentName, previousAllowed);
+      restoreEnvironment(replacementName, previousParent);
+    }
+  });
+});
+
 test("reads allowlisted runtime only after final approval succeeds", async (context) => {
   for (const mode of ["prepare-only", "rejected-invoke"] as const) {
     await context.test(mode, async () => {
@@ -719,6 +780,71 @@ test("prepare-time AbortSignal prototype mutation cannot hide an aborted invoke"
       instruction: 0,
     });
     assert.equal(await appServerStarts(capture), 0);
+    assert.equal(await hasNewPreparedCatalog(existingRoots, model), false);
+  });
+});
+
+test("prepare-time AbortController signal mutation cannot hide internal cancellation", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const model = "synthetic-controller-signal-cancel-model";
+    const request = {
+      ...direct.request,
+      requested: { ...direct.request.requested, model },
+    };
+    const context = {
+      ...direct.context,
+      requested: request.requested,
+    };
+    const parent = new AbortController();
+    const parentSignal = parent.signal;
+    const decoy = new AbortController();
+    const decoySignal = decoy.signal;
+    const prototype = AbortController.prototype;
+    const signalDescriptor = Object.getOwnPropertyDescriptor(prototype, "signal");
+    assert.ok(signalDescriptor?.get);
+    const existingRoots = await codexTemporaryRoots();
+    let calls = 0;
+    let abortQueued = false;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual) => {
+        calls += 1;
+        if (calls === 1) {
+          Object.defineProperty(prototype, "signal", {
+            configurable: true,
+            get() {
+              return decoySignal;
+            },
+          });
+        } else if (calls === 2) {
+          abortQueued = true;
+          queueMicrotask(() => parent.abort());
+        }
+        return actual;
+      },
+    });
+
+    try {
+      await provider.prepareTransport!(direct.approval);
+      await assert.rejects(
+        provider.invoke(request, context, parentSignal),
+        stableProviderFailure,
+      );
+    } finally {
+      Object.defineProperty(prototype, "signal", signalDescriptor);
+    }
+
+    assert.equal(abortQueued, true);
+    assert.equal(parentSignal.aborted, true);
+    assert.equal(decoySignal.aborted, false);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.ok((await appServerStarts(capture)) <= 1);
     assert.equal(await hasNewPreparedCatalog(existingRoots, model), false);
   });
 });
