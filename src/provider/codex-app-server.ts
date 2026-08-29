@@ -7,6 +7,11 @@ import {
   type JsonValue,
 } from "../bundle/json.js";
 import { MAX_PROVIDER_INPUT_BYTES } from "../bundle/validate-bundle.js";
+import {
+  addAbortSignalListener,
+  isAbortSignalAborted,
+  removeAbortSignalListener,
+} from "./abort-signal-intrinsics.js";
 import type { ProviderUsage, RequestedExecutionSettings } from "../runner/types.js";
 
 export const CODEX_APP_SERVER_CLI_VERSION = "0.149.1";
@@ -143,7 +148,7 @@ export async function runCodexAppServerProtocol(
     const receiveBudget: ProtocolReceiveBudget = {
       remainingBytes: MAX_PROTOCOL_RECEIVED_BYTES,
     };
-    signal?.addEventListener("abort", abort, { once: true });
+    addAbortSignalListener(signal, abort);
 
     await send(connection, initializeRequest(), signal);
     validateInitializeResponse(await nextResponse(connection, 1, receiveBudget, signal));
@@ -231,14 +236,14 @@ export async function runCodexAppServerProtocol(
     if ((await receive(connection, receiveBudget, signal)) !== undefined) throw new Error();
     return { ...result, stopReason: null };
   } catch {
-    if (abortCleanup !== undefined || signal?.aborted) {
+    if (abortCleanup !== undefined || isAbortSignalAborted(signal)) {
       await (abortCleanup ?? beginAbortCleanup());
     } else {
       closeInput();
     }
     throw new Error("codex app-server protocol failed");
   } finally {
-    signal?.removeEventListener("abort", abort);
+    removeAbortSignalListener(signal, abort);
     imageCopy?.fill(0);
   }
 }
@@ -1118,7 +1123,7 @@ function isTokenCount(value: unknown): value is number {
 }
 
 function assertActive(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw new Error();
+  if (isAbortSignalAborted(signal)) throw new Error();
 }
 
 async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
@@ -1129,11 +1134,11 @@ async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined
     rejectAbort = reject;
   });
   const abort = (): void => rejectAbort(new Error());
-  signal.addEventListener("abort", abort, { once: true });
+  addAbortSignalListener(signal, abort);
   void promise.catch(() => undefined);
   try {
     return await Promise.race([promise, aborted]);
   } finally {
-    signal.removeEventListener("abort", abort);
+    removeAbortSignalListener(signal, abort);
   }
 }

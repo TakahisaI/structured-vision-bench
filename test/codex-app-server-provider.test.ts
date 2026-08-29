@@ -563,6 +563,94 @@ test("consumer guard signal mutation cannot disable process cancellation", async
   });
 });
 
+test("shared AbortSignal prototype mutation cannot disable internal cancellation", async () => {
+  await withFixture("provider-success", async ({ capture, options }) => {
+    const direct = directInvocation();
+    const model = "synthetic-prototype-cancel-model";
+    const request = {
+      ...direct.request,
+      requested: { ...direct.request.requested, model },
+    };
+    const context = {
+      ...direct.context,
+      requested: request.requested,
+    };
+    const parent = new AbortController();
+    const prototype = AbortSignal.prototype;
+    const abortedDescriptor = Object.getOwnPropertyDescriptor(prototype, "aborted");
+    const addEventListenerDescriptor = Object.getOwnPropertyDescriptor(
+      prototype,
+      "addEventListener",
+    );
+    const existingRoots = await codexTemporaryRoots();
+    let calls = 0;
+    let abortedReads = 0;
+    let abortQueued = false;
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (actual, signal) => {
+        calls += 1;
+        if (calls === 2) {
+          assert.ok(signal);
+          assert.equal(Object.getPrototypeOf(signal), prototype);
+          Object.defineProperties(prototype, {
+            aborted: {
+              configurable: true,
+              get() {
+                abortedReads += 1;
+                if (abortedReads === 3 && !abortQueued) {
+                  abortQueued = true;
+                  queueMicrotask(() => parent.abort());
+                }
+                return false;
+              },
+            },
+            addEventListener: {
+              configurable: true,
+              value() {},
+            },
+          });
+        }
+        return actual;
+      },
+    });
+
+    await provider.prepareTransport!(direct.approval);
+    try {
+      await assert.rejects(
+        provider.invoke(request, context, parent.signal),
+        stableProviderFailure,
+      );
+    } finally {
+      if (abortedDescriptor === undefined) {
+        Reflect.deleteProperty(prototype, "aborted");
+      } else {
+        Object.defineProperty(prototype, "aborted", abortedDescriptor);
+      }
+      if (addEventListenerDescriptor === undefined) {
+        Reflect.deleteProperty(prototype, "addEventListener");
+      } else {
+        Object.defineProperty(
+          prototype,
+          "addEventListener",
+          addEventListenerDescriptor,
+        );
+      }
+    }
+
+    assert.equal(abortQueued, true);
+    assert.equal(parent.signal.aborted, true);
+    assert.deepEqual(direct.reads, {
+      image: 0,
+      schema: 0,
+      system: 0,
+      instruction: 0,
+    });
+    assert.ok((await appServerStarts(capture)) <= 1);
+    assert.equal(await hasNewPreparedCatalog(existingRoots, model), false);
+  });
+});
+
 test("does not execute inherited optional approval getters", async () => {
   await withFixture("provider-success", async ({ capture, options }) => {
     const direct = directInvocation();

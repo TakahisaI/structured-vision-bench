@@ -20,6 +20,11 @@ import {
 } from "../bundle/json.js";
 import { MAX_PROVIDER_INPUT_BYTES } from "../bundle/validate-bundle.js";
 import {
+  addAbortSignalListener,
+  isAbortSignalAborted,
+  removeAbortSignalListener,
+} from "./abort-signal-intrinsics.js";
+import {
   CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES,
   CODEX_APP_SERVER_CLI_VERSION,
   runCodexAppServerProtocol,
@@ -396,7 +401,7 @@ async function readInput(
 ): Promise<Buffer> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();
-  parentSignal?.addEventListener("abort", abort, { once: true });
+  addAbortSignalListener(parentSignal, abort);
   const timer = setTimeout(abort, timeoutMs);
   try {
     assertActive(parentSignal);
@@ -415,7 +420,7 @@ async function readInput(
     }
   } finally {
     clearTimeout(timer);
-    parentSignal?.removeEventListener("abort", abort);
+    removeAbortSignalListener(parentSignal, abort);
   }
 }
 
@@ -430,14 +435,14 @@ function invokeLazyInput(
   });
   return new Promise((resolve, reject) => {
     let settled = false;
-    const removeAbortListener = (): void => signal.removeEventListener("abort", abort);
+    const removeAbortListener = (): void => removeAbortSignalListener(signal, abort);
     const abort = (): void => {
       if (settled) return;
       settled = true;
       removeAbortListener();
       reject(new Error());
     };
-    signal.addEventListener("abort", abort, { once: true });
+    addAbortSignalListener(signal, abort);
     void pending.then(
       (value) => {
         if (settled) {
@@ -459,7 +464,7 @@ function invokeLazyInput(
         reject(error);
       },
     );
-    if (signal.aborted) abort();
+    if (isAbortSignalAborted(signal)) abort();
   });
 }
 
@@ -572,7 +577,7 @@ async function runConnectedProcess(
     controller.abort();
     guardController?.abort();
   };
-  parentSignal?.addEventListener("abort", abort, { once: true });
+  addAbortSignalListener(parentSignal, abort);
   const timer = setTimeout(abort, options.timeoutMs);
   let child: ChildProcessWithoutNullStreams | undefined;
   let close: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
@@ -637,7 +642,7 @@ async function runConnectedProcess(
     return result;
   } catch {
     if (child !== undefined) {
-      if (controller.signal.aborted) {
+      if (isAbortSignalAborted(controller.signal)) {
         await waitForInterruptGrace(close);
       }
       if (close === undefined) {
@@ -649,7 +654,7 @@ async function runConnectedProcess(
     throw new Error();
   } finally {
     clearTimeout(timer);
-    parentSignal?.removeEventListener("abort", abort);
+    removeAbortSignalListener(parentSignal, abort);
     child?.stdin.destroy();
     child?.stdout.destroy();
     child?.stderr.destroy();
@@ -1007,19 +1012,19 @@ function destroyChildStreams(child: ChildProcessWithoutNullStreams): void {
 }
 
 function assertActive(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw new Error();
+  if (isAbortSignalAborted(signal)) throw new Error();
 }
 
 async function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) throw new Error();
+  if (isAbortSignalAborted(signal)) throw new Error();
   let rejectAbort!: () => void;
   const aborted = new Promise<never>((_resolve, reject) => {
     rejectAbort = () => reject(new Error());
   });
-  signal.addEventListener("abort", rejectAbort, { once: true });
+  addAbortSignalListener(signal, rejectAbort);
   try {
     return await Promise.race([promise, aborted]);
   } finally {
-    signal.removeEventListener("abort", rejectAbort);
+    removeAbortSignalListener(signal, rejectAbort);
   }
 }
