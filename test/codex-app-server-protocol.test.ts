@@ -456,6 +456,67 @@ test(
   },
 );
 
+test("shared Array iterator mutation cannot skip active flags or required keys", async () => {
+  const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+    Array.prototype,
+    Symbol.iterator,
+  );
+  const inheritedServiceTier = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "serviceTier",
+  );
+  assert.ok(iteratorDescriptor?.value);
+
+  try {
+    Object.defineProperty(Object.prototype, "serviceTier", {
+      configurable: true,
+      value: null,
+      writable: true,
+    });
+    Object.defineProperty(Array.prototype, Symbol.iterator, {
+      configurable: true,
+      writable: true,
+      value: function* (this: unknown[]): Generator<unknown> {
+        if (
+          (this.length === 1 && this[0] === "syntheticUnknownFlag") ||
+          this.some((value) => value === "serviceTier")
+        ) {
+          return;
+        }
+        for (let index = 0; index < this.length; index += 1) {
+          yield this[index];
+        }
+      },
+    });
+
+    const activeFlags = new SyntheticConnection("unknown-active-flag");
+    await assert.rejects(
+      runCodexAppServerProtocol(activeFlags, request()),
+      /codex app-server protocol failed/u,
+    );
+    assert.equal(activeFlags.closed, true);
+
+    const requiredKeys = new RequiredKeyDeletingConnection(
+      "success",
+      "serviceTier",
+      threadStartResultTarget,
+    );
+    await assert.rejects(
+      runCodexAppServerProtocol(requiredKeys, request()),
+      /codex app-server protocol failed/u,
+    );
+    assert.equal(requiredKeys.deleted, true);
+    assert.equal(requiredKeys.closed, true);
+  } finally {
+    Object.defineProperty(Array.prototype, Symbol.iterator, iteratorDescriptor);
+    if (inheritedServiceTier === undefined) {
+      delete (Object.prototype as { serviceTier?: unknown }).serviceTier;
+    } else {
+      Object.defineProperty(Object.prototype, "serviceTier", inheritedServiceTier);
+    }
+  }
+});
+
 test("waits for a delayed interrupt send before closing input", async () => {
   const connection = new DelayedInterruptConnection();
   const controller = new AbortController();
@@ -618,7 +679,11 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
         method: "thread/status/changed",
         params: {
           threadId: "synthetic-thread",
-          status: { type: "active", activeFlags: [] },
+          status: {
+            type: "active",
+            activeFlags:
+              this.mode === "unknown-active-flag" ? ["syntheticUnknownFlag"] : [],
+          },
         },
       };
       if (this.mode === "turn-started-before-status") {

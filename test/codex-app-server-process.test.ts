@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
 import { createHash } from "node:crypto";
+import fsPromises from "node:fs/promises";
 import { mkdtemp, readFile, rm, stat, watch, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -280,6 +283,151 @@ test("rejects a start finalizer that does not complete synchronously", async () 
     );
   });
 });
+
+test("consumes a rejected finalizer promise despite a hostile Promise constructor getter", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const constructorDescriptor = Object.getOwnPropertyDescriptor(
+      Promise.prototype,
+      "constructor",
+    );
+    assert.ok(constructorDescriptor);
+    const unhandledRejections: unknown[] = [];
+    const recordUnhandledRejection = (reason: unknown): void => {
+      unhandledRejections[unhandledRejections.length] = reason;
+    };
+    process.on("unhandledRejection", recordUnhandledRejection);
+
+    try {
+      await assert.rejects(
+        runCodexAppServerProcess(
+          options,
+          request(readCounter()),
+          undefined,
+          async () => ({
+            allowedEnvironment: [],
+            finalize() {
+              const rejected = Promise.reject(new Error("synthetic rejected finalizer"));
+              Object.defineProperty(Promise.prototype, "constructor", {
+                configurable: true,
+                get() {
+                  throw new Error("synthetic constructor access");
+                },
+              });
+              return rejected as unknown as undefined;
+            },
+          }),
+        ),
+        stableProcessError,
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      Object.defineProperty(Promise.prototype, "constructor", constructorDescriptor);
+      process.off("unhandledRejection", recordUnhandledRejection);
+    }
+
+    assert.deepEqual(unhandledRejections, []);
+    assert.equal(
+      (await readCapture(capture)).some((record) => record.phase === "app-server"),
+      false,
+    );
+  });
+});
+
+test("uses captured Node process and cleanup functions after the finalizer", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const originalSpawn = childProcess.spawn;
+    const originalRm = fsPromises.rm;
+    let replacementSpawnCalls = 0;
+    let replacementRmCalls = 0;
+
+    try {
+      const result = await runCodexAppServerProcess(
+        options,
+        request(readCounter()),
+        undefined,
+        async () => ({
+          allowedEnvironment: [],
+          finalize() {
+            childProcess.spawn = ((..._arguments: unknown[]) => {
+              replacementSpawnCalls += 1;
+              throw new Error("synthetic replacement spawn");
+            }) as typeof childProcess.spawn;
+            fsPromises.rm = (async (..._arguments: unknown[]) => {
+              replacementRmCalls += 1;
+            }) as typeof fsPromises.rm;
+            syncBuiltinESMExports();
+            return undefined;
+          },
+        }),
+      );
+      assert.equal(result.respondedModel, "synthetic-model");
+    } finally {
+      childProcess.spawn = originalSpawn;
+      fsPromises.rm = originalRm;
+      syncBuiltinESMExports();
+    }
+
+    assert.equal(replacementSpawnCalls, 0);
+    assert.equal(replacementRmCalls, 0);
+    const boundary = (await readCapture(capture)).find(
+      (record) => record.phase === "app-server",
+    );
+    assert.ok(boundary);
+    await assertMissing(String(boundary.root));
+  });
+});
+
+test(
+  "uses captured timeout scheduling after the synchronous finalizer",
+  { timeout: 5_000 },
+  async () => {
+    await withFixture("isolation-hang-descendant", async ({ options, capture }) => {
+      const setTimeoutDescriptor = Object.getOwnPropertyDescriptor(globalThis, "setTimeout");
+      assert.ok(setTimeoutDescriptor);
+      const originalSetTimeout = setTimeout;
+      const originalClearTimeout = clearTimeout;
+      const controller = new AbortController();
+      const rescue = originalSetTimeout(() => controller.abort(), 750);
+      const startedAt = Date.now();
+
+      try {
+        await assert.rejects(
+          runCodexAppServerProcess(
+            { ...options, timeoutMs: 100 },
+            request(readCounter()),
+            controller.signal,
+            async () => ({
+              allowedEnvironment: [],
+              finalize() {
+                Object.defineProperty(globalThis, "setTimeout", {
+                  configurable: true,
+                  value: () => 0,
+                  writable: true,
+                });
+                return undefined;
+              },
+            }),
+          ),
+          stableProcessError,
+        );
+      } finally {
+        originalClearTimeout(rescue);
+        Object.defineProperty(globalThis, "setTimeout", setTimeoutDescriptor);
+      }
+
+      assert.ok(Date.now() - startedAt < 600, "internal timeout must win before rescue");
+      const records = await readCapture(capture);
+      const boundary = records.find((record) => record.phase === "app-server");
+      const descendant = records.find(
+        (record) => record.isolationDescendantPid !== undefined,
+      );
+      assert.ok(boundary);
+      assert.ok(descendant);
+      await assertMissing(String(boundary.root));
+      await assertProcessStopped(Number(descendant.isolationDescendantPid));
+    });
+  },
+);
 
 test("rejects an internal abort requested by the synchronous finalizer", async () => {
   await withFixture("success", async ({ options, capture }) => {

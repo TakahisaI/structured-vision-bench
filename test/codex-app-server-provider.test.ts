@@ -408,6 +408,50 @@ test("shared Array iterator mutation cannot replace the environment allowlist", 
   });
 });
 
+test("invocation settlement uses the module-load Promise constructor", async () => {
+  await withFixture("provider-success", async ({ options }) => {
+    const promiseDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Promise");
+    assert.ok(promiseDescriptor);
+    const OriginalPromise = Promise;
+    let revalidations = 0;
+    const direct = directInvocation();
+    const provider = createCodexAppServerProvider({
+      process: options,
+      revalidateTransport: async (approval) => {
+        revalidations += 1;
+        if (revalidations === 1) {
+          const ReplacementPromise = function (
+            executor: (
+              resolve: (value?: unknown) => void,
+              reject: (reason?: unknown) => void,
+            ) => void,
+          ): Promise<unknown> {
+            executor(undefined as unknown as (value?: unknown) => void, () => undefined);
+            return OriginalPromise.resolve();
+          } as unknown as PromiseConstructor;
+          Object.defineProperty(globalThis, "Promise", {
+            configurable: true,
+            value: ReplacementPromise,
+            writable: true,
+          });
+        }
+        return approval;
+      },
+    });
+
+    try {
+      await provider.prepareTransport!(direct.approval);
+      const running = provider.invoke(direct.request, direct.context);
+      Object.defineProperty(globalThis, "Promise", promiseDescriptor);
+      await running;
+    } finally {
+      Object.defineProperty(globalThis, "Promise", promiseDescriptor);
+    }
+
+    assert.equal(revalidations, 2);
+  });
+});
+
 test("reads allowlisted runtime only after final approval succeeds", async (context) => {
   for (const mode of ["prepare-only", "rejected-invoke"] as const) {
     await context.test(mode, async () => {

@@ -15,6 +15,7 @@ import {
   type CodexAppServerProcessRequest,
   type CodexAppServerProcessStartAuthorization,
 } from "./codex-app-server-process.js";
+import { createIntrinsicPromise } from "./promise-intrinsics.js";
 import type {
   ApprovalResponse,
   Provider,
@@ -138,7 +139,7 @@ export function createCodexAppServerProvider(
       const controllerSignal = abortControllerSignal(controller);
       const abort = (): void => abortController(controller);
       let settleInvocation!: () => void;
-      const settled = new Promise<void>((resolve) => {
+      const settled = createIntrinsicPromise<void>((resolve) => {
         settleInvocation = resolve;
       });
       const invocation = freezeIntrinsic({ controller, settled });

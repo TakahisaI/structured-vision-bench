@@ -40,6 +40,7 @@ import {
   ignoreIntrinsicPromiseRejection,
   raceIntrinsicPromises,
   resolveIntrinsicPromise,
+  restoreIntrinsicPromiseConstructor,
   thenIntrinsicPromise,
 } from "./promise-intrinsics.js";
 import type { RequestedExecutionSettings } from "../runner/types.js";
@@ -57,10 +58,26 @@ const SPAWN_DETACHED = HOST_PLATFORM !== "win32";
 const applyIntrinsic = Reflect.apply;
 const arrayIsArrayIntrinsic = Array.isArray;
 const bindIntrinsic = Function.prototype.bind;
+const chmodIntrinsic = chmod;
+const clearTimeoutIntrinsic = clearTimeout;
+const createHashIntrinsic = createHash;
+const dateNowIntrinsic = Date.now;
 const freezeIntrinsic = Object.freeze;
+const mkdirIntrinsic = mkdir;
+const mkdtempIntrinsic = mkdtemp;
 const objectCreateIntrinsic = Object.create;
 const objectKeysIntrinsic = Object.keys;
 const objectValuesIntrinsic = Object.values;
+const processKillIntrinsic = applyIntrinsic(bindIntrinsic, process.kill, [
+  process,
+]) as typeof process.kill;
+const readFileIntrinsic = readFile;
+const readdirIntrinsic = readdir;
+const realpathIntrinsic = realpath;
+const rmIntrinsic = rm;
+const setTimeoutIntrinsic = setTimeout;
+const spawnIntrinsic = spawn;
+const writeFileIntrinsic = writeFile;
 const MAX_STDERR_BYTES = 1024 * 1024;
 export const MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
 const PRIVATE_TEMP_PARENT = "/tmp";
@@ -189,7 +206,7 @@ export async function runCodexAppServerProcess(
     assertActive(signal);
     workspace = await createPrivateWorkspace();
     const activeWorkspace = workspace;
-    await writeFile(activeWorkspace.catalog, createToolCatalog(request.requested), {
+    await writeFileIntrinsic(activeWorkspace.catalog, createToolCatalog(request.requested), {
       encoding: "utf8",
       flag: "wx",
       mode: FILE_MODE,
@@ -253,7 +270,7 @@ export async function runCodexAppServerProcess(
     }
     if (workspace !== undefined) {
       try {
-        await rm(workspace.root, { force: true, recursive: true });
+        await rmIntrinsic(workspace.root, { force: true, recursive: true });
       } catch {
         throw new Error("codex app-server process failed");
       }
@@ -378,13 +395,13 @@ function snapshotInput(
 }
 
 async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
-  const temporaryParent = await realpath(PRIVATE_TEMP_PARENT);
+  const temporaryParent = await realpathIntrinsic(PRIVATE_TEMP_PARENT);
   if (!path.isAbsolute(temporaryParent)) throw new Error();
-  const root = await mkdtemp(path.join(temporaryParent, "svbench-codex-"));
+  const root = await mkdtempIntrinsic(path.join(temporaryParent, "svbench-codex-"));
   try {
-    const canonicalRoot = await realpath(root);
+    const canonicalRoot = await realpathIntrinsic(root);
     if (path.dirname(canonicalRoot) !== temporaryParent) throw new Error();
-    await chmod(root, DIRECTORY_MODE);
+    await chmodIntrinsic(root, DIRECTORY_MODE);
     const directories = {
       home: path.join(root, "home"),
       codexHome: path.join(root, "codex-home"),
@@ -396,7 +413,7 @@ async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
     };
     const directoryValues = objectValuesIntrinsic(directories);
     for (let index = 0; index < directoryValues.length; index += 1) {
-      await mkdir(directoryValues[index]!, { mode: DIRECTORY_MODE });
+      await mkdirIntrinsic(directoryValues[index]!, { mode: DIRECTORY_MODE });
     }
     const environment = objectCreateIntrinsic(null) as NodeJS.ProcessEnv;
     environment.HOME = directories.home;
@@ -417,7 +434,11 @@ async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
       environment,
     });
   } catch {
-    await rm(root, { force: true, recursive: true }).catch(() => undefined);
+    try {
+      await rmIntrinsic(root, { force: true, recursive: true });
+    } catch {
+      // Preserve the stable workspace-creation error below.
+    }
     throw new Error();
   }
 }
@@ -432,7 +453,7 @@ async function readInput(
   const controllerSignal = abortControllerSignal(controller);
   const abort = (): void => abortController(controller);
   addAbortSignalListener(parentSignal, abort);
-  const timer = setTimeout(abort, timeoutMs);
+  const timer = setTimeoutIntrinsic(abort, timeoutMs);
   try {
     assertActive(parentSignal);
     const value = await invokeLazyInput(input.readBytes, controllerSignal);
@@ -441,7 +462,7 @@ async function readInput(
       if (value.byteLength > MAX_PROVIDER_INPUT_BYTES) throw new Error();
       const bytes = Buffer.from(value);
       materialized.push(bytes);
-      if (createHash("sha256").update(bytes).digest("hex") !== input.sha256) {
+      if (createHashIntrinsic("sha256").update(bytes).digest("hex") !== input.sha256) {
         throw new Error();
       }
       return bytes;
@@ -449,7 +470,7 @@ async function readInput(
       zeroReturnedBytes(value);
     }
   } finally {
-    clearTimeout(timer);
+    clearTimeoutIntrinsic(timer);
     removeAbortSignalListener(parentSignal, abort);
   }
 }
@@ -637,7 +658,7 @@ async function runConnectedProcess(
     abortController(guardController);
   };
   addAbortSignalListener(parentSignal, abort);
-  const timer = setTimeout(abort, options.timeoutMs);
+  const timer = setTimeoutIntrinsic(abort, options.timeoutMs);
   let child: ChildProcessWithoutNullStreams | undefined;
   let close: Promise<{ code: number | null; signal: NodeJS.Signals | null }> | undefined;
   let termination: Promise<void> | undefined;
@@ -667,14 +688,19 @@ async function runConnectedProcess(
         authorization.allowedEnvironment,
         workspace.environment,
       );
-      const finalizerResult: unknown = authorization.finalize();
+      let finalizerResult: unknown;
+      try {
+        finalizerResult = authorization.finalize();
+      } finally {
+        restoreIntrinsicPromiseConstructor();
+      }
       if (finalizerResult !== undefined) {
         ignoreIntrinsicPromiseRejection(finalizerResult);
         throw new Error();
       }
       if (abortRequested) throw new Error();
     }
-    child = spawn(options.executable, arguments_, {
+    child = spawnIntrinsic(options.executable, arguments_, {
       cwd: workspace.workspace,
       detached: SPAWN_DETACHED,
       env: environment,
@@ -714,7 +740,7 @@ async function runConnectedProcess(
     }
     throw new Error();
   } finally {
-    clearTimeout(timer);
+    clearTimeoutIntrinsic(timer);
     removeAbortSignalListener(parentSignal, abort);
     child?.stdin.destroy();
     child?.stdout.destroy();
@@ -896,7 +922,7 @@ async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Prom
   const pid = child.pid;
   if (pid === undefined) return;
   try {
-    process.kill(-pid, "SIGKILL");
+    processKillIntrinsic(-pid, "SIGKILL");
   } catch (error) {
     if (objectWithCode(error).code !== "ESRCH") throw error;
   }
@@ -970,18 +996,18 @@ function snapshotStartAuthorization(
 }
 
 async function waitForProcessGroupSettlement(processGroupId: number): Promise<void> {
-  const deadline = Date.now() + PROCESS_GROUP_SETTLE_TIMEOUT_MS;
+  const deadline = dateNowIntrinsic() + PROCESS_GROUP_SETTLE_TIMEOUT_MS;
   while (await processGroupHasLiveMember(processGroupId)) {
-    if (Date.now() >= deadline) throw new Error();
+    if (dateNowIntrinsic() >= deadline) throw new Error();
     await createIntrinsicPromise<void>((resolve) => {
-      setTimeout(resolve, PROCESS_GROUP_SETTLE_INTERVAL_MS);
+      setTimeoutIntrinsic(resolve, PROCESS_GROUP_SETTLE_INTERVAL_MS);
     });
   }
 }
 
 async function processGroupHasLiveMember(processGroupId: number): Promise<boolean> {
   try {
-    process.kill(-processGroupId, 0);
+    processKillIntrinsic(-processGroupId, 0);
   } catch (error) {
     return processGroupProbeFailureIndicatesLive(error);
   }
@@ -1000,7 +1026,7 @@ export function processGroupProbeFailureIndicatesLive(error: unknown): boolean {
 const DEFAULT_LINUX_PROCESS_TABLE: LinuxProcessTable = freezeIntrinsic({
   async listProcessIds(): Promise<readonly string[]> {
     const processIds: string[] = [];
-    const entries = await readdir("/proc", { withFileTypes: true });
+    const entries = await readdirIntrinsic("/proc", { withFileTypes: true });
     for (let index = 0; index < entries.length; index += 1) {
       const entry = entries[index]!;
       if (entry.isDirectory() && /^[1-9][0-9]*$/u.test(entry.name)) {
@@ -1010,7 +1036,7 @@ const DEFAULT_LINUX_PROCESS_TABLE: LinuxProcessTable = freezeIntrinsic({
     return processIds;
   },
   async readProcessStat(processId: string): Promise<string> {
-    return readFile(`/proc/${processId}/stat`, "utf8");
+    return readFileIntrinsic(`/proc/${processId}/stat`, "utf8");
   },
 });
 
@@ -1066,11 +1092,11 @@ async function waitForInterruptGrace(
     await raceIntrinsicPromises(
       close,
       createIntrinsicPromise<void>((resolve) => {
-        timer = setTimeout(resolve, 50);
+        timer = setTimeoutIntrinsic(resolve, 50);
       }),
     );
   } finally {
-    if (timer !== undefined) clearTimeout(timer);
+    if (timer !== undefined) clearTimeoutIntrinsic(timer);
   }
 }
 

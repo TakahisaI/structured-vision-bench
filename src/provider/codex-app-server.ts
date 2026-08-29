@@ -776,7 +776,8 @@ function validateThreadStatus(
     throw new Error();
   }
   if (expected === "idle") throw new Error();
-  for (const flag of status.activeFlags) {
+  for (let index = 0; index < status.activeFlags.length; index += 1) {
+    const flag = status.activeFlags[index];
     if (flag !== "waitingOnApproval" && flag !== "waitingOnUserInput") {
       throw new Error();
     }
@@ -1075,7 +1076,8 @@ function assertRequiredKeys(
   object: Record<string, JsonValue>,
   keys: readonly string[],
 ): void {
-  for (const key of keys) {
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!;
     if (!Object.hasOwn(object, key)) throw new Error();
   }
 }

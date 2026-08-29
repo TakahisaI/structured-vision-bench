@@ -161,7 +161,10 @@ while timeout, cancellation, protocol, and input-read settlement retain a separa
 that consumer code never receives. Promise construction and settlement on those internal paths use
 module-load-captured native Promise construction and `then`; they do not depend on the mutable global
 `Promise`, mutable Promise prototype methods, or iterable-based `Promise.race()` and `Promise.all()`
-after consumer code has run.
+after consumer code has run. Invocation settlement, process spawn and cleanup, timeout scheduling,
+process-group inspection, and required protocol-field validation likewise use module-load-captured
+primitives or indexed traversal rather than consumer-replaceable globals, live Node built-in export
+bindings, or shared Array iterators.
 
 Only the four extraction callbacks and requested model/effort/null max-tokens setting cross from
 the Provider into the process client. Approval, case and bundle identities, provenance, sanitizer
