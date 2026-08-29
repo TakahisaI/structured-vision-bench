@@ -50,6 +50,18 @@ binding checks, cancellation/timeout signaling, exclusive attempt claiming, fina
 publication, and machine-readable attempt metadata. It does not own application-specific validation.
 A provider, approval, sanitizer, parse, policy, or schema failure creates no formal attempt.
 
+### Suite preflight
+
+Suite v1 keeps ordered multi-case execution settings outside every bundle. Its strict reader fixes
+the exact suite bytes, provider/request settings, requirement-verifier and approval identities,
+optional shared sanitizer command, and each case-specific policy reference. Before any approval,
+sanitizer, or provider process can start, it inspects every bundle manifest and referenced-file
+metadata without opening provider input contents, recomputes every case-input and requirement
+identity, verifies every required policy target/binding, and derives an immutable case-policy map
+plus deterministic slot descriptors. Not-required cases have no policy or sanitizer placeholder.
+Execution, formal-attempt suite context, ledger, resume, and report generation are separate
+lifecycle components. See [`docs/suite-v1.md`](suite-v1.md).
+
 ### Approval gate
 
 Approval v1 is a consumer-owned pre-transport decision boundary. After public bundle preflight and
