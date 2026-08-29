@@ -1,3 +1,0 @@
-Extract only information visibly present in the supplied synthetic document.
-Return one JSON object that conforms to the provided JSON Schema.
-Use null only when the schema permits it. Never infer a missing value.

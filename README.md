@@ -1,204 +1,98 @@
 # structured-vision-bench
 
-Reproducible benchmarks for schema-guided structured extraction from document images.
+A deliberately small harness for one structured-vision experiment at a time.
 
-`structured-vision-bench` defines a portable case bundle, validates that bundle without following
-unsafe paths, and provides a public home for model-runner and comparison tooling. It is designed for
-teams that must keep real documents, truth data, prompts, provider credentials, and production
-adapters outside a public repository.
+It reads one case, invokes either a checked-in mock output or one local provider command, validates
+the returned JSON against a small documented JSON Schema subset, and optionally compares it with an
+exact truth document.
 
-> **Status:** bundle v1 validation, the deterministic single-case mock runner, the Phase A command
-> provider, comparison reports, single-run approval protocol v1, the private command sanitizer,
-> approval-bound Codex app-server single runs, and suite v1 all-case preflight are available.
-> Suite execution, ledger, resume, and reporting remain tracked in Issue
-> [#5](https://github.com/TakahisaI/structured-vision-bench/issues/5).
+## Scope
 
-## What belongs here
+The active implementation intentionally supports only:
 
-- A versioned, provider-neutral benchmark bundle contract.
-- Safe local validation of bundle manifests and referenced files.
-- Synthetic fixtures that contain no real person, transaction, document, or model response.
-- Provider interfaces, a shell-free local command adapter, and test doubles.
-- A target-bound, shell-free private sanitizer command protocol for required single runs.
-- Single-case `svbench run --provider mock` execution with consumer-attested sanitizer requirements,
-  an optional or required private approval command, atomic formal attempts, and sanitizer output
-  when the consumer requires it.
-- Value-free single-case comparison and explicit rescoring.
-- Strict suite v1 manifests, all-case requirement/policy preflight, and deterministic slot plans.
-- Suite execution, reporting, repeat, and resume logic implemented by later issues.
+- one case per invocation;
+- one provider invocation, with no retry;
+- mock output for CI or a local stdin/stdout command;
+- a small JSON Schema subset;
+- exact JSON comparison with path-only diagnostics.
 
-## What does not belong here
+It does **not** implement suites, repeats, resume, ledgers, hash chains, approval gates, sanitizer
+protocols, provider-specific transports, credential management, or production-grade isolation. Git
+history retains the earlier experiments; they are not part of the active contract.
 
-- Production prompts, schemas, preprocessing rules, or API clients owned by another application.
-- Real document images, human-created truth for real documents, or real model output.
-- OAuth credentials, API keys, authorization URLs or codes, account identifiers, or token stores.
-- CI jobs that call Codex, ChatGPT, OpenAI Platform, Anthropic, or another hosted model.
-- Telemetry or automatic upload of bundles, attempts, or reports.
+## Case format
 
-See [the security boundary](docs/security.md) before adding fixtures or provider code.
+A case directory contains `case.json`:
 
-## Quick start
-
-Requirements: Node.js 24.15.0 or later, below Node.js 25, and npm 10, 11, or 12.
-
-```bash
-npm install
-npm run verify
+```json
+{
+  "image": "image.svg",
+  "schema": "schema.json",
+  "system": "system.txt",
+  "instruction": "instruction.txt",
+  "truth": "truth.json",
+  "mockOutput": "mock-output.json"
+}
 ```
 
-Validate the complete synthetic bundle directly:
+`image`, `schema`, and `instruction` are required. `system`, `truth`, and `mockOutput` are optional.
+All references must resolve to regular files inside the case directory.
 
-```bash
-npm run bundle:check -- fixtures/synthetic/invoice-basic
-npm run bundle:check -- fixtures/synthetic/invoice-basic --json
-```
-
-Run the public synthetic fixture with the deterministic mock provider:
-
-```bash
-./scripts/svbench.mjs run \
-  --bundle fixtures/synthetic/invoice-basic \
-  --provider mock \
-  --model mock-v1 \
-  --effort medium \
-  --max-tokens 512 \
-  --attempt-key dev-001 \
-  --attempt-root /tmp/svbench-attempts \
-  --json
-```
-
-The runner derives a stable run identity from execution settings, then derives a caller-keyed
-attempt identity (`--attempt-key` defaults to `single`) and exclusively claims that directory before
-provider work. Different keys allow repeat instances of the same run to coexist. After the formal
-document is known, the runner derives a post-sanitization artifact identity. The successful
-attempt-ID directory contains one digest-named artifact child, which contains only `attempt.json` and
-the formal `document.json`; the final manifest is published with a no-replace filesystem operation
-only after its complete bytes have been validated. The pending manifest is staged outside the final attempt directory in a private
-`.claim-<nonce>/` directory, so the final manifest link is the sole transition to the reader-visible
-shape; cleanup of that source is best effort after publication. When the consumer decision requires a
-sanitizer, that document is the sanitizer output.
-Not-required attempts omit sanitizer/policy/target-binding blocks rather than storing null placeholders.
-The runner bounds each staged provider input to 16 MiB and revokes provider read callbacks after
-provider execution settles.
-See [`docs/attempt-v1.md`](docs/attempt-v1.md) and
-[`schemas/attempt-v1.schema.json`](schemas/attempt-v1.schema.json) for the lifecycle and manifest
-contract. CI and public fixtures use the mock provider only; no real model or login flow is run.
-The mock provider is deterministic and schema-valid for the validator's supported synthesis subset,
-including local `$ref` with supported sibling constraints and simple `allOf` intersections; it is not
-a general-purpose JSON Schema instance generator.
-
-Suite v1 preflight strictly reads an ordered suite, inspects all bundle metadata without opening
-provider input contents, validates requirement and policy identities before external work, and
-derives a bounded deterministic slot plan. It does not run those slots yet.
-See [`docs/suite-v1.md`](docs/suite-v1.md) and
-[`schemas/suite-v1.schema.json`](schemas/suite-v1.schema.json).
-
-For a consumer-owned gate, add `--approval required` plus the command, expected gate/snapshot,
-runtime-binding, approved-scope, and phase options. The command is spawned without a shell and with
-only explicitly allowlisted environment variables; its executable and path-valued arguments are
-absolute, and each invocation uses a fresh private working directory. An approved private provider
-adapter also revalidates its current runtime/scope binding immediately before transport. See
-[`docs/approval-v1.md`](docs/approval-v1.md) for the exact CLI, wire protocol, identity binding, and
-fail-closed behavior.
-
-For a consumer-required sanitizer, add `--sanitizer required` plus the absolute command, expected
-sanitizer and policy identities, policy file, current case-input identity, binding digest, and
-consumer requirement identity options. The exact policy bytes are checked before provider access;
-the raw provider document and normalized policy envelope then cross the private process boundary on
-stdin only. See [`docs/sanitizer-v1.md`](docs/sanitizer-v1.md) for the protocol and complete CLI
-contract.
-
-The Phase A command provider invokes a consumer-owned adapter from a private five-file request
-directory. It remains limited to policy-not-required single runs. Codex app-server runs may use the
-runner's target-bound sanitizer after extraction and before formal publication.
-Its local manifest and strict response contract are documented in
-[`docs/command-provider-v1.md`](docs/command-provider-v1.md). Local provenance and approval data are
-adapter-only context and must not be forwarded to a hosted model. Approved adapters reattest their
-current private transport binding before extraction inputs are exposed.
-
-Compare a finalized attempt with its exact execution bundle:
-
-```bash
-./scripts/svbench.mjs compare \
-  --bundle fixtures/synthetic/invoice-basic \
-  --attempt /tmp/svbench-attempts/<attempt-id> \
-  --json
-```
-
-Human mode emits a value-free Markdown report. Explicit truth or comparison-policy corrections use
-`--rescore --rescore-reason <safe-label>` and still require the case, provenance, and all four
-provider-input identities to match. See [`docs/comparison-v1.md`](docs/comparison-v1.md) and
-[`schemas/comparison-v1.schema.json`](schemas/comparison-v1.schema.json).
-
-The validator performs these checks before the selected provider can run:
-
-1. `bundle.json` conforms to [`schemas/bundle-v1.schema.json`](schemas/bundle-v1.schema.json).
-2. The output schema is a supported, locally referenced JSON Schema subset and is meta-validated
-   before provider invocation.
-3. Every reference is a normalized relative path inside the bundle root.
-4. Referenced inputs are regular files, not symbolic links.
-5. Each referenced file matches its declared SHA-256 digest, read from the same bytes that are
-   parsed or handed onward.
-6. Referenced schema and optional truth files contain valid JSON under the byte-exactness contract
-   (strict UTF-8 without a leading BOM, Unicode scalar strings, no duplicate object members,
-   binary64 numbers only), and system/instruction text files use the same UTF-8-without-BOM rule.
-7. The comparison pointer contract holds: RFC 6901 pointers with at most one whole-segment `*`
-   wildcard, allowed only in `critical` entries and only pointing at declared arrays and compared
-   fields (`comparison_contract_invalid` otherwise).
-8. When truth exists, its projection is validated before provider invocation — every declared scalar, array,
-   key, and compared field must resolve with sound keys and types
-   (`truth_contract_invalid` otherwise).
-
-## Bundle overview
+The supported schema keywords are:
 
 ```text
-case-directory/
-├── bundle.json
-├── prepared-image.png
-├── schema.json
-├── system.txt
-├── instruction.txt
-└── truth.json          # optional
+$schema, title, description, type, required, properties,
+additionalProperties, items, enum, const
 ```
 
-A bundle is immutable input. Attempt output is stored outside the bundle and must not silently
-rewrite it. The full contract, path rules, validation order, and versioning policy are in
-[`docs/bundle-v1.md`](docs/bundle-v1.md).
+Supported types are `object`, `array`, `string`, `number`, `integer`, `boolean`, and `null`.
+Anything else is rejected as `unsupported_schema` rather than being silently ignored.
 
-## Repository layout
+## Run with the synthetic mock
 
-```text
-.github/workflows/     Public CI; never invokes a real provider
-schemas/               Machine-readable public contracts
-docs/                  Architecture, security, bundle, and attempt specifications
-fixtures/synthetic/    Fictional, redistributable test cases
-src/bundle/             Contract validation library
-src/cli/                Local command-line entry points
-scripts/                Dependency-light development tooling
-test/                   Node.js test-runner suites
+```bash
+npm test
+node src/svbench.js run --case fixtures/synthetic-invoice --mock
 ```
 
-## Design principles
+Exit status is `0` for a pass, `1` for schema/truth failure, and `2` for invalid configuration or a
+provider failure.
 
-- **Production stays private.** A consuming application remains the source of truth for its prompt,
-  schema, preprocessing, validation, and API provider.
-- **The route is part of the result.** Subscription-backed exploration and production API
-  calibration are distinct provider routes even when model names look similar.
-- **Unknown is not zero.** Missing usage, model, effort, or stop-reason metadata is recorded as
-  unavailable rather than guessed.
-- **Fabrication is not a missed field.** Later comparison work keeps invented values and extra rows
-  visible instead of hiding them in one average score.
-- **CI is offline with respect to models.** Public automation uses synthetic fixtures and fake
-  providers only.
+## Run a local provider command
 
-## Development
+```bash
+node src/svbench.js run \
+  --case fixtures/synthetic-invoice \
+  --provider node \
+  --provider-arg examples/mock-provider.js
+```
 
-Read [`AGENTS.md`](AGENTS.md) before changing the repository. Work is tracked as one Issue, one
-branch, and one pull request. The first contract and repository bootstrap are defined by
-[Issue #1](https://github.com/TakahisaI/structured-vision-bench/issues/1); the single-case runner
-is defined by [Issue #2](https://github.com/TakahisaI/structured-vision-bench/issues/2).
+The provider receives one JSON object on stdin:
 
-## License and affiliation
+```json
+{
+  "version": 1,
+  "imagePath": "/absolute/local/path/image.svg",
+  "schema": {},
+  "system": "...",
+  "instruction": "..."
+}
+```
 
-MIT licensed. This project is not affiliated with or endorsed by OpenAI, ChatGPT, Codex, Anthropic,
-or any other model provider.
+It must write exactly one JSON document to stdout and exit `0`. The harness invokes the command
+without a shell. A real provider adapter, login flow, API client, and retention policy belong outside
+this repository.
+
+## Results
+
+Results contain status flags plus bounded issue records such as:
+
+```json
+{
+  "path": "/total",
+  "kind": "different"
+}
+```
+
+Truth and output values are deliberately omitted from diagnostics. Use `--output result.json` to
+also write the result locally. Do not commit private cases or results.
