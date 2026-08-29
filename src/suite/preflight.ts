@@ -21,6 +21,12 @@ import {
 import { RunnerError } from "../runner/errors.js";
 import { snapshotSanitizerFindingPathPatterns } from "../runner/sanitizer-finding-path.js";
 import { MAX_SANITIZER_POLICY_BYTES, prepareSanitizerPolicy } from "../runner/sanitizer.js";
+import {
+  computeSuitePlanDigest as computeSuitePlanDigestV1,
+  deriveSuiteAttemptKey as deriveSuiteAttemptKeyV1,
+  snapshotSuiteAttemptContext,
+  type SuiteAttemptContext,
+} from "./context.js";
 
 const SUITE_FILE_NAME = "suite.json";
 const MAX_SUITE_BYTES = 4 * 1024 * 1024;
@@ -159,6 +165,8 @@ export type SuitePreflightPlan = Readonly<{
   cases: readonly SuiteCasePlan[];
   slots: readonly SuiteSlotDescriptor[];
 }>;
+
+export { type SuiteAttemptContext } from "./context.js";
 
 type SuiteManifestV1 = {
   suiteVersion: 1;
@@ -324,22 +332,14 @@ export async function preflightSuite(
 }
 
 export function deriveSuiteAttemptKey(caseIndex: number, repeatIndex: number): string {
-  if (
-    !Number.isSafeInteger(caseIndex) ||
-    caseIndex < 0 ||
-    !Number.isSafeInteger(repeatIndex) ||
-    repeatIndex < 0
-  ) {
-    throw new SuitePreflightError("suite_slot_invalid", "suite slot is invalid");
-  }
-  const attemptKey = `c${caseIndex.toString(36)}-r${repeatIndex.toString(36)}`;
-  if (!/^[A-Za-z0-9._-]{1,64}$/u.test(attemptKey)) {
+  try {
+    return deriveSuiteAttemptKeyV1(caseIndex, repeatIndex);
+  } catch {
     throw new SuitePreflightError("suite_slot_invalid", "suite slot is invalid", {
       caseIndex,
       repeatIndex,
     });
   }
-  return attemptKey;
 }
 
 /** Commits the exact suite bytes and its ordered case-policy mapping. */
@@ -347,14 +347,41 @@ export function computeSuitePlanDigest(
   suiteDigest: string,
   casePolicyMapDigest: string,
 ): string {
-  if (!isDigest(suiteDigest) || !isDigest(casePolicyMapDigest)) {
+  try {
+    return computeSuitePlanDigestV1(suiteDigest, casePolicyMapDigest);
+  } catch {
     throw new SuitePreflightError("suite_invalid", "suite plan identity is invalid");
   }
-  return digestParts([
-    Buffer.from("svbench-suite-plan-v1", "ascii"),
-    lengthPrefixedAscii(suiteDigest),
-    lengthPrefixedAscii(casePolicyMapDigest),
-  ]);
+}
+
+/** Projects one preflighted slot into the exact context accepted by runBundle. */
+export function createSuiteAttemptContext(
+  plan: SuitePreflightPlan,
+  slot: SuiteSlotDescriptor,
+): SuiteAttemptContext {
+  const expected = plan.slots.find(
+    (candidate) =>
+      candidate.caseIndex === slot.caseIndex && candidate.repeatIndex === slot.repeatIndex,
+  );
+  if (expected === undefined || expected.attemptKey !== slot.attemptKey) {
+    throw new SuitePreflightError("suite_slot_invalid", "suite slot is invalid", {
+      caseIndex: slot.caseIndex,
+      repeatIndex: slot.repeatIndex,
+    });
+  }
+  try {
+    return snapshotSuiteAttemptContext({
+      suiteVersion: plan.suiteVersion,
+      suiteId: plan.suiteId,
+      suiteDigest: plan.suiteDigest,
+      suitePlanDigest: plan.suitePlanDigest,
+      casePolicyMapDigest: plan.casePolicyMapDigest,
+      caseIndex: slot.caseIndex,
+      repeatIndex: slot.repeatIndex,
+    });
+  } catch {
+    throw new SuitePreflightError("suite_invalid", "suite attempt context is invalid");
+  }
 }
 
 /** Commits the ordered requirement and case-specific policy mapping. */

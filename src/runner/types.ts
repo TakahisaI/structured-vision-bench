@@ -4,6 +4,7 @@ import type {
   SanitizerRequirementSettings,
 } from "./identity.js";
 import type { JsonValue } from "../bundle/json.js";
+import type { SuiteAttemptContext } from "../suite/context.js";
 
 export type JsonRecord = { [key: string]: JsonValue };
 
@@ -279,6 +280,7 @@ export type RunBundleOptions = {
   requestedEffort?: string | null;
   maxTokens?: number | null;
   attemptKey?: string;
+  suiteContext?: SuiteAttemptContext;
   phase?: string;
   harnessVersion?: string;
   harnessCommit?: string | null;

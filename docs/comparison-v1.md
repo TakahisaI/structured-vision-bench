@@ -67,6 +67,10 @@ The result records execution and scoring bundle digests separately, the four pro
 identities, attempt/run/artifact/case-input identities, exact formal document digest, sanitizer identity and
 value-free findings, and the explicit rescore reason.
 
+When the verified attempt belongs to a suite slot, comparison copies its verified suite context
+unchanged into `identity.suite`; it never reconstructs it from an untrusted case or report. Direct
+single-run comparisons omit that property rather than emitting a null or dummy suite identity.
+
 ## Classification and aggregation
 
 Scalar and declared array fields use the bundle-v1 classifications `missed`, `fabricated`, `wrong`,

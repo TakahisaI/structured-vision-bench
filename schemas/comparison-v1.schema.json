@@ -55,6 +55,9 @@
         "runId": {
           "$ref": "#/$defs/digest"
         },
+        "suite": {
+          "$ref": "#/$defs/suiteContext"
+        },
         "caseInputIdentityDigest": {
           "$ref": "#/$defs/digest"
         },
@@ -193,6 +196,46 @@
     }
   },
   "$defs": {
+    "suiteContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "suiteVersion",
+        "suiteId",
+        "suiteDigest",
+        "suitePlanDigest",
+        "casePolicyMapDigest",
+        "caseIndex",
+        "repeatIndex"
+      ],
+      "properties": {
+        "suiteVersion": {
+          "const": 1
+        },
+        "suiteId": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "suiteDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "suitePlanDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "casePolicyMapDigest": {
+          "$ref": "#/$defs/digest"
+        },
+        "caseIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        },
+        "repeatIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 999
+        }
+      }
+    },
     "digest": {
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"

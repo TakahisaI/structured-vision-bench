@@ -39,6 +39,11 @@ import type {
   SanitizerFinding,
   SanitizerPolicyBindingIdentity,
 } from "./types.js";
+import {
+  deriveSuiteAttemptKey,
+  snapshotSuiteAttemptContext,
+  type SuiteAttemptContext,
+} from "../suite/context.js";
 
 export const ATTEMPT_VERSION = 1 as const;
 export const MAX_DOCUMENT_BYTES = 4 * 1024 * 1024;
@@ -114,6 +119,7 @@ export type AttemptManifest = {
   attemptKey: string;
   attemptId: string;
   runId: string;
+  suite?: SuiteAttemptContext;
   bundleVersion: 1;
   caseId: string;
   documentKind: string;
@@ -1085,6 +1091,7 @@ function parseAttemptManifest(
     "attemptKey",
     "attemptId",
     "runId",
+    "suite",
     "bundleVersion",
     "caseId",
     "documentKind",
@@ -1110,6 +1117,13 @@ function parseAttemptManifest(
   const attemptId = requiredDigest(manifest.attemptId);
   requiredDigest(manifest.artifactId);
   const runId = requiredDigest(manifest.runId);
+  const suite = parseSuiteContext(manifest.suite);
+  if (
+    suite !== undefined &&
+    deriveSuiteAttemptKey(suite.caseIndex, suite.repeatIndex) !== attemptKey
+  ) {
+    throw new RunnerError("attempt_identity_mismatch", "attempt suite slot identity is invalid");
+  }
   if (computeAttemptIdentity({ runId, attemptKey }).attemptId !== attemptId) {
     throw new RunnerError("attempt_identity_mismatch", "attempt instance identity is invalid");
   }
@@ -1277,6 +1291,7 @@ function parseAttemptManifest(
       requirementVerifierVersion: sanitizerRequirement.requirementVerifierVersion,
       consumerSourceCommit: sanitizerRequirement.consumerSourceCommit,
       requirementDecisionDigest: sanitizerRequirement.requirementDecisionDigest,
+      ...(suite === undefined ? {} : { suiteContext: suite }),
     }) !== runId
   ) {
     throw new RunnerError("attempt_identity_mismatch", "attempt run identity is invalid");
@@ -1284,6 +1299,25 @@ function parseAttemptManifest(
   // The writer creates this shape from typed values. Re-check the identity and
   // binding invariants here, then return the parsed value for normal consumers.
   return manifest as unknown as AttemptManifest;
+}
+
+function parseSuiteContext(value: JsonValue | undefined): SuiteAttemptContext | undefined {
+  if (value === undefined) return undefined;
+  const suite = requiredObject(value);
+  assertKeys(suite, [
+    "suiteVersion",
+    "suiteId",
+    "suiteDigest",
+    "suitePlanDigest",
+    "casePolicyMapDigest",
+    "caseIndex",
+    "repeatIndex",
+  ]);
+  try {
+    return snapshotSuiteAttemptContext(suite as unknown as SuiteAttemptContext);
+  } catch {
+    throw new RunnerError("attempt_identity_mismatch", "attempt suite context is invalid");
+  }
 }
 
 function parseSanitizerRequirement(

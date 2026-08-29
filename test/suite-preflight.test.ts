@@ -18,6 +18,7 @@ import { createSanitizerPolicyEnvelope } from "../src/runner/sanitizer.js";
 import {
   computeCasePolicyMapDigest,
   computeSuitePlanDigest,
+  createSuiteAttemptContext,
   deriveSuiteAttemptKey,
   preflightSuite,
   SuitePreflightError,
@@ -135,6 +136,15 @@ test("preflights a mixed suite and derives an immutable ordered plan", async () 
     assert.equal(Object.isFrozen(plan.slots[0]), true);
     assert.equal(Object.isFrozen(plan.provider.requested), true);
     assert.equal(Object.isFrozen(plan.sanitizer?.allowedFindingPathPatterns), true);
+    assert.deepEqual(createSuiteAttemptContext(plan, plan.slots[1]!), {
+      suiteVersion: 1,
+      suiteId: plan.suiteId,
+      suiteDigest: plan.suiteDigest,
+      suitePlanDigest: plan.suitePlanDigest,
+      casePolicyMapDigest: plan.casePolicyMapDigest,
+      caseIndex: 0,
+      repeatIndex: 1,
+    });
   });
 });
 
