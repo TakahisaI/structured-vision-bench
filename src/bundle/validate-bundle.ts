@@ -118,6 +118,18 @@ export type PreparedBundleForRunner = {
   prepareAttemptRootGuard: (attemptRoot: string) => Promise<AttemptRootGuard>;
 };
 
+export type InspectedBundleForSuitePreflight = {
+  caseId: string;
+  documentKind: string;
+  bundleVersion: 1;
+  manifestDigest: string;
+  manifestFileIdentity: {
+    device: number;
+    inode: number;
+  };
+  image: LoadedBundleInput;
+};
+
 export type AttemptRootGuard = {
   assertStable: () => Promise<void>;
 };
@@ -139,6 +151,10 @@ type ResolvedReference = FileReference & { absolute: string };
 type JsonFileResult = {
   value: JsonValue;
   bytes: Buffer;
+  fileIdentity: {
+    device: number;
+    inode: number;
+  };
 };
 
 type ValidatedBundleInternals = {
@@ -146,6 +162,7 @@ type ValidatedBundleInternals = {
   manifest: Record<string, JsonValue>;
   manifestBytes: Buffer;
   manifestDigest: string;
+  manifestFileIdentity: JsonFileResult["fileIdentity"];
   summary: BundleValidationResult;
   references: Map<string, ResolvedReference>;
   jsonFiles: Map<string, JsonFileResult>;
@@ -359,10 +376,43 @@ export async function prepareBundleForRunner(
   };
 }
 
+/**
+ * Fixes only bundle manifest metadata needed by suite-wide preflight. It does
+ * not open the image, schema, prompt, instruction, or truth contents.
+ */
+export async function inspectBundleForSuitePreflight(
+  bundleDirectory: string,
+  contractSchemaPath = path.resolve("schemas/bundle-v1.schema.json"),
+): Promise<InspectedBundleForSuitePreflight> {
+  const validated = await validateBundleInternal(bundleDirectory, contractSchemaPath, {
+    deferReferencedContent: true,
+    deferOutputSchemaDefinition: true,
+  });
+  const imageReference = validated.references.get("inputs.image");
+  const metadata = validated.manifest.metadata;
+  if (imageReference === undefined || !isJsonObject(metadata) || typeof metadata.documentKind !== "string") {
+    throw new BundleValidationError("runner_bundle_incomplete", "bundle inputs are incomplete");
+  }
+  return {
+    caseId: String(validated.manifest.caseId),
+    documentKind: metadata.documentKind,
+    bundleVersion: 1,
+    manifestDigest: validated.manifestDigest,
+    manifestFileIdentity: { ...validated.manifestFileIdentity },
+    image: {
+      sha256: imageReference.sha256,
+      mediaType: imageReference.mediaType,
+    },
+  };
+}
+
 async function validateBundleInternal(
   bundleDirectory: string,
   contractSchemaPath: string,
-  options: { deferReferencedContent: boolean } = { deferReferencedContent: false },
+  options: {
+    deferReferencedContent: boolean;
+    deferOutputSchemaDefinition?: boolean;
+  } = { deferReferencedContent: false },
 ): Promise<ValidatedBundleInternals> {
   await assertBundleRoot(bundleDirectory);
   const root = await realpath(bundleDirectory);
@@ -418,23 +468,25 @@ async function validateBundleInternal(
     }
   }
 
-  const schemaReference = requireReference(inputs, "schema");
   const jsonFiles = new Map<string, JsonFileResult>();
-  const schemaFile = await readVerifiedJson(
-    root,
-    schemaReference.path,
-    "inputs.schema",
-    schemaReference.sha256,
-  );
-  const schemaDefinitionIssues = validateJsonSchemaDefinition(schemaFile.value);
-  if (schemaDefinitionIssues.length > 0) {
-    throw new BundleValidationError(
-      "output_schema_invalid",
-      "output schema is not supported",
-      boundDetails(schemaDefinitionIssues.map((issue) => `${issue.path}: ${issue.message}`)),
+  if (!options.deferOutputSchemaDefinition) {
+    const schemaReference = requireReference(inputs, "schema");
+    const schemaFile = await readVerifiedJson(
+      root,
+      schemaReference.path,
+      "inputs.schema",
+      schemaReference.sha256,
     );
+    const schemaDefinitionIssues = validateJsonSchemaDefinition(schemaFile.value);
+    if (schemaDefinitionIssues.length > 0) {
+      throw new BundleValidationError(
+        "output_schema_invalid",
+        "output schema is not supported",
+        boundDetails(schemaDefinitionIssues.map((issue) => `${issue.path}: ${issue.message}`)),
+      );
+    }
+    jsonFiles.set("inputs.schema", schemaFile);
   }
-  jsonFiles.set("inputs.schema", schemaFile);
   if (!options.deferReferencedContent) {
     if (Object.hasOwn(inputs, "truth")) {
       const truthReference = requireReference(inputs, "truth");
@@ -460,6 +512,7 @@ async function validateBundleInternal(
     manifest,
     manifestBytes: manifestResult.bytes,
     manifestDigest: createHash("sha256").update(manifestResult.bytes).digest("hex"),
+    manifestFileIdentity: manifestResult.fileIdentity,
     summary,
     references: resolvedReferences,
     jsonFiles,
@@ -477,7 +530,7 @@ async function readVerifiedJson(
   manifestPath: string,
   label: string,
   expectedDigest: string,
-): Promise<{ value: JsonValue; bytes: Buffer }> {
+): Promise<JsonFileResult> {
   const absolute = await resolveReferencedFile(root, manifestPath, label);
   const result = await readJsonFile(absolute, label, MAX_JSON_BYTES, root);
   const actualDigest = createHash("sha256").update(result.bytes).digest("hex");
@@ -602,12 +655,14 @@ async function readJsonFile(
   label: string,
   maxBytes: number | null,
   root?: string,
-): Promise<{ value: JsonValue; bytes: Buffer }> {
+): Promise<JsonFileResult> {
   let descriptor: OpenFileDescriptor | undefined;
   let bytes: Buffer;
+  let fileIdentity: JsonFileResult["fileIdentity"];
   try {
     descriptor = await openVerifiedFile(file, root);
     const info = fstatSync(descriptor);
+    fileIdentity = { device: info.dev, inode: info.ino };
     if (maxBytes !== null && info.size > maxBytes) {
       throw new BundleValidationError(
         "json_file_too_large",
@@ -630,7 +685,7 @@ async function readJsonFile(
 
   try {
     const source = decodeUtf8Strict(bytes, label);
-    return { value: parseJson(source, label), bytes };
+    return { value: parseJson(source, label), bytes, fileIdentity };
   } catch {
     throw new BundleValidationError("json_file_invalid", `${label} is invalid`);
   }

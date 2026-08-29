@@ -9,8 +9,9 @@ adapters outside a public repository.
 
 > **Status:** bundle v1 validation, the deterministic single-case mock runner, the Phase A command
 > provider, comparison reports, single-run approval protocol v1, the private command sanitizer,
-> and approval-bound Codex app-server single runs are available. Suites/resume and repeat policy
-> remain tracked in Issue [#5](https://github.com/TakahisaI/structured-vision-bench/issues/5).
+> approval-bound Codex app-server single runs, and suite v1 all-case preflight are available.
+> Suite execution, ledger, resume, and reporting remain tracked in Issue
+> [#5](https://github.com/TakahisaI/structured-vision-bench/issues/5).
 
 ## What belongs here
 
@@ -23,7 +24,8 @@ adapters outside a public repository.
   an optional or required private approval command, atomic formal attempts, and sanitizer output
   when the consumer requires it.
 - Value-free single-case comparison and explicit rescoring.
-- Suite reporting, repeat, and resume logic implemented by later issues.
+- Strict suite v1 manifests, all-case requirement/policy preflight, and deterministic slot plans.
+- Suite execution, reporting, repeat, and resume logic implemented by later issues.
 
 ## What does not belong here
 
@@ -84,6 +86,12 @@ contract. CI and public fixtures use the mock provider only; no real model or lo
 The mock provider is deterministic and schema-valid for the validator's supported synthesis subset,
 including local `$ref` with supported sibling constraints and simple `allOf` intersections; it is not
 a general-purpose JSON Schema instance generator.
+
+Suite v1 preflight strictly reads an ordered suite, inspects all bundle metadata without opening
+provider input contents, validates requirement and policy identities before external work, and
+derives a bounded deterministic slot plan. It does not run those slots yet.
+See [`docs/suite-v1.md`](docs/suite-v1.md) and
+[`schemas/suite-v1.schema.json`](schemas/suite-v1.schema.json).
 
 For a consumer-owned gate, add `--approval required` plus the command, expected gate/snapshot,
 runtime-binding, approved-scope, and phase options. The command is spawned without a shell and with
