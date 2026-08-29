@@ -2,13 +2,13 @@
 
 ## Scope
 
-Command provider protocol v1 is the Phase A single-run process boundary from Issue #6. It lets the
+Command provider protocol v1 is the single-run process boundary from Issue #6. It lets the
 public runner invoke a consumer-owned adapter without importing private provider or business code.
 The adapter process is local invocation infrastructure, not a hosted-model payload.
 
-Phase A accepts only runs whose consumer-attested sanitizer and policy requirements are both false.
-Target-bound pre-sanitized responses are tracked by Issue #18 using sanitizer protocol v1. Suite, repeat, and resume
-integration are Phase C work after Issue #5. A Phase A adapter must not turn missing Phase B fields
+This protocol accepts only runs whose consumer-attested sanitizer and policy requirements are both
+false. A policy-required run must use a provider boundary that can return its raw structured
+document to the runner's target-bound sanitizer. The command adapter must not turn missing metadata
 into empty strings, zeroes, null-filled blocks, or dummy digests.
 
 ## Configuration and identity
@@ -23,8 +23,7 @@ The operator supplies these values outside the bundle:
 Provider ID, route, implementation version, the fixed protocol label `command-provider-v1`, and
 phase are safe labels of 1 to 64 ASCII characters. Phase is part of `runId`, is recorded as
 `run.phase`, and must match an applied approval phase. Changing phase creates a different run
-identity. Phase A intentionally changes the development-time attempt-v1 reader contract: artifacts
-without `run.phase` are not accepted by the current reader.
+identity. Artifacts without `run.phase` are not accepted by the current attempt-v1 reader.
 
 The factory validates and snapshots its executable, arguments, environment allowlist, byte limit,
 and provider identity before returning a provider. The runner snapshots phase separately as a run
@@ -69,14 +68,14 @@ request path or open request descriptors, or continue extraction after the direc
 Those behaviors require an OS sandbox or a future non-path protocol and are outside v1.
 
 Both checks reject `sanitizerRequired: true` or `policyRequired: true` before starting a child.
-Those runs require Phase B and never start a Phase A command process.
+Those runs are outside this provider protocol and never start a command process.
 The public provider `invoke()` boundary also rejects a denied or expired approval before calling any
 input callback, even if a caller bypasses the runner and omits the `prepareTransport()` hook. It
 reads the complete provider request and adapter context once into one immutable validated snapshot
 before calling any input callback. This includes the callback functions, media types, parsed schema,
 requested settings, phase, bundle/case/input identities and digests, provenance, sanitizer decision,
 and approval. The sanitizer decision digest is recomputed while taking the snapshot. The same
-snapshot is used for Phase A admission, callback reads, digest checks, approval binding, the
+snapshot is used for admission, callback reads, digest checks, approval binding, the
 manifest, inline handshake, and final response validation; later source-object mutation has no
 effect. Approval activity is rechecked immediately before and after each callback read; expiry
 during one callback zeroes any returned binary buffer and prevents every later callback. Each
@@ -167,9 +166,9 @@ applied approval cannot be omitted or replaced by a process's self-assertion. Me
 adapter did not obtain remains null or unavailable; requested values must not be copied into
 responded metadata merely to fill a field.
 
-Phase A stdout may carry the parsed structured document for a policy-not-required run. It must never
+Stdout may carry the parsed structured document for a policy-not-required run. It must never
 carry the raw upstream HTTP/app-server body, raw document digest, exact endpoint/account, policy,
-credential, or unbounded diagnostic. A policy-required run is outside Phase A and must not start the
+credential, or unbounded diagnostic. A policy-required run is outside this protocol and must not start the
 command process.
 
 ## Failure and cleanup

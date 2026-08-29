@@ -5,7 +5,7 @@
 A bundle is immutable input for one schema-guided extraction case. It captures what a model should
 receive and how a later comparison should align the result with optional truth. It does not contain
 provider credentials, an executable command, or attempt output, and it does not select execution
-settings. Requested model, effort, token limit, and repeat settings belong to runner or suite
+settings. Requested model, effort, token limit, phase, and caller-owned attempt key belong to run
 configuration and are recorded in the attempt, not in the bundle.
 
 The machine-readable manifest contract is
@@ -305,8 +305,9 @@ effort. The runner bounds each staged provider input to 16 MiB; this is an opera
 and does not change bundle-v1 source-file validation.
 Failed runs and directories without the final manifest do not become formal attempts.
 
-Retries are not hidden. A repeat or retry is a new attempt with a distinct identity and recorded
-reason. Failed output is not rewritten as success.
+The public harness does not orchestrate repeats or retries. If a caller explicitly starts another
+invocation, it supplies another attempt key and receives a distinct attempt identity. Failed output
+is not rewritten as success.
 
 ## Versioning
 

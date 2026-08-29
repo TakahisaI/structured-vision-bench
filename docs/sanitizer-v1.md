@@ -10,7 +10,8 @@ policy, target, or binding block.
 
 The public harness owns wire framing and identity checks. The consumer owns the opaque policy body
 and all document-specific sanitization rules. The local process transport is specified separately by
-this document; suite/resume propagation remains Issue #5.
+this document. Each `svbench run` applies and records this boundary independently; the public
+harness does not propagate sanitizer state through suite or resume orchestration.
 
 ## Configuration and process boundary
 

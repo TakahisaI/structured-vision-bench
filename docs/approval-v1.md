@@ -7,9 +7,9 @@ immediately before provider transport. The public runner compares opaque approva
 does not decide whether an account, endpoint, persistence profile, or document kind is permitted.
 Those decisions remain in the private consumer gate and its confidential snapshot.
 
-This document specifies Phase A for one `svbench run` invocation. Every attempt, including attempts
-with the same `runId` and different `attemptKey` values, executes the gate again. Suite and resume
-integration is Phase B of Issue #9 and follows the suite work in Issue #5.
+This document specifies one `svbench run` invocation. Every attempt, including attempts with the
+same `runId` and different `attemptKey` values, executes the gate again. The public harness does not
+reuse or propagate an approval through suite or resume orchestration.
 
 An optional gate is suitable only when the caller has independently decided that approval is not
 required, such as a completely fictional smoke test. Optional success does not authorize a real-data
