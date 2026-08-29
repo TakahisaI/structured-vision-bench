@@ -213,6 +213,42 @@ test("rejects malformed suite contexts before provider work", async () => {
       (error: unknown) =>
         error instanceof RunnerError && error.code === "run_configuration_invalid",
     );
+    const malformed = {
+      ...suiteContext(0),
+      suiteId: ["synthetic-suite"],
+      suiteDigest: [SUITE_DIGEST],
+      suitePlanDigest: [computeSuitePlanDigest(SUITE_DIGEST, CASE_POLICY_MAP_DIGEST)],
+      casePolicyMapDigest: [CASE_POLICY_MAP_DIGEST],
+    } as never;
+    await assert.rejects(
+      runBundle({
+        bundleDirectory: FIXTURE,
+        attemptRoot: path.join(temporary, "attempts-c"),
+        provider,
+        sanitizerRequirement: SANITIZER_REQUIREMENT,
+        suiteContext: malformed,
+      }),
+      (error: unknown) =>
+        error instanceof RunnerError && error.code === "run_configuration_invalid",
+    );
+    for (const [suiteDigest, casePolicyMapDigest] of [
+      [[SUITE_DIGEST], [CASE_POLICY_MAP_DIGEST]],
+      [new String(SUITE_DIGEST), CASE_POLICY_MAP_DIGEST],
+      [{ synthetic: SUITE_DIGEST }, CASE_POLICY_MAP_DIGEST],
+    ]) {
+      assert.throws(() => computeSuitePlanDigest(suiteDigest as never, casePolicyMapDigest as never));
+    }
+    let accessorReads = 0;
+    const accessorContext = { ...suiteContext(0) };
+    Object.defineProperty(accessorContext, "suiteId", {
+      enumerable: true,
+      get: () => {
+        accessorReads += 1;
+        return "synthetic-suite";
+      },
+    });
+    assert.throws(() => snapshotSuiteAttemptContext(accessorContext));
+    assert.equal(accessorReads, 0);
     assert.equal(providerCalls, 0);
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -237,6 +273,9 @@ test("reader rejects suite tampering and coordinated identity rehashing", async 
       (manifest) => { (manifest.suite! as MutableSuiteContext).caseIndex = 1; },
       (manifest) => { (manifest.suite! as MutableSuiteContext).repeatIndex = 1; },
       (manifest) => { (manifest.suite! as MutableSuiteContext).suitePlanDigest = "e".repeat(64); },
+      (manifest) => {
+        (manifest.suite! as unknown as Record<string, unknown>).suiteId = ["synthetic-suite"];
+      },
     ];
     for (const [index, mutate] of mutations.entries()) {
       const copyRoot = path.join(temporary, `tampered-${index}`);
@@ -252,6 +291,13 @@ test("reader rejects suite tampering and coordinated identity rehashing", async 
         (error: unknown) =>
           error instanceof RunnerError && error.code === "attempt_identity_mismatch",
       );
+      if (index === mutations.length - 1) {
+        await assert.rejects(
+          compareAttempt({ bundleDirectory: FIXTURE, attemptDirectory: copyAttempt }),
+          (error: unknown) =>
+            error instanceof RunnerError && error.code === "attempt_identity_mismatch",
+        );
+      }
     }
 
     const coordinatedRoot = path.join(temporary, "coordinated");

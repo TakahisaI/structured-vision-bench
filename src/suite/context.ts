@@ -18,8 +18,10 @@ export function deriveSuiteAttemptKey(caseIndex: number, repeatIndex: number): s
   if (
     !Number.isSafeInteger(caseIndex) ||
     caseIndex < 0 ||
+    caseIndex > 999 ||
     !Number.isSafeInteger(repeatIndex) ||
-    repeatIndex < 0
+    repeatIndex < 0 ||
+    repeatIndex > 999
   ) {
     throw new Error("suite slot is invalid");
   }
@@ -33,7 +35,12 @@ export function computeSuitePlanDigest(
   suiteDigest: string,
   casePolicyMapDigest: string,
 ): string {
-  if (!DIGEST_PATTERN.test(suiteDigest) || !DIGEST_PATTERN.test(casePolicyMapDigest)) {
+  if (
+    typeof suiteDigest !== "string" ||
+    typeof casePolicyMapDigest !== "string" ||
+    !DIGEST_PATTERN.test(suiteDigest) ||
+    !DIGEST_PATTERN.test(casePolicyMapDigest)
+  ) {
     throw new Error("suite plan identity is invalid");
   }
   return createHash("sha256")
@@ -44,37 +51,73 @@ export function computeSuitePlanDigest(
 }
 
 /** Copies and validates the bounded suite context accepted by the runner and reader. */
-export function snapshotSuiteAttemptContext(value: SuiteAttemptContext): SuiteAttemptContext {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    Reflect.ownKeys(value).length !== 7 ||
-    !Object.hasOwn(value, "suiteVersion") ||
-    !Object.hasOwn(value, "suiteId") ||
-    !Object.hasOwn(value, "suiteDigest") ||
-    !Object.hasOwn(value, "suitePlanDigest") ||
-    !Object.hasOwn(value, "casePolicyMapDigest") ||
-    !Object.hasOwn(value, "caseIndex") ||
-    !Object.hasOwn(value, "repeatIndex") ||
-    value.suiteVersion !== 1 ||
-    !SAFE_LABEL_PATTERN.test(value.suiteId) ||
-    !DIGEST_PATTERN.test(value.suiteDigest) ||
-    !DIGEST_PATTERN.test(value.suitePlanDigest) ||
-    !DIGEST_PATTERN.test(value.casePolicyMapDigest) ||
-    computeSuitePlanDigest(value.suiteDigest, value.casePolicyMapDigest) !==
-      value.suitePlanDigest ||
-    !Number.isSafeInteger(value.caseIndex) ||
-    value.caseIndex < 0 ||
-    value.caseIndex > 999 ||
-    !Number.isSafeInteger(value.repeatIndex) ||
-    value.repeatIndex < 0 ||
-    value.repeatIndex > 999
-  ) {
+export function snapshotSuiteAttemptContext(value: unknown): SuiteAttemptContext {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
+    const expectedKeys = [
+      "suiteVersion",
+      "suiteId",
+      "suiteDigest",
+      "suitePlanDigest",
+      "casePolicyMapDigest",
+      "caseIndex",
+      "repeatIndex",
+    ] as const;
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== expectedKeys.length ||
+      expectedKeys.some((key) => !keys.includes(key))
+    ) {
+      throw new Error();
+    }
+    const suiteVersion = ownDataValue(value, "suiteVersion");
+    const suiteId = ownDataValue(value, "suiteId");
+    const suiteDigest = ownDataValue(value, "suiteDigest");
+    const suitePlanDigest = ownDataValue(value, "suitePlanDigest");
+    const casePolicyMapDigest = ownDataValue(value, "casePolicyMapDigest");
+    const caseIndex = ownDataValue(value, "caseIndex");
+    const repeatIndex = ownDataValue(value, "repeatIndex");
+    if (
+      suiteVersion !== 1 ||
+      typeof suiteId !== "string" ||
+      !SAFE_LABEL_PATTERN.test(suiteId) ||
+      typeof suiteDigest !== "string" ||
+      !DIGEST_PATTERN.test(suiteDigest) ||
+      typeof suitePlanDigest !== "string" ||
+      !DIGEST_PATTERN.test(suitePlanDigest) ||
+      typeof casePolicyMapDigest !== "string" ||
+      !DIGEST_PATTERN.test(casePolicyMapDigest) ||
+      computeSuitePlanDigest(suiteDigest, casePolicyMapDigest) !== suitePlanDigest ||
+      !Number.isSafeInteger(caseIndex) ||
+      (caseIndex as number) < 0 ||
+      (caseIndex as number) > 999 ||
+      !Number.isSafeInteger(repeatIndex) ||
+      (repeatIndex as number) < 0 ||
+      (repeatIndex as number) > 999
+    ) {
+      throw new Error();
+    }
+    deriveSuiteAttemptKey(caseIndex as number, repeatIndex as number);
+    return Object.freeze({
+      suiteVersion,
+      suiteId,
+      suiteDigest,
+      suitePlanDigest,
+      casePolicyMapDigest,
+      caseIndex: caseIndex as number,
+      repeatIndex: repeatIndex as number,
+    });
+  } catch {
     throw new Error("suite attempt context is invalid");
   }
-  deriveSuiteAttemptKey(value.caseIndex, value.repeatIndex);
-  return Object.freeze({ ...value });
+}
+
+function ownDataValue(value: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+    throw new Error();
+  }
+  return descriptor.value;
 }
 
 function lengthPrefixedAscii(value: string): Buffer {

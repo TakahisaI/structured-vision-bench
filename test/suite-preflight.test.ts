@@ -145,6 +145,19 @@ test("preflights a mixed suite and derives an immutable ordered plan", async () 
       caseIndex: 0,
       repeatIndex: 1,
     });
+    const marker = "SYNTHETIC_PRIVATE_PATH";
+    assert.throws(
+      () =>
+        createSuiteAttemptContext(
+          plan,
+          { caseIndex: marker, repeatIndex: 0, attemptKey: "c0-r0" } as never,
+        ),
+      (error: unknown) =>
+        error instanceof SuitePreflightError &&
+        error.caseIndex === null &&
+        error.repeatIndex === null &&
+        !JSON.stringify(error).includes(marker),
+    );
   });
 });
 
@@ -376,10 +389,19 @@ test("attempt keys are deterministic and reject invalid slot positions", () => {
     [-1, 0],
     [0, -1],
     [0.5, 0],
+    ["SYNTHETIC_PRIVATE_PATH", 0],
+    [{ synthetic: true }, 0],
+    [Symbol("synthetic"), 0],
+    [Number.MAX_SAFE_INTEGER + 1, 0],
   ]) {
     assert.throws(
-      () => deriveSuiteAttemptKey(caseIndex!, repeatIndex!),
-      (error: unknown) => error instanceof SuitePreflightError && error.code === "suite_slot_invalid",
+      () => deriveSuiteAttemptKey(caseIndex as never, repeatIndex as never),
+      (error: unknown) =>
+        error instanceof SuitePreflightError &&
+        error.code === "suite_slot_invalid" &&
+        error.caseIndex === null &&
+        error.repeatIndex === null &&
+        !JSON.stringify(error).includes("SYNTHETIC_PRIVATE_PATH"),
     );
   }
 });

@@ -335,10 +335,11 @@ export function deriveSuiteAttemptKey(caseIndex: number, repeatIndex: number): s
   try {
     return deriveSuiteAttemptKeyV1(caseIndex, repeatIndex);
   } catch {
-    throw new SuitePreflightError("suite_slot_invalid", "suite slot is invalid", {
-      caseIndex,
-      repeatIndex,
-    });
+    throw new SuitePreflightError(
+      "suite_slot_invalid",
+      "suite slot is invalid",
+      suiteSlotLocation(caseIndex, repeatIndex),
+    );
   }
 }
 
@@ -359,14 +360,16 @@ export function createSuiteAttemptContext(
   plan: SuitePreflightPlan,
   slot: SuiteSlotDescriptor,
 ): SuiteAttemptContext {
+  const slotSnapshot = snapshotSuiteSlotDescriptor(slot);
   const expected = plan.slots.find(
     (candidate) =>
-      candidate.caseIndex === slot.caseIndex && candidate.repeatIndex === slot.repeatIndex,
+      candidate.caseIndex === slotSnapshot.caseIndex &&
+      candidate.repeatIndex === slotSnapshot.repeatIndex,
   );
-  if (expected === undefined || expected.attemptKey !== slot.attemptKey) {
+  if (expected === undefined || expected.attemptKey !== slotSnapshot.attemptKey) {
     throw new SuitePreflightError("suite_slot_invalid", "suite slot is invalid", {
-      caseIndex: slot.caseIndex,
-      repeatIndex: slot.repeatIndex,
+      caseIndex: slotSnapshot.caseIndex,
+      repeatIndex: slotSnapshot.repeatIndex,
     });
   }
   try {
@@ -376,12 +379,73 @@ export function createSuiteAttemptContext(
       suiteDigest: plan.suiteDigest,
       suitePlanDigest: plan.suitePlanDigest,
       casePolicyMapDigest: plan.casePolicyMapDigest,
-      caseIndex: slot.caseIndex,
-      repeatIndex: slot.repeatIndex,
+      caseIndex: slotSnapshot.caseIndex,
+      repeatIndex: slotSnapshot.repeatIndex,
     });
   } catch {
     throw new SuitePreflightError("suite_invalid", "suite attempt context is invalid");
   }
+}
+
+function suiteSlotLocation(
+  caseIndex: unknown,
+  repeatIndex: unknown,
+): { caseIndex?: number; repeatIndex?: number } {
+  return Number.isSafeInteger(caseIndex) &&
+    (caseIndex as number) >= 0 &&
+    (caseIndex as number) <= 999 &&
+    Number.isSafeInteger(repeatIndex) &&
+    (repeatIndex as number) >= 0 &&
+    (repeatIndex as number) <= 999
+    ? { caseIndex: caseIndex as number, repeatIndex: repeatIndex as number }
+    : {};
+}
+
+function snapshotSuiteSlotDescriptor(value: unknown): SuiteSlotDescriptor {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== 3 ||
+      !keys.includes("caseIndex") ||
+      !keys.includes("repeatIndex") ||
+      !keys.includes("attemptKey")
+    ) {
+      throw new Error();
+    }
+    const caseIndex = ownEnumerableDataValue(value, "caseIndex");
+    const repeatIndex = ownEnumerableDataValue(value, "repeatIndex");
+    const attemptKey = ownEnumerableDataValue(value, "attemptKey");
+    const location = suiteSlotLocation(caseIndex, repeatIndex);
+    if (
+      location.caseIndex === undefined ||
+      location.repeatIndex === undefined
+    ) {
+      throw new Error();
+    }
+    if (
+      typeof attemptKey !== "string" ||
+      deriveSuiteAttemptKeyV1(location.caseIndex, location.repeatIndex) !== attemptKey
+    ) {
+      throw new SuitePreflightError("suite_slot_invalid", "suite slot is invalid", location);
+    }
+    return Object.freeze({
+      caseIndex: location.caseIndex,
+      repeatIndex: location.repeatIndex,
+      attemptKey,
+    });
+  } catch (error) {
+    if (error instanceof SuitePreflightError) throw error;
+    throw new SuitePreflightError("suite_slot_invalid", "suite slot is invalid");
+  }
+}
+
+function ownEnumerableDataValue(value: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+    throw new Error();
+  }
+  return descriptor.value;
 }
 
 /** Commits the ordered requirement and case-specific policy mapping. */
