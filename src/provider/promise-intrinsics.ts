@@ -1,3 +1,5 @@
+import { promiseHooks } from "node:v8";
+
 const applyIntrinsic = Reflect.apply;
 const definePropertyIntrinsic = Object.defineProperty;
 const getOwnPropertyDescriptorIntrinsic = Object.getOwnPropertyDescriptor;
@@ -15,6 +17,9 @@ const promiseSpeciesDescriptor = getOwnPropertyDescriptorIntrinsic(
   PromiseIntrinsic,
   Symbol.species,
 )!;
+const createPromiseHookIntrinsic = promiseHooks.createHook;
+const ignoreRejection = (): undefined => undefined;
+let promiseSinkGuard = false;
 
 type PromiseExecutor<T> = (
   resolve: (value: T | PromiseLike<T>) => void,
@@ -61,10 +66,15 @@ export function raceIntrinsicPromises<T, U>(
  */
 export function invokeIntrinsicPromiseCallback<T>(callback: () => unknown): Promise<T> {
   let value: unknown;
+  const stopSink = startCallbackPromiseRejectionSink();
   try {
     value = callback();
   } finally {
-    restoreIntrinsicPromiseMetadata();
+    try {
+      stopSink();
+    } finally {
+      restoreIntrinsicPromiseMetadata();
+    }
   }
   if ((typeof value !== "object" || value === null) && typeof value !== "function") {
     return createIntrinsicPromise<T>((_resolve, reject) => reject(new Error()));
@@ -78,6 +88,25 @@ export function invokeIntrinsicPromiseCallback<T>(callback: () => unknown): Prom
     return promise;
   } catch {
     return createIntrinsicPromise<T>((_resolve, reject) => reject(new Error()));
+  }
+}
+
+/**
+ * Invokes a synchronous untrusted callback while attaching a rejection sink
+ * to every native Promise it creates. This prevents an invalid callback return
+ * from stranding its original rejected Promise after it makes constructor
+ * metadata non-configurable.
+ */
+export function invokeIntrinsicSynchronousCallback(callback: () => unknown): unknown {
+  const stopSink = startCallbackPromiseRejectionSink();
+  try {
+    return callback();
+  } finally {
+    try {
+      stopSink();
+    } finally {
+      restoreIntrinsicPromiseMetadata();
+    }
   }
 }
 
@@ -117,4 +146,23 @@ function hardenPromiseConstructor<T>(promise: Promise<T>): Promise<T> {
     writable: false,
   });
   return promise;
+}
+
+function startCallbackPromiseRejectionSink(): () => void {
+  return createPromiseHookIntrinsic({
+    init(promise: Promise<unknown>) {
+      if (promiseSinkGuard) return;
+      promiseSinkGuard = true;
+      try {
+        restoreIntrinsicPromiseMetadata();
+        void applyIntrinsic(promiseThenIntrinsic, promise, [undefined, ignoreRejection]);
+      } catch {
+        // A callback that irreversibly corrupts shared Promise metadata is
+        // rejected by the outer stable boundary. Promises created before that
+        // corruption have already received their sink.
+      } finally {
+        promiseSinkGuard = false;
+      }
+    },
+  }) as () => void;
 }

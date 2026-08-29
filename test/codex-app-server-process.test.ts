@@ -287,11 +287,6 @@ test("rejects a start finalizer that does not complete synchronously", async () 
 
 test("consumes a rejected finalizer promise despite a hostile Promise constructor getter", async () => {
   await withFixture("success", async ({ options, capture }) => {
-    const constructorDescriptor = Object.getOwnPropertyDescriptor(
-      Promise.prototype,
-      "constructor",
-    );
-    assert.ok(constructorDescriptor);
     const unhandledRejections: unknown[] = [];
     const recordUnhandledRejection = (reason: unknown): void => {
       unhandledRejections[unhandledRejections.length] = reason;
@@ -308,8 +303,8 @@ test("consumes a rejected finalizer promise despite a hostile Promise constructo
             allowedEnvironment: [],
             finalize() {
               const rejected = Promise.reject(new Error("synthetic rejected finalizer"));
-              Object.defineProperty(Promise.prototype, "constructor", {
-                configurable: true,
+              Object.defineProperty(rejected, "constructor", {
+                configurable: false,
                 get() {
                   throw new Error("synthetic constructor access");
                 },
@@ -322,7 +317,6 @@ test("consumes a rejected finalizer promise despite a hostile Promise constructo
       );
       await new Promise<void>((resolve) => setImmediate(resolve));
     } finally {
-      Object.defineProperty(Promise.prototype, "constructor", constructorDescriptor);
       process.off("unhandledRejection", recordUnhandledRejection);
     }
 
@@ -595,12 +589,16 @@ test(
 );
 
 test(
-  "uses the captured close listener after the finalizer mutates EventEmitter.once",
+  "restores EventEmitter on/once/emit before spawn and cleanup",
   { timeout: 5_000 },
   async () => {
     await withFixture("isolation-hang-descendant", async ({ options, capture }) => {
       const onceDescriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, "once");
+      const onDescriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, "on");
+      const emitDescriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, "emit");
       assert.ok(onceDescriptor?.value);
+      assert.ok(onDescriptor?.value);
+      assert.ok(emitDescriptor?.value);
       const controller = new AbortController();
       let records: JsonObject[] = [];
 
@@ -612,19 +610,15 @@ test(
           async () => ({
             allowedEnvironment: [],
             finalize() {
-              Object.defineProperty(EventEmitter.prototype, "once", {
-                configurable: true,
-                value(this: EventEmitter, event: string | symbol, listener: (...args: unknown[]) => void) {
-                  if (event !== "close") {
-                    return Reflect.apply(onceDescriptor.value as (...args: unknown[]) => unknown, this, [
-                      event,
-                      listener,
-                    ]) as EventEmitter;
-                  }
-                  return this;
-                },
-                writable: true,
-              });
+              for (const name of ["on", "once", "emit"] as const) {
+                Object.defineProperty(EventEmitter.prototype, name, {
+                  configurable: true,
+                  value() {
+                    return this;
+                  },
+                  writable: true,
+                });
+              }
               return undefined;
             },
           }),
@@ -638,7 +632,9 @@ test(
         controller.abort();
         await assert.rejects(running, stableProcessError);
       } finally {
+        Object.defineProperty(EventEmitter.prototype, "on", onDescriptor);
         Object.defineProperty(EventEmitter.prototype, "once", onceDescriptor);
+        Object.defineProperty(EventEmitter.prototype, "emit", emitDescriptor);
       }
 
       const boundary = records.find((record) => record.phase === "app-server");
@@ -851,6 +847,149 @@ test("zeroes callback-returned bytes after success and digest failure", async ()
       }
       assert.ok(returned.every((byte) => byte === 0));
     }
+  });
+});
+
+test("input digest verification and zeroing use captured byte and hash primitives", async () => {
+  await withFixture("success", async ({ options }) => {
+    const hashPrototype = Object.getPrototypeOf(createHash("sha256")) as object;
+    const updateDescriptor = Object.getOwnPropertyDescriptor(hashPrototype, "update");
+    const digestDescriptor = Object.getOwnPropertyDescriptor(hashPrototype, "digest");
+    const pushDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "push");
+    const fillDescriptor = Object.getOwnPropertyDescriptor(Uint8Array.prototype, "fill");
+    const originalFill = Uint8Array.prototype.fill;
+    assert.ok(updateDescriptor?.value);
+    assert.ok(digestDescriptor?.value);
+    assert.ok(pushDescriptor?.value);
+    assert.equal(typeof originalFill, "function");
+    const reads = readCounter();
+    const base = request(reads);
+    const returned = Buffer.from("synthetic digest mismatch");
+
+    try {
+      await assert.rejects(
+        runCodexAppServerProcess(options, {
+          ...base,
+          image: {
+            ...base.image,
+            sha256: "0".repeat(64),
+            async readBytes(): Promise<Buffer> {
+              reads.image = (reads.image ?? 0) + 1;
+              Object.defineProperty(hashPrototype, "update", {
+                configurable: true,
+                value() {
+                  return this;
+                },
+                writable: true,
+              });
+              Object.defineProperty(hashPrototype, "digest", {
+                configurable: true,
+                value() {
+                  return "0".repeat(64);
+                },
+                writable: true,
+              });
+              Object.defineProperty(Array.prototype, "push", {
+                configurable: true,
+                value() {
+                  return 0;
+                },
+                writable: true,
+              });
+              Object.defineProperty(Uint8Array.prototype, "fill", {
+                configurable: true,
+                value() {
+                  return this;
+                },
+                writable: true,
+              });
+              return returned;
+            },
+          },
+        }),
+        stableProcessError,
+      );
+    } finally {
+      Object.defineProperty(hashPrototype, "update", updateDescriptor);
+      Object.defineProperty(hashPrototype, "digest", digestDescriptor);
+      Object.defineProperty(Array.prototype, "push", pushDescriptor);
+      if (fillDescriptor === undefined) {
+        delete (Uint8Array.prototype as { fill?: unknown }).fill;
+      } else {
+        Object.defineProperty(Uint8Array.prototype, "fill", fillDescriptor);
+      }
+    }
+
+    assert.ok(returned.every((byte) => byte === 0));
+  });
+});
+
+test("input callbacks cannot rewrite normalized app-server JSON", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const stringifyDescriptor = Object.getOwnPropertyDescriptor(JSON, "stringify");
+    const freezeDescriptor = Object.getOwnPropertyDescriptor(Object, "freeze");
+    const mapDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "map");
+    const sortDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "sort");
+    assert.ok(stringifyDescriptor?.value);
+    assert.ok(freezeDescriptor?.value);
+    assert.ok(mapDescriptor?.value);
+    assert.ok(sortDescriptor?.value);
+    const reads = readCounter();
+    const base = request(reads);
+    let result: Awaited<ReturnType<typeof runCodexAppServerProcess>> | undefined;
+
+    try {
+      result = await runCodexAppServerProcess(options, {
+        ...base,
+        image: {
+          ...base.image,
+          async readBytes(): Promise<Buffer> {
+            reads.image = (reads.image ?? 0) + 1;
+            Object.defineProperty(JSON, "stringify", {
+              configurable: true,
+              value() {
+                return '{"baseInstructions":"synthetic injected"}';
+              },
+              writable: true,
+            });
+            Object.defineProperty(Object, "freeze", {
+              configurable: true,
+              value(value: unknown) {
+                return value;
+              },
+              writable: true,
+            });
+            Object.defineProperty(Array.prototype, "map", {
+              configurable: true,
+              value() {
+                return [];
+              },
+              writable: true,
+            });
+            Object.defineProperty(Array.prototype, "sort", {
+              configurable: true,
+              value() {
+                return this;
+              },
+              writable: true,
+            });
+            return Buffer.from("synthetic image");
+          },
+        },
+      });
+    } finally {
+      Object.defineProperty(JSON, "stringify", stringifyDescriptor);
+      Object.defineProperty(Object, "freeze", freezeDescriptor);
+      Object.defineProperty(Array.prototype, "map", mapDescriptor);
+      Object.defineProperty(Array.prototype, "sort", sortDescriptor);
+    }
+
+    assert.equal(result?.respondedModel, "synthetic-model");
+    const records = await readCapture(capture);
+    const threadStart = object(
+      records.find((record) => record.threadStart !== undefined)?.threadStart,
+    );
+    assert.equal(threadStart.baseInstructions, "synthetic system");
   });
 });
 

@@ -4,6 +4,7 @@ import {
   isJsonObject,
   normalizeJsonValue,
   parseJson,
+  stringifyJsonValue,
   type JsonValue,
 } from "../bundle/json.js";
 import { MAX_PROVIDER_INPUT_BYTES } from "../bundle/validate-bundle.js";
@@ -25,6 +26,7 @@ export const CODEX_APP_SERVER_PROTOCOL_VERSION =
   "codex-app-server-v2-9b3de71a5a2ffc98";
 
 const SAFE_LABEL_PATTERN = /^[A-Za-z0-9._-]{1,64}$/u;
+const SAFE_MEDIA_TYPE_PATTERN = /^[A-Za-z0-9!#$&^_.+/-]+$/u;
 const MAX_WORKSPACE_PATH_LENGTH = 4096;
 const MAX_FINAL_DOCUMENT_BYTES = 16 * 1024 * 1024;
 // A maximum-sized instruction may expand sixfold when JSON escapes control
@@ -38,8 +40,39 @@ const MAX_ACTIVE_ITEMS = 16;
 const CLIENT_NAME = "structured_vision_bench";
 const CLIENT_TITLE = "structured-vision-bench";
 const CLIENT_VERSION = "1";
+const applyIntrinsic = Reflect.apply;
+const arrayIsArrayIntrinsic = Array.isArray;
+const arraySortIntrinsic = Array.prototype.sort;
+const bindIntrinsic = Function.prototype.bind;
+const bufferByteLengthIntrinsic = Buffer.byteLength;
+const bufferFromIntrinsic = Buffer.from;
+const bufferIsBufferIntrinsic = Buffer.isBuffer;
+const bufferToStringIntrinsic = Buffer.prototype.toString;
+const freezeIntrinsic = Object.freeze;
+const objectGetOwnPropertyDescriptorIntrinsic = Object.getOwnPropertyDescriptor;
+const mapDeleteIntrinsic = Map.prototype.delete;
+const mapGetIntrinsic = Map.prototype.get;
+const mapHasIntrinsic = Map.prototype.has;
+const mapSetIntrinsic = Map.prototype.set;
+const mapSizeGetterIntrinsic = objectGetOwnPropertyDescriptorIntrinsic(
+  Map.prototype,
+  "size",
+)!.get!;
+const MapIntrinsic = Map;
+const mathMaxIntrinsic = Math.max;
+const mathMinIntrinsic = Math.min;
+const numberIsSafeIntegerIntrinsic = Number.isSafeInteger;
 const objectHasOwnIntrinsic = Object.hasOwn;
+const objectKeysIntrinsic = Object.keys;
 const pathIsAbsoluteIntrinsic = path.isAbsolute;
+const regExpTestIntrinsic = RegExp.prototype.test;
+const stringStartsWithIntrinsic = String.prototype.startsWith;
+const uint8ArrayFillIntrinsic = Uint8Array.prototype.fill;
+const typedArrayPrototypeIntrinsic = Object.getPrototypeOf(Uint8Array.prototype);
+const typedArrayByteLengthGetterIntrinsic = objectGetOwnPropertyDescriptorIntrinsic(
+  typedArrayPrototypeIntrinsic,
+  "byteLength",
+)!.get!;
 
 export type CodexAppServerProtocolConnection = Readonly<{
   send(message: JsonValue): Promise<void>;
@@ -250,7 +283,9 @@ export async function runCodexAppServerProtocol(
     throw new Error("codex app-server protocol failed");
   } finally {
     removeAbortSignalListener(signal, abort);
-    imageCopy?.fill(0);
+    if (imageCopy !== undefined) {
+      applyIntrinsic(uint8ArrayFillIntrinsic, imageCopy, [0]);
+    }
   }
 }
 
@@ -268,14 +303,14 @@ function snapshotConnection(
   ) {
     throw new Error();
   }
-  return Object.freeze({
-    send: Function.prototype.bind.call(sendValue, value) as (
+  return freezeIntrinsic({
+    send: applyIntrinsic(bindIntrinsic, sendValue, [value]) as (
       message: JsonValue,
     ) => Promise<void>,
-    receive: Function.prototype.bind.call(receiveValue, value) as () => Promise<
+    receive: applyIntrinsic(bindIntrinsic, receiveValue, [value]) as () => Promise<
       CodexAppServerProtocolReceivedMessage | undefined
     >,
-    closeInput: Function.prototype.bind.call(closeValue, value) as () => void,
+    closeInput: applyIntrinsic(bindIntrinsic, closeValue, [value]) as () => void,
   });
 }
 
@@ -295,22 +330,27 @@ function snapshotRequest(value: CodexAppServerProtocolRequest): {
     workspace.length === 0 ||
     workspace.length > MAX_WORKSPACE_PATH_LENGTH ||
     !pathIsAbsoluteIntrinsic(workspace) ||
-    !mediaType.startsWith("image/") ||
-    !Buffer.isBuffer(bytes) ||
-    bytes.byteLength > MAX_PROVIDER_INPUT_BYTES ||
+    !applyIntrinsic(stringStartsWithIntrinsic, mediaType, ["image/"]) ||
+    !bufferIsBufferIntrinsic(bytes) ||
+    (applyIntrinsic(typedArrayByteLengthGetterIntrinsic, bytes, []) as number) >
+      MAX_PROVIDER_INPUT_BYTES ||
     typeof request.system !== "string" ||
-    Buffer.byteLength(request.system, "utf8") > MAX_PROVIDER_INPUT_BYTES ||
+    bufferByteLengthIntrinsic(request.system, "utf8") > MAX_PROVIDER_INPUT_BYTES ||
     typeof request.instruction !== "string" ||
-    Buffer.byteLength(request.instruction, "utf8") > MAX_PROVIDER_INPUT_BYTES
+    bufferByteLengthIntrinsic(request.instruction, "utf8") > MAX_PROVIDER_INPUT_BYTES
   ) {
     throw new Error();
   }
-  const imageCopy = Buffer.from(bytes);
+  const imageCopy = bufferFromIntrinsic(bytes);
   try {
     return {
-      request: Object.freeze({
+      request: freezeIntrinsic({
         workspace,
-        imageDataUrl: `data:${mediaType};base64,${imageCopy.toString("base64")}`,
+        imageDataUrl: `data:${mediaType};base64,${applyIntrinsic(
+          bufferToStringIntrinsic,
+          imageCopy,
+          ["base64"],
+        ) as string}`,
         schema: normalizeJsonValue(
           request.schema,
           "codex app-server schema",
@@ -323,7 +363,7 @@ function snapshotRequest(value: CodexAppServerProtocolRequest): {
       imageCopy,
     };
   } catch {
-    imageCopy.fill(0);
+    applyIntrinsic(uint8ArrayFillIntrinsic, imageCopy, [0]);
     throw new Error();
   }
 }
@@ -409,7 +449,7 @@ function createTurnAccumulator(): TurnAccumulator {
     usage: undefined,
     userMessageSeen: false,
     finalItem: undefined,
-    activeItems: new Map(),
+    activeItems: new MapIntrinsic(),
     result: undefined,
   };
 }
@@ -438,7 +478,7 @@ function applyTurnNotification(
       accumulator.finalItem === undefined ||
       !accumulator.userMessageSeen ||
       !jsonEqual(turn.items, [accumulator.finalItem]) ||
-      Buffer.byteLength(accumulator.finalText, "utf8") > MAX_FINAL_DOCUMENT_BYTES
+      bufferByteLengthIntrinsic(accumulator.finalText, "utf8") > MAX_FINAL_DOCUMENT_BYTES
     ) {
       throw new Error();
     }
@@ -481,12 +521,13 @@ function applyTurnNotification(
       throw new Error();
     }
     if (
-      accumulator.activeItems.has(itemId) ||
-      accumulator.activeItems.size >= MAX_ACTIVE_ITEMS
+      applyIntrinsic(mapHasIntrinsic, accumulator.activeItems, [itemId]) ||
+      (applyIntrinsic(mapSizeGetterIntrinsic, accumulator.activeItems, []) as number) >=
+        MAX_ACTIVE_ITEMS
     ) {
       throw new Error();
     }
-    accumulator.activeItems.set(itemId, itemType);
+    applyIntrinsic(mapSetIntrinsic, accumulator.activeItems, [itemId, itemType]);
     return;
   }
   if (method === "item/completed") {
@@ -496,9 +537,9 @@ function applyTurnNotification(
     const item = requiredObject(snapshot);
     const itemId = safeLabel(item.id);
     const itemType = safeItemType(item.type);
-    const started = accumulator.activeItems.get(itemId);
+    const started = applyIntrinsic(mapGetIntrinsic, accumulator.activeItems, [itemId]);
     if (started === undefined || started !== itemType) throw new Error();
-    accumulator.activeItems.delete(itemId);
+    applyIntrinsic(mapDeleteIntrinsic, accumulator.activeItems, [itemId]);
     if (itemType === "userMessage") {
       if (accumulator.userMessageSeen) throw new Error();
       accumulator.userMessageSeen = true;
@@ -574,7 +615,7 @@ function validateThreadStartResponse(
     result.cwd !== workspace ||
     result.approvalPolicy !== "untrusted" ||
     result.approvalsReviewer !== "user" ||
-    !Array.isArray(result.instructionSources) ||
+    !arrayIsArrayIntrinsic(result.instructionSources) ||
     result.instructionSources.length !== 0 ||
     sandbox.type !== "readOnly" ||
     sandbox.networkAccess !== false ||
@@ -741,8 +782,8 @@ function validateThreadSnapshot(value: unknown, workspace: string): JsonValue {
     thread.source !== "appServer" ||
     thread.threadSource !== CLIENT_NAME ||
     typeof thread.preview !== "string" ||
-    Buffer.byteLength(thread.preview, "utf8") > MAX_PROVIDER_INPUT_BYTES ||
-    !Array.isArray(thread.turns) ||
+    bufferByteLengthIntrinsic(thread.preview, "utf8") > MAX_PROVIDER_INPUT_BYTES ||
+    !arrayIsArrayIntrinsic(thread.turns) ||
     thread.turns.length !== 0 ||
     thread.projectId !== null ||
     thread.forkedFromId !== null ||
@@ -774,7 +815,7 @@ function validateThreadStatus(
     if (expected === "active") throw new Error();
     return;
   }
-  if (status.type !== "active" || !Array.isArray(status.activeFlags)) {
+  if (status.type !== "active" || !arrayIsArrayIntrinsic(status.activeFlags)) {
     throw new Error();
   }
   if (expected === "idle") throw new Error();
@@ -805,7 +846,7 @@ function validateTurnSnapshot(
   const id = safeLabel(turn.id);
   if (
     turn.status !== expectedStatus ||
-    !Array.isArray(turn.items) ||
+    !arrayIsArrayIntrinsic(turn.items) ||
     turn.itemsView !== expectedItemsView ||
     turn.error !== null ||
     !nullableInteger(turn.startedAt) ||
@@ -820,7 +861,10 @@ function validateTurnSnapshot(
   ) {
     throw new Error();
   }
-  const items = turn.items.map((item) => validateSafeItem(item));
+  const items: JsonValue[] = [];
+  for (let index = 0; index < turn.items.length; index += 1) {
+    items[index] = validateSafeItem(turn.items[index]);
+  }
   return {
     id,
     items,
@@ -838,7 +882,7 @@ function validateSafeItem(
   if (type === "userMessage") {
     assertRequiredKeys(item, ["type", "id", "clientId", "content"]);
     if (
-      !Array.isArray(item.content) ||
+      !arrayIsArrayIntrinsic(item.content) ||
       expectedUserContent === undefined ||
       !jsonEqual(item.content, expectedUserContent) ||
       !nullableString(item.clientId)
@@ -877,8 +921,9 @@ function validateSafeItem(
 }
 
 function validateStringArray(value: unknown): void {
-  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
-    throw new Error();
+  if (!arrayIsArrayIntrinsic(value)) throw new Error();
+  for (let index = 0; index < value.length; index += 1) {
+    if (typeof value[index] !== "string") throw new Error();
   }
 }
 
@@ -887,16 +932,26 @@ function jsonEqual(left: JsonValue, right: JsonValue): boolean {
 }
 
 function canonicalJson(value: JsonValue): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
+  if (arrayIsArrayIntrinsic(value)) {
+    let source = "[";
+    for (let index = 0; index < value.length; index += 1) {
+      if (index !== 0) source += ",";
+      source += canonicalJson(value[index]!);
+    }
+    return `${source}]`;
   }
   if (isJsonObject(value)) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key] as JsonValue)}`)
-      .join(",")}}`;
+    const keys = objectKeysIntrinsic(value);
+    applyIntrinsic(arraySortIntrinsic, keys, []);
+    let source = "{";
+    for (let index = 0; index < keys.length; index += 1) {
+      if (index !== 0) source += ",";
+      const key = keys[index]!;
+      source += `${stringifyJsonValue(key)}:${canonicalJson(value[key] as JsonValue)}`;
+    }
+    return `${source}}`;
   }
-  return JSON.stringify(value);
+  return stringifyJsonValue(value);
 }
 
 async function nextResponse(
@@ -961,15 +1016,15 @@ async function receive(
   if (
     received === null ||
     typeof received !== "object" ||
-    Array.isArray(received)
+    arrayIsArrayIntrinsic(received)
   ) {
     throw new Error();
   }
-  const byteLengthProperty = Object.getOwnPropertyDescriptor(
+  const byteLengthProperty = objectGetOwnPropertyDescriptorIntrinsic(
     received,
     "byteLength",
   );
-  const messageProperty = Object.getOwnPropertyDescriptor(received, "message");
+  const messageProperty = objectGetOwnPropertyDescriptorIntrinsic(received, "message");
   if (
     byteLengthProperty === undefined ||
     !("value" in byteLengthProperty) ||
@@ -980,7 +1035,7 @@ async function receive(
   }
   const reportedByteLength = byteLengthProperty.value as unknown;
   if (
-    !Number.isSafeInteger(reportedByteLength) ||
+    !numberIsSafeIntegerIntrinsic(reportedByteLength) ||
     typeof reportedByteLength !== "number" ||
     reportedByteLength < 1 ||
     reportedByteLength > receiveBudget.remainingBytes
@@ -990,14 +1045,14 @@ async function receive(
   const snapshot = normalizeJsonValue(
     messageProperty.value,
     "codex app-server message",
-    Math.min(
+    mathMinIntrinsic(
       CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES,
       receiveBudget.remainingBytes,
     ),
   );
-  const chargedBytes = Math.max(
+  const chargedBytes = mathMaxIntrinsic(
     reportedByteLength,
-    Buffer.byteLength(JSON.stringify(snapshot), "utf8"),
+    bufferByteLengthIntrinsic(stringifyJsonValue(snapshot), "utf8"),
   );
   if (chargedBytes > receiveBudget.remainingBytes) throw new Error();
   receiveBudget.remainingBytes -= chargedBytes;
@@ -1012,11 +1067,11 @@ function snapshotRequested(value: unknown): RequestedExecutionSettings {
   const maxTokens = requested.maxTokens;
   if (
     maxTokens !== null &&
-    (!Number.isSafeInteger(maxTokens) || typeof maxTokens !== "number" || maxTokens < 1)
+    (!numberIsSafeIntegerIntrinsic(maxTokens) || typeof maxTokens !== "number" || maxTokens < 1)
   ) {
     throw new Error();
   }
-  return Object.freeze({ model, effort, maxTokens });
+  return freezeIntrinsic({ model, effort, maxTokens });
 }
 
 function snapshotProtocolUsage(value: unknown): ProtocolUsage {
@@ -1089,7 +1144,7 @@ function boundedMediaType(value: unknown): string {
     typeof value !== "string" ||
     value.length < 3 ||
     value.length > 127 ||
-    !/^[A-Za-z0-9!#$&^_.+/-]+$/u.test(value)
+    !applyIntrinsic(regExpTestIntrinsic, SAFE_MEDIA_TYPE_PATTERN, [value])
   ) {
     throw new Error();
   }
@@ -1123,11 +1178,14 @@ function nullableString(value: unknown): boolean {
 }
 
 function isSafeLabel(value: unknown): value is string {
-  return typeof value === "string" && SAFE_LABEL_PATTERN.test(value);
+  return (
+    typeof value === "string" &&
+    applyIntrinsic(regExpTestIntrinsic, SAFE_LABEL_PATTERN, [value])
+  );
 }
 
 function isTokenCount(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+  return typeof value === "number" && numberIsSafeIntegerIntrinsic(value) && value >= 0;
 }
 
 function assertActive(signal: AbortSignal | undefined): void {

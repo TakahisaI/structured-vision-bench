@@ -300,7 +300,9 @@ prepare-only and failed revalidation paths do not read the values. After the pro
 that authorization, it synchronously reads the current allowlisted values, then rechecks approval
 expiry, exact identity, generation, and abort state so time or side effects during the reads cannot
 cross the final boundary. The finalizer must return `undefined` synchronously; any other return is
-rejected before process start and any returned promise is settled without exposing its rejection. The client then
+rejected before process start. Every native Promise created while invoking a consumer callback receives a captured
+rejection sink at creation time, before the callback can make its own constructor metadata non-configurable; invalid
+revalidation and finalizer returns therefore cannot strand an exposed rejection. The client then
 checks only its private primitive abort state and calls spawn without another callback or await. The process client
 always replaces home, config,
 cache, path, and temporary-directory
@@ -330,16 +332,21 @@ model metadata, so a remote catalog or parent cache cannot restore a host tool.
 
 After the live process proves the isolation identity, the client invokes each image, schema, system,
 and instruction callback once, copies at most the provider-input limit, and verifies its declared
-SHA-256 before sending any protocol request. The four inputs are kept in memory and never written
+SHA-256 before sending any protocol request. Hash update/digest, byte copying, materialized-copy
+tracking, and zeroing use module-load captured primitives, so a callback cannot substitute a digest
+or retain an uncleared copy through shared prototypes. The four inputs are kept in memory and never written
 into the private workspace. The schema and text inputs require strict UTF-8; the schema also
 requires strict JSON.
 
 Stdin and stdout use one strict UTF-8 JSON value per LF-terminated line. Individual values and total
-stdout are bounded; stderr is counted and discarded. Raw process output, document values, digests,
+stdout are bounded; stderr is counted and discarded. JSON cloning, parsing, encoding, key ordering,
+connection binding, and canonical equality use module-load captured primitives and do not consult
+consumer-replaceable JSON, Array, Object, or Function prototype methods. Raw process output, document values, digests,
 and private paths never enter normal errors. Success requires the protocol end-of-stream and exit
 status zero. Success as well as protocol failure, crash, overflow, timeout, or cancellation then
 terminates the durable POSIX process group, waits until no live same-group member remains, waits for
-the leader close through captured event-registration primitives, zeroes materialized input copies,
+the leader close through restored event primitives fixed as own methods on the spawned child and its
+streams, zeroes materialized input copies,
 and removes the private root before the promise
 settles. Linux settlement enumerates process-group membership and treats only dead or zombie
 members as stopped. Process entries hidden by procfs access controls are ignored because spawned

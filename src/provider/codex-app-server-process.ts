@@ -18,6 +18,7 @@ import {
   decodeUtf8Strict,
   normalizeJsonValue,
   parseJson,
+  stringifyJsonValue,
   type JsonValue,
 } from "../bundle/json.js";
 import { MAX_PROVIDER_INPUT_BYTES } from "../bundle/validate-bundle.js";
@@ -41,6 +42,7 @@ import {
   createIntrinsicPromise,
   ignoreIntrinsicPromiseRejection,
   invokeIntrinsicPromiseCallback,
+  invokeIntrinsicSynchronousCallback,
   raceIntrinsicPromises,
   resolveIntrinsicPromise,
   restoreIntrinsicPromiseConstructor,
@@ -61,18 +63,55 @@ const SPAWN_DETACHED = HOST_PLATFORM !== "win32";
 const applyIntrinsic = Reflect.apply;
 const arrayIsArrayIntrinsic = Array.isArray;
 const bindIntrinsic = Function.prototype.bind;
+const bufferAllocIntrinsic = Buffer.alloc;
+const bufferAllocUnsafeIntrinsic = Buffer.allocUnsafe;
+const bufferByteLengthIntrinsic = Buffer.byteLength;
+const bufferFromIntrinsic = Buffer.from;
+const bufferIsBufferIntrinsic = Buffer.isBuffer;
 const chmodIntrinsic = chmod;
 const clearTimeoutIntrinsic = clearTimeout;
 const createHashIntrinsic = createHash;
 const dateNowIntrinsic = Date.now;
+const definePropertyIntrinsic = Object.defineProperty;
 const freezeIntrinsic = Object.freeze;
+const functionHasInstanceIntrinsic = Function.prototype[Symbol.hasInstance];
+const getOwnPropertyDescriptorIntrinsic = Object.getOwnPropertyDescriptor;
 const mkdirIntrinsic = mkdir;
 const mkdtempIntrinsic = mkdtemp;
+const mathMaxIntrinsic = Math.max;
+const mathMinIntrinsic = Math.min;
+const numberIsSafeIntegerIntrinsic = Number.isSafeInteger;
 const objectCreateIntrinsic = Object.create;
 const objectKeysIntrinsic = Object.keys;
 const objectValuesIntrinsic = Object.values;
 const eventEmitterOnIntrinsic = EventEmitter.prototype.on;
 const eventEmitterOnceIntrinsic = EventEmitter.prototype.once;
+const eventEmitterEmitIntrinsic = EventEmitter.prototype.emit;
+const eventEmitterAddListenerIntrinsic = EventEmitter.prototype.addListener;
+const eventEmitterRemoveListenerIntrinsic = EventEmitter.prototype.removeListener;
+const eventEmitterOnDescriptor = getOwnPropertyDescriptorIntrinsic(EventEmitter.prototype, "on")!;
+const eventEmitterOnceDescriptor = getOwnPropertyDescriptorIntrinsic(
+  EventEmitter.prototype,
+  "once",
+)!;
+const eventEmitterEmitDescriptor = getOwnPropertyDescriptorIntrinsic(
+  EventEmitter.prototype,
+  "emit",
+)!;
+const eventEmitterAddListenerDescriptor = getOwnPropertyDescriptorIntrinsic(
+  EventEmitter.prototype,
+  "addListener",
+)!;
+const eventEmitterRemoveListenerDescriptor = getOwnPropertyDescriptorIntrinsic(
+  EventEmitter.prototype,
+  "removeListener",
+)!;
+const hashPrototypeIntrinsic = Object.getPrototypeOf(createHashIntrinsic("sha256")) as {
+  update: (...arguments_: unknown[]) => unknown;
+  digest: (...arguments_: unknown[]) => unknown;
+};
+const hashUpdateIntrinsic = hashPrototypeIntrinsic.update;
+const hashDigestIntrinsic = hashPrototypeIntrinsic.digest;
 const pathDirnameIntrinsic = path.dirname;
 const pathIsAbsoluteIntrinsic = path.isAbsolute;
 const pathJoinIntrinsic = path.join;
@@ -91,6 +130,16 @@ const writableDestroyIntrinsic = Writable.prototype.destroy;
 const writableEndIntrinsic = Writable.prototype.end;
 const writableWriteIntrinsic = Writable.prototype.write;
 const writeFileIntrinsic = writeFile;
+const uint8ArrayFillIntrinsic = Uint8Array.prototype.fill;
+const uint8ArrayIndexOfIntrinsic = Uint8Array.prototype.indexOf;
+const uint8ArraySetIntrinsic = Uint8Array.prototype.set;
+const uint8ArraySubarrayIntrinsic = Uint8Array.prototype.subarray;
+const Uint8ArrayIntrinsic = Uint8Array;
+const typedArrayPrototypeIntrinsic = Object.getPrototypeOf(Uint8ArrayIntrinsic.prototype);
+const typedArrayByteLengthGetterIntrinsic = getOwnPropertyDescriptorIntrinsic(
+  typedArrayPrototypeIntrinsic,
+  "byteLength",
+)!.get!;
 const MAX_STDERR_BYTES = 1024 * 1024;
 export const MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 512 * 1024 * 1024;
 const PRIVATE_TEMP_PARENT = "/tmp";
@@ -279,7 +328,7 @@ export async function runCodexAppServerProcess(
     throw new Error("codex app-server process failed");
   } finally {
     for (let index = 0; index < materialized.length; index += 1) {
-      materialized[index]!.fill(0);
+      zeroReturnedBytes(materialized[index]!);
     }
     if (workspace !== undefined) {
       try {
@@ -317,10 +366,10 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
   const outputLimitBytes =
     value.outputLimitBytes ?? DEFAULT_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES;
   if (
-    !Number.isSafeInteger(timeoutMs) ||
+    !numberIsSafeIntegerIntrinsic(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > 15 * 60_000 ||
-    !Number.isSafeInteger(outputLimitBytes) ||
+    !numberIsSafeIntegerIntrinsic(outputLimitBytes) ||
     outputLimitBytes < 1024 ||
     outputLimitBytes > MAX_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES
   ) {
@@ -343,7 +392,7 @@ function snapshotStrings(value: readonly string[], limit: number): string[] {
     if (
       typeof entry !== "string" ||
       entry.length === 0 ||
-      Buffer.byteLength(entry, "utf8") > MAX_ARGUMENT_BYTES ||
+      bufferByteLengthIntrinsic(entry, "utf8") > MAX_ARGUMENT_BYTES ||
       entry.includes("\0")
     ) {
       throw new Error();
@@ -470,12 +519,12 @@ async function readInput(
   try {
     assertActive(parentSignal);
     const value = await invokeLazyInput(input.readBytes, controllerSignal);
-    if (!(value instanceof Uint8Array)) throw new Error();
+    if (!isUint8Array(value)) throw new Error();
     try {
-      if (value.byteLength > MAX_PROVIDER_INPUT_BYTES) throw new Error();
-      const bytes = Buffer.from(value);
-      materialized.push(bytes);
-      if (createHashIntrinsic("sha256").update(bytes).digest("hex") !== input.sha256) {
+      if (typedArrayByteLength(value) > MAX_PROVIDER_INPUT_BYTES) throw new Error();
+      const bytes = bufferFromIntrinsic(value);
+      materialized[materialized.length] = bytes;
+      if (sha256(bytes) !== input.sha256) {
         throw new Error();
       }
       return bytes;
@@ -495,7 +544,13 @@ function invokeLazyInput(
   assertActive(signal);
   const pending = thenIntrinsicPromise(resolveIntrinsicPromise(undefined), () => {
     assertActive(signal);
-    return invokeIntrinsicPromiseCallback<Uint8Array>(() => reader());
+    return invokeIntrinsicPromiseCallback<Uint8Array>(() => {
+      try {
+        return reader();
+      } finally {
+        restoreEventEmitterIntrinsics();
+      }
+    });
   });
   return createIntrinsicPromise((resolve, reject) => {
     let settled = false;
@@ -510,9 +565,10 @@ function invokeLazyInput(
     void thenIntrinsicPromise(
       pending,
       (value) => {
+        restoreEventEmitterIntrinsics();
         if (settled) {
           try {
-            if (value instanceof Uint8Array) zeroReturnedBytes(value);
+            if (isUint8Array(value)) zeroReturnedBytes(value);
           } catch {
             // Disposal is best effort after the public process call has settled.
           }
@@ -523,6 +579,7 @@ function invokeLazyInput(
         resolve(value);
       },
       (error: unknown) => {
+        restoreEventEmitterIntrinsics();
         if (settled) return;
         settled = true;
         removeAbortListener();
@@ -534,7 +591,21 @@ function invokeLazyInput(
 }
 
 function zeroReturnedBytes(value: Uint8Array): void {
-  Uint8Array.prototype.fill.call(value, 0);
+  applyIntrinsic(uint8ArrayFillIntrinsic, value, [0]);
+}
+
+function isUint8Array(value: unknown): value is Uint8Array {
+  return applyIntrinsic(functionHasInstanceIntrinsic, Uint8ArrayIntrinsic, [value]) as boolean;
+}
+
+function typedArrayByteLength(value: Uint8Array): number {
+  return applyIntrinsic(typedArrayByteLengthGetterIntrinsic, value, []) as number;
+}
+
+function sha256(value: Uint8Array): string {
+  const hash = createHashIntrinsic("sha256");
+  applyIntrinsic(hashUpdateIntrinsic, hash, [value]);
+  return applyIntrinsic(hashDigestIntrinsic, hash, ["hex"]) as string;
 }
 
 function createToolCatalog(requested: RequestedExecutionSettings & { model: string }): string {
@@ -556,7 +627,7 @@ function createToolCatalog(requested: RequestedExecutionSettings & { model: stri
     };
   }
   const defaultEffort = requested.effort ?? "medium";
-  return `${JSON.stringify({
+  return `${stringifyJsonValue({
     models: [
       {
         slug: requested.model,
@@ -622,7 +693,7 @@ function appServerArguments(
     arguments_[arguments_.length] = DISABLED_FEATURES[index]!;
   }
   const overrides = [
-    `model_catalog_json=${JSON.stringify(workspace.catalog)}`,
+    `model_catalog_json=${stringifyJsonValue(workspace.catalog)}`,
     'personality="none"',
     "include_permissions_instructions=false",
     "include_environment_context=false",
@@ -693,10 +764,22 @@ async function runConnectedProcess(
         workspace.environment,
       );
     } else {
+      let authorizationValue: CodexAppServerProcessStartAuthorization;
+      try {
+        authorizationValue = await invokeIntrinsicPromiseCallback<
+          CodexAppServerProcessStartAuthorization
+        >(() => {
+          try {
+            return startGuard(guardSignal!);
+          } finally {
+            restoreEventEmitterIntrinsics();
+          }
+        });
+      } finally {
+        restoreEventEmitterIntrinsics();
+      }
       const authorization = snapshotStartAuthorization(
-        await invokeIntrinsicPromiseCallback<CodexAppServerProcessStartAuthorization>(() =>
-          startGuard(guardSignal!),
-        ),
+        authorizationValue,
         options.envAllowlist,
       );
       environment = snapshotSpawnEnvironment(
@@ -705,9 +788,10 @@ async function runConnectedProcess(
       );
       let finalizerResult: unknown;
       try {
-        finalizerResult = authorization.finalize();
+        finalizerResult = invokeIntrinsicSynchronousCallback(() => authorization.finalize());
       } finally {
         restoreIntrinsicPromiseConstructor();
+        restoreEventEmitterIntrinsics();
       }
       if (finalizerResult !== undefined) {
         ignoreIntrinsicPromiseRejection(finalizerResult);
@@ -715,6 +799,7 @@ async function runConnectedProcess(
       }
       if (abortRequested) throw new Error();
     }
+    restoreEventEmitterIntrinsics();
     child = spawnIntrinsic(options.executable, arguments_, {
       cwd: workspace.workspace,
       detached: SPAWN_DETACHED,
@@ -723,6 +808,10 @@ async function runConnectedProcess(
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
+    hardenEventEmitterInstance(child);
+    hardenEventEmitterInstance(child.stdin);
+    hardenEventEmitterInstance(child.stdout);
+    hardenEventEmitterInstance(child.stderr);
     close = waitForClose(child);
     const processConnection = new JsonlProcessConnection(
       child,
@@ -795,7 +884,7 @@ function assertIsolationReady(value: JsonValue | undefined): void {
 
 class JsonlProcessConnection implements CodexAppServerProtocolConnection {
   private readonly iterator: AsyncIterator<Buffer | string>;
-  private pending = Buffer.alloc(0);
+  private pending = bufferAllocIntrinsic(0);
   private pendingBytes = 0;
   private unread: Buffer | undefined;
   private outputBytes = 0;
@@ -816,16 +905,16 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
     applyIntrinsic(eventEmitterOnceIntrinsic, child, ["error", () => this.fail()]);
     applyIntrinsic(eventEmitterOnceIntrinsic, child.stdin, ["error", () => this.fail()]);
     applyIntrinsic(eventEmitterOnIntrinsic, child.stderr, ["data", (chunk: Buffer | string) => {
-      this.stderrBytes += Buffer.byteLength(chunk);
+      this.stderrBytes += bufferByteLengthIntrinsic(chunk);
       if (this.stderrBytes > MAX_STDERR_BYTES) this.fail();
     }]);
   }
 
   async send(message: JsonValue): Promise<void> {
     if (this.failed) throw new Error();
-    const bytes = Buffer.from(`${JSON.stringify(message)}\n`, "utf8");
+    const bytes = bufferFromIntrinsic(`${stringifyJsonValue(message)}\n`, "utf8");
     try {
-      if (bytes.byteLength > this.outputLimitBytes) {
+      if (typedArrayByteLength(bytes) > this.outputLimitBytes) {
         this.fail();
         throw new Error();
       }
@@ -836,7 +925,7 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
         }]);
       });
     } finally {
-      bytes.fill(0);
+      zeroReturnedBytes(bytes);
     }
   }
 
@@ -851,26 +940,37 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
           if (this.pendingBytes !== 0) throw new Error();
           return undefined;
         }
-        chunk = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
-        this.outputBytes += chunk.byteLength;
+        chunk = bufferIsBufferIntrinsic(next.value)
+          ? next.value
+          : bufferFromIntrinsic(next.value);
+        this.outputBytes += typedArrayByteLength(chunk);
         if (this.outputBytes > this.outputLimitBytes) {
           this.fail();
           throw new Error();
         }
       }
 
-      const newline = chunk.indexOf(0x0a);
+      const newline = applyIntrinsic(uint8ArrayIndexOfIntrinsic, chunk, [0x0a]) as number;
       if (newline === -1) {
         this.appendPending(chunk);
         continue;
       }
-      this.appendPending(chunk.subarray(0, newline));
-      if (newline + 1 < chunk.byteLength) this.unread = chunk.subarray(newline + 1);
+      this.appendPending(
+        applyIntrinsic(uint8ArraySubarrayIntrinsic, chunk, [0, newline]) as Buffer,
+      );
+      if (newline + 1 < typedArrayByteLength(chunk)) {
+        this.unread = applyIntrinsic(uint8ArraySubarrayIntrinsic, chunk, [
+          newline + 1,
+        ]) as Buffer;
+      }
       if (this.pendingBytes === 0 || this.pending[this.pendingBytes - 1] === 0x0d) {
         throw new Error();
       }
       try {
-        const line = this.pending.subarray(0, this.pendingBytes);
+        const line = applyIntrinsic(uint8ArraySubarrayIntrinsic, this.pending, [
+          0,
+          this.pendingBytes,
+        ]) as Buffer;
         return {
           message: normalizeJsonValue(
             parseJson(
@@ -883,28 +983,38 @@ class JsonlProcessConnection implements CodexAppServerProtocolConnection {
           byteLength: this.pendingBytes + 1,
         };
       } finally {
-        this.pending.fill(0, 0, this.pendingBytes);
+        applyIntrinsic(uint8ArrayFillIntrinsic, this.pending, [0, 0, this.pendingBytes]);
         this.pendingBytes = 0;
       }
     }
   }
 
   private appendPending(chunk: Buffer): void {
-    if (chunk.byteLength === 0) return;
-    const required = this.pendingBytes + chunk.byteLength;
+    const chunkByteLength = typedArrayByteLength(chunk);
+    if (chunkByteLength === 0) return;
+    const required = this.pendingBytes + chunkByteLength;
     if (required > MAX_JSONL_LINE_BYTES) {
       this.fail();
       throw new Error();
     }
-    if (required > this.pending.byteLength) {
-      let capacity = Math.max(4096, this.pending.byteLength);
-      while (capacity < required) capacity = Math.min(MAX_JSONL_LINE_BYTES, capacity * 2);
-      const grown = Buffer.allocUnsafe(capacity);
-      this.pending.copy(grown, 0, 0, this.pendingBytes);
-      this.pending.fill(0);
+    const pendingByteLength = typedArrayByteLength(this.pending);
+    if (required > pendingByteLength) {
+      let capacity = mathMaxIntrinsic(4096, pendingByteLength);
+      while (capacity < required) {
+        capacity = mathMinIntrinsic(MAX_JSONL_LINE_BYTES, capacity * 2);
+      }
+      const grown = bufferAllocUnsafeIntrinsic(capacity);
+      applyIntrinsic(uint8ArraySetIntrinsic, grown, [
+        applyIntrinsic(uint8ArraySubarrayIntrinsic, this.pending, [
+          0,
+          this.pendingBytes,
+        ]),
+        0,
+      ]);
+      zeroReturnedBytes(this.pending);
       this.pending = grown;
     }
-    chunk.copy(this.pending, this.pendingBytes);
+    applyIntrinsic(uint8ArraySetIntrinsic, this.pending, [chunk, this.pendingBytes]);
     this.pendingBytes = required;
   }
 
@@ -935,6 +1045,38 @@ function waitForClose(
         resolve({ code, signal: childSignal }),
     ]);
   });
+}
+
+function restoreEventEmitterIntrinsics(): void {
+  definePropertyIntrinsic(EventEmitter.prototype, "on", eventEmitterOnDescriptor);
+  definePropertyIntrinsic(EventEmitter.prototype, "once", eventEmitterOnceDescriptor);
+  definePropertyIntrinsic(EventEmitter.prototype, "emit", eventEmitterEmitDescriptor);
+  definePropertyIntrinsic(
+    EventEmitter.prototype,
+    "addListener",
+    eventEmitterAddListenerDescriptor,
+  );
+  definePropertyIntrinsic(
+    EventEmitter.prototype,
+    "removeListener",
+    eventEmitterRemoveListenerDescriptor,
+  );
+}
+
+function hardenEventEmitterInstance(value: EventEmitter): void {
+  definePropertyIntrinsic(value, "on", fixedMethod(eventEmitterOnIntrinsic));
+  definePropertyIntrinsic(value, "once", fixedMethod(eventEmitterOnceIntrinsic));
+  definePropertyIntrinsic(value, "emit", fixedMethod(eventEmitterEmitIntrinsic));
+  definePropertyIntrinsic(value, "addListener", fixedMethod(eventEmitterAddListenerIntrinsic));
+  definePropertyIntrinsic(
+    value,
+    "removeListener",
+    fixedMethod(eventEmitterRemoveListenerIntrinsic),
+  );
+}
+
+function fixedMethod(value: unknown): PropertyDescriptor {
+  return { configurable: false, enumerable: false, value, writable: false };
 }
 
 async function terminateProcessTree(child: ChildProcessWithoutNullStreams): Promise<void> {

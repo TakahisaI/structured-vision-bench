@@ -563,6 +563,91 @@ test("shared Object.hasOwn mutation cannot supply a required inherited field", a
   }
 });
 
+test("protocol normalization and equality ignore replaced JSON and collection globals", async () => {
+  const stringifyDescriptor = Object.getOwnPropertyDescriptor(JSON, "stringify");
+  const freezeDescriptor = Object.getOwnPropertyDescriptor(Object, "freeze");
+  const mapDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "map");
+  const sortDescriptor = Object.getOwnPropertyDescriptor(Array.prototype, "sort");
+  assert.ok(stringifyDescriptor?.value);
+  assert.ok(freezeDescriptor?.value);
+  assert.ok(mapDescriptor?.value);
+  assert.ok(sortDescriptor?.value);
+  const originalStringify = stringifyDescriptor.value as typeof JSON.stringify;
+  let injectedStringifyCalls = 0;
+  let freezeCalls = 0;
+  let mapCalls = 0;
+  let sortCalls = 0;
+  let success: Awaited<ReturnType<typeof runCodexAppServerProtocol>> | undefined;
+  let mismatchRejected = false;
+
+  try {
+    Object.defineProperty(JSON, "stringify", {
+      configurable: true,
+      value(value: unknown, ...arguments_: unknown[]) {
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          (value as { method?: unknown }).method === "thread/start"
+        ) {
+          injectedStringifyCalls += 1;
+          return '{"baseInstructions":"synthetic injected"}';
+        }
+        return Reflect.apply(originalStringify, JSON, [value, ...arguments_]);
+      },
+      writable: true,
+    });
+    Object.defineProperty(Object, "freeze", {
+      configurable: true,
+      value(value: unknown) {
+        freezeCalls += 1;
+        return value;
+      },
+      writable: true,
+    });
+    Object.defineProperty(Array.prototype, "map", {
+      configurable: true,
+      value() {
+        mapCalls += 1;
+        return [];
+      },
+      writable: true,
+    });
+    Object.defineProperty(Array.prototype, "sort", {
+      configurable: true,
+      value() {
+        sortCalls += 1;
+        return this;
+      },
+      writable: true,
+    });
+
+    success = await runCodexAppServerProtocol(
+      new SyntheticConnection("success"),
+      request(),
+    );
+    try {
+      await runCodexAppServerProtocol(
+        new SyntheticConnection("thread-snapshot-mismatch"),
+        request(),
+      );
+    } catch {
+      mismatchRejected = true;
+    }
+  } finally {
+    Object.defineProperty(JSON, "stringify", stringifyDescriptor);
+    Object.defineProperty(Object, "freeze", freezeDescriptor);
+    Object.defineProperty(Array.prototype, "map", mapDescriptor);
+    Object.defineProperty(Array.prototype, "sort", sortDescriptor);
+  }
+
+  assert.deepEqual(success?.document, syntheticDocument());
+  assert.equal(mismatchRejected, true);
+  assert.equal(injectedStringifyCalls, 0);
+  assert.equal(freezeCalls, 0);
+  assert.equal(mapCalls, 0);
+  assert.equal(sortCalls, 0);
+});
+
 test("waits for a delayed interrupt send before closing input", async () => {
   const connection = new DelayedInterruptConnection();
   const controller = new AbortController();

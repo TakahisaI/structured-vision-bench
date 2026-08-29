@@ -500,11 +500,6 @@ test("revalidation settlement restores captured Promise metadata", async (contex
 
   await context.test("rejected Promise with hostile constructor getter", async () => {
     await withFixture("provider-success", async ({ options }) => {
-      const constructorDescriptor = Object.getOwnPropertyDescriptor(
-        Promise.prototype,
-        "constructor",
-      );
-      assert.ok(constructorDescriptor);
       const unhandledRejections: unknown[] = [];
       const recordUnhandledRejection = (reason: unknown): void => {
         unhandledRejections[unhandledRejections.length] = reason;
@@ -515,8 +510,8 @@ test("revalidation settlement restores captured Promise metadata", async (contex
         process: options,
         revalidateTransport: () => {
           const rejected = Promise.reject(new Error("synthetic rejected revalidation"));
-          Object.defineProperty(Promise.prototype, "constructor", {
-            configurable: true,
+          Object.defineProperty(rejected, "constructor", {
+            configurable: false,
             get() {
               throw new Error("synthetic constructor access");
             },
@@ -532,7 +527,6 @@ test("revalidation settlement restores captured Promise metadata", async (contex
         );
         await new Promise<void>((resolve) => setImmediate(resolve));
       } finally {
-        Object.defineProperty(Promise.prototype, "constructor", constructorDescriptor);
         process.off("unhandledRejection", recordUnhandledRejection);
       }
 
