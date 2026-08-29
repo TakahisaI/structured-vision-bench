@@ -167,6 +167,18 @@ Portable Node.js cannot close the final same-UID path-swap window around link, u
 removal; as with attempt publication, an adversarial same-UID process in that syscall window is
 outside the harness threat model.
 
+The pure suite-slot event contract records only suite/slot/attempt identities, canonical time,
+status, a preflighted value-free failure code, and derived outcome/event identities. It contains no
+case ID, document or policy value, path, or secret. Runtime builders and readers reject accessors,
+sparse or unknown members, unsupported byte storage, oversized input before copying, identity or
+chain tamper, illegal transitions, and failure codes outside the versioned runner set or immutable
+suite manifest. Public failures are reconstructed from module-authentic stable categories and fixed
+messages. The hash chain detects tampering, gaps, middle deletion, and reordering in retained
+records, while the append API does not offer delete or overwrite. Without a signed or externally
+trusted monotonic head it does not prove absence of tail truncation or protect against a same-UID
+attacker rewriting a complete suffix; those threats require a separate design. See
+[`docs/suite-slot-event-v1.md`](suite-slot-event-v1.md).
+
 Attempt roots must resolve outside the bundle root. The runner opens the root with no-follow directory
 flags, changes permissions through that handle, and compares its device/inode with the path through
 the last pre-publication validation. Before provider work, the attempt-identity destination is claimed
