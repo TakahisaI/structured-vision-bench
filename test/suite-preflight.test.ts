@@ -17,6 +17,7 @@ import {
 import { createSanitizerPolicyEnvelope } from "../src/runner/sanitizer.js";
 import {
   computeCasePolicyMapDigest,
+  computeSuitePlanDigest,
   deriveSuiteAttemptKey,
   preflightSuite,
   SuitePreflightError,
@@ -301,6 +302,15 @@ test("rejects policy state on a not-required case and inconsistent suite sanitiz
     await fixture.write();
     await expectSuiteError(fixture, "suite_invalid", null);
   });
+
+  await withSuite(async (fixture) => {
+    fixture.manifest.sanitizer!.command = {
+      ...fixture.manifest.sanitizer!.command,
+      envAllowlist: ["PATH", "Path"],
+    };
+    await fixture.write();
+    await expectSuiteError(fixture, "suite_invalid", null);
+  });
 });
 
 test("rejects unsafe references and non-private policy files without exposing values", async () => {
@@ -318,6 +328,11 @@ test("rejects unsafe references and non-private policy files without exposing va
   await withSuite(async (fixture) => {
     await chmod(path.join(fixture.root, fixture.manifest.cases[1]!.policy!.path), 0o644);
     await expectSuiteError(fixture, "suite_policy_invalid", 1);
+  });
+
+  await withSuite(async (fixture) => {
+    await chmod(path.join(fixture.root, "suite.json"), 0o644);
+    await expectSuiteError(fixture, "suite_invalid", null);
   });
 });
 
@@ -421,6 +436,17 @@ test("case policy map identity uses the v1 fixed vector", () => {
       },
     ]),
     "65cf207d0e2c3e525ffd358bde2316f1e82d86c77b4983dc8cb7f50f66ccacce",
+  );
+});
+
+test("suite plan identity uses the v1 fixed vector", () => {
+  assert.equal(
+    computeSuitePlanDigest("a".repeat(64), "b".repeat(64)),
+    "94c0fbc55f3961b2959f4a1e9f2bc18f2b671ede56d5269822312fd37aae3ede",
+  );
+  assert.throws(
+    () => computeSuitePlanDigest("synthetic-invalid", "b".repeat(64)),
+    (error: unknown) => error instanceof SuitePreflightError && error.code === "suite_invalid",
   );
 });
 
@@ -635,7 +661,9 @@ async function createSuiteFixture(): Promise<SuiteFixture> {
     cases: caseEntries,
   };
   const write = async (): Promise<void> => {
-    await writeFile(path.join(root, "suite.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    const suitePath = path.join(root, "suite.json");
+    await writeFile(suitePath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await chmod(suitePath, 0o600);
   };
   await write();
   return {

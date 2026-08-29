@@ -23,14 +23,15 @@ A suite is run configuration, never bundle content. It fixes:
 - an ordered list of bundle and requirement identities; and
 - a separate, case-specific target-bound policy reference for every required case.
 
-The suite directory may be confidential. A policy reference is a normalized relative path beneath
-that directory. The reader rejects symlinks in every reference segment and requires the policy file
-to be a private regular file. Policy contents and local paths never enter diagnostics, the
-case-policy mapping digest, or a future formal attempt/report.
+The suite directory may be confidential. `suite.json` and every referenced policy must be private
+regular files with no group or other permission bits. A policy reference is a normalized relative
+path beneath that directory. The reader rejects symlinks in every reference segment. Policy
+contents and local paths never enter diagnostics, the case-policy mapping digest, or a future formal
+attempt/report.
 
 Approval and sanitizer executables use absolute paths and retain the existing shell-free command
-limits. They are identity-bearing private configuration: preflight snapshots them but never starts
-them.
+limits, including case-insensitive uniqueness for environment variable names. They are
+identity-bearing private configuration: preflight snapshots them but never starts them.
 
 ## Case entries
 
@@ -96,10 +97,10 @@ For a required case only, that tuple continues with policy version, exact-byte p
 policy-target identity digest, and policy-binding digest. A not-required tuple ends immediately
 after its discriminator; no empty policy fields are synthesized.
 
-`suitePlanDigest` is SHA-256 over the ASCII domain `svbench-suite-plan-v1`, `suiteDigest`, and
-`casePolicyMapDigest`, all length-prefixed. Consequently provider/request settings, approval or
-sanitizer configuration, repeat, order, bundle expectations, requirement decisions, and policies
-cannot be changed while retaining the same plan identity.
+`suitePlanDigest` is SHA-256 over the raw ASCII domain `svbench-suite-plan-v1`, followed by the
+length-prefixed `suiteDigest` and length-prefixed `casePolicyMapDigest`. Consequently
+provider/request settings, approval or sanitizer configuration, repeat, order, bundle expectations,
+requirement decisions, and policies cannot be changed while retaining the same plan identity.
 
 The v1 deterministic attempt key for zero-based indices is:
 

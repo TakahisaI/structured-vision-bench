@@ -242,7 +242,7 @@ export async function preflightSuite(
   let suiteBytes: Buffer;
   try {
     const suiteFile = await resolveStableReference(suiteRoot, SUITE_FILE_NAME, "file");
-    suiteBytes = await readStableFile(suiteFile, MAX_SUITE_BYTES, false);
+    suiteBytes = await readStableFile(suiteFile, MAX_SUITE_BYTES, true);
   } catch {
     throw new SuitePreflightError("suite_invalid", "suite manifest is invalid");
   }
@@ -297,11 +297,7 @@ export async function preflightSuite(
 
   const casePolicyMapDigest = computeCasePolicyMapDigest(cases);
   const slots = deriveSuiteSlots(cases.length, manifest.repeat);
-  const suitePlanDigest = digestParts([
-    Buffer.from("svbench-suite-plan-v1", "ascii"),
-    lengthPrefixedAscii(suiteDigest),
-    lengthPrefixedAscii(casePolicyMapDigest),
-  ]);
+  const suitePlanDigest = computeSuitePlanDigest(suiteDigest, casePolicyMapDigest);
 
   const plan: SuitePreflightPlan = {
     suiteVersion: 1,
@@ -344,6 +340,21 @@ export function deriveSuiteAttemptKey(caseIndex: number, repeatIndex: number): s
     });
   }
   return attemptKey;
+}
+
+/** Commits the exact suite bytes and its ordered case-policy mapping. */
+export function computeSuitePlanDigest(
+  suiteDigest: string,
+  casePolicyMapDigest: string,
+): string {
+  if (!isDigest(suiteDigest) || !isDigest(casePolicyMapDigest)) {
+    throw new SuitePreflightError("suite_invalid", "suite plan identity is invalid");
+  }
+  return digestParts([
+    Buffer.from("svbench-suite-plan-v1", "ascii"),
+    lengthPrefixedAscii(suiteDigest),
+    lengthPrefixedAscii(casePolicyMapDigest),
+  ]);
 }
 
 /** Commits the ordered requirement and case-specific policy mapping. */
@@ -1011,6 +1022,14 @@ function snapshotSanitizer(
 function snapshotCommand(value: CommandManifest): SuiteCommandSnapshot {
   if (!path.isAbsolute(value.executable)) {
     throw new SuitePreflightError("suite_invalid", "suite manifest is invalid");
+  }
+  const normalizedEnvironmentNames = new Set<string>();
+  for (const name of value.envAllowlist) {
+    const normalized = name.toUpperCase();
+    if (normalizedEnvironmentNames.has(normalized)) {
+      throw new SuitePreflightError("suite_invalid", "suite manifest is invalid");
+    }
+    normalizedEnvironmentNames.add(normalized);
   }
   return Object.freeze({
     executable: value.executable,
