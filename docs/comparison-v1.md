@@ -5,7 +5,7 @@
 Comparison v1 scores one finalized attempt against one validated bundle truth projection. It owns
 scalar and array alignment, error classification, critical hard gates, a machine-readable result,
 and a deterministic single-case Markdown view. It does not invoke a provider or sanitizer, change an
-attempt, implement semantic similarity, aggregate multiple attempts, or own suite reporting.
+attempt, implement semantic similarity, or aggregate multiple attempts.
 
 The normative pointer, normalization, absence, denominator, and critical-membership rules remain in
 [`bundle-v1.md`](bundle-v1.md). The machine-readable result shape is

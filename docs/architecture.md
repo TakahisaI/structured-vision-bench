@@ -22,18 +22,18 @@ A consuming application owns the production extraction request. Its bundle-facin
 Its run-facing settings are separate and never enter a bundle:
 
 - provider route, requested model, effort, and token limit;
-- execution phase;
-- repeat and retry policy;
+- execution phase and caller-owned attempt key;
 - approval command, phase, snapshot, runtime binding, and approved-scope expectations;
 - sanitizer command;
 - consumer-owned sanitizer requirement verifier and attestation.
 
 The final contract splits ownership as follows: the **bundle** carries image, schema, system,
-instruction, optional truth, comparison policy, and consumer metadata; **run or suite
-configuration** carries provider, model, effort, max tokens, and repeats; an **attempt** records the
+instruction, optional truth, comparison policy, and consumer metadata; **run configuration**
+carries provider, model, effort, max tokens, phase, and the attempt key; an **attempt** records the
 requested and effective execution settings together with the result. The consumer exports only the
 bundle-facing values into this repository without moving its production source of truth here. A
-later private command adapter may invoke the consumer's production API provider for calibration.
+consumer-owned command adapter can invoke its production API provider without moving that private
+implementation into this repository.
 
 ### Bundle validator
 
@@ -64,20 +64,22 @@ The successful gate response is bound into `runId` and the attempt manifest. Imm
 transport, an applied gate also requires the private provider adapter to rederive its current opaque
 binding through `prepareTransport()`; changed receiver state or expiry fails before `invoke()` or
 input reads. A provider-carried post-response copy may be checked against the gate response but
-cannot replace these pre-transport checks or self-authorize transport. Suite and resume propagation
-is intentionally deferred to Phase B of Issue #9 after Issue #5.
+cannot replace these pre-transport checks or self-authorize transport. Every `svbench run`
+independently executes and records this gate; the public harness does not propagate approval through
+suite or resume orchestration.
 
 ### Provider
 
 A provider accepts the prepared image, instructions, schema, and requested execution metadata. It
 returns a structured document plus metadata that the upstream protocol actually exposes. Missing
 metadata remains unknown. The public implementation ships a deterministic mock provider and the
-Phase A shell-free command provider. The command provider stages the four exact verified inputs plus
+shell-free command provider. The command provider stages the four exact verified inputs plus
 a versioned local manifest in a fresh private directory only after the consumer-owned adapter
 reattests approved transport, then releases the request path to that same live process and strictly
 binds its response to phase, requested settings, provider identity, case-input identity, sanitizer
 requirement, and approval. See [`docs/command-provider-v1.md`](command-provider-v1.md). Real
-app-server adapters remain later work. The v1 local adapter and its descendants are one trusted
+app-server extraction uses the fixed Codex app-server boundary described below. The v1 local
+command adapter and its descendants are one trusted
 invocation boundary: the direct child must remain live through extraction and must not delegate the
 control pipe, request path, or request descriptors. Portable termination is limited to the initially
 spawned process group; detached or daemonized descendants are non-conforming.
@@ -96,7 +98,7 @@ sanitizer metadata, truth, comparison policy or results, and prior attempts are 
 hosted model. Truth, comparison policy or results, and prior attempts are also never sent to the
 local adapter or sanitizer. Caller-owned attempt keys and derived attempt/run IDs are runner storage
 metadata and are never sent to the local adapter, hosted model, approval gate, or sanitizer. The
-sanitizer command is run/suite configuration, not bundle content.
+sanitizer command is run configuration, not bundle content.
 
 Providers are transport adapters, not autonomous agents. The Codex app-server protocol uses one
 fixed-version ephemeral turn and fails rather than answer tool, shell, file-change, workspace, or
@@ -135,11 +137,12 @@ without field values or pointer text. Normal scoring requires the execution bund
 rescoring permits only truth/comparison changes while the four provider inputs, case identity, and
 provenance remain fixed. Semantic or LLM-judged equivalence is outside bundle v1.
 
-### Report
+### Derived output
 
-Case and suite reports are derived output. They must identify the provider route, requested and
-responded model, requested and effective effort, input digests, harness version, and unavailable
-metadata. Reports never rewrite the input bundle.
+Attempt metadata and single-case comparison output are derived output. They identify the provider
+route, requested and responded model, requested and effective effort, input digests, harness
+version, and unavailable metadata. Derived output never rewrites the input bundle or aggregates a
+suite.
 
 ## Trust boundaries
 

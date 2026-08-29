@@ -4,14 +4,15 @@
 
 Issue #2 adds a provider-neutral single-case runner. It consumes one already validated bundle and
 writes one successful attempt outside the bundle. It does not own a production prompt, business
-schema, preprocessing, provider credentials, comparison logic, repeat policy, or resume policy.
+schema, preprocessing, provider credentials, or comparison logic, and it does not orchestrate
+repeats, retries, or resume.
 
 The private command sanitizer contract is defined in [`docs/sanitizer-v1.md`](sanitizer-v1.md).
-Approval protocol v1 Phase A is
-implemented for this single-run lifecycle: a consumer verifier must derive the requirement decision,
+Approval protocol v1 is implemented for this single-run lifecycle: a consumer verifier must derive
+the requirement decision,
 and a configured private gate must approve the expected snapshot, runtime binding, and scope before
-the provider runs. Suite/resume approval integration remains Phase B of #9 after #5. This repository
-does not implement a real login or hosted-model adapter.
+the provider runs. Each invocation performs that lifecycle independently. This repository does not
+implement a real login or a production hosted-model adapter.
 
 ## CLI
 
@@ -192,8 +193,8 @@ sanitizer identity/binding metadata, and the complete consumer sanitizer-require
 optional tuple members use an explicit presence tag, so absent and null/empty values cannot collide.
 Changing a requested execution or security setting produces a different run ID without changing
 `caseInputIdentity`. A route is a stable provider label, not an endpoint or account identifier.
-The current development contract requires `run.phase`; attempts created before this Phase A field
-was introduced are intentionally incompatible with the current reader.
+The current contract requires `run.phase`; attempts created before that field was introduced are
+intentionally incompatible with the current reader.
 
 ### Attempt instance identity
 
@@ -360,7 +361,7 @@ policy.
 Attempt v1 was changed before package publication while the package remains private at version
 `0.0.0`. Artifacts written by the earlier Issue #2 development shape—where `attemptId` equaled
 `runId` and the manifest had no attempt identity fields—are intentionally incompatible with this
-reader. Phase A approval development also adds provider implementation/protocol versions, expanded
+reader. Later approval development added provider implementation/protocol versions, expanded
 approval metadata, and the corrected ordered requirement-decision digest tuple; artifacts from the
 preceding development shape are likewise incompatible. There is no migration or legacy-reader path
 in this repository. Development users retaining those artifacts must read them with the matching

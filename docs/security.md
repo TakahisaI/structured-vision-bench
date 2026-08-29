@@ -25,8 +25,8 @@ input. Keep real bundle manifests and reports outside Git history.
 ## Credential ownership
 
 The harness does not implement login, logout, token refresh, or credential migration for Codex or
-ChatGPT. It must not locate or parse an upstream credential file. A future app-server provider may
-start an upstream-supported process in an environment where the operator has already logged in.
+ChatGPT. It must not locate or parse an upstream credential file. The Codex app-server provider may
+start only an upstream-supported process in an environment where the operator has already logged in.
 
 A ChatGPT subscription credential and an OpenAI Platform API key are different routes and must not
 be substituted or reported as one another.
@@ -95,7 +95,7 @@ callback. Thus a receiver-state change or an adapter that delays image access pa
 the earlier gate result. Provider, approval, and sanitizer timeout values are all bounded to Node's
 maximum timer delay of 2,147,483,647 milliseconds.
 
-The Phase A command provider follows the same shell-free configuration boundary and accepts only
+The command provider follows the same shell-free configuration boundary and accepts only
 policy-not-required runs and rejects required sanitizer or policy flags before starting a child.
 For approved runs, the private adapter reattests its current transport binding without extraction
 inputs at the runner hook and again after callback hashing inside the extraction process. The runner

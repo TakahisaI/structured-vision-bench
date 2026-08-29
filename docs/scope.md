@@ -99,7 +99,7 @@ A change to a maintained public contract requires all of the following:
 5. obtain owner approval before implementation when the change expands scope.
 
 A refactor that preserves externally observable bytes and behavior does not need a version change,
-but it still must pass the complete synthetic contract suite.
+but it still must pass the complete synthetic contract test set.
 
 ## Data and CI boundary
 
