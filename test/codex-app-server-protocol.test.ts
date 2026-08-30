@@ -78,6 +78,11 @@ test("sends only four extraction inputs and supported requested settings", async
     ),
   );
   assert.ok(
+    requiredArray(capabilities.optOutNotificationMethods).includes(
+      "mcpServer/startupStatus/updated",
+    ),
+  );
+  assert.ok(
     requiredArray(capabilities.optOutNotificationMethods).includes("warning"),
   );
   assert.deepEqual(turn.params.sandboxPolicy, {
@@ -138,6 +143,14 @@ test("binds thread and turn effort to the requested value", async () => {
       .model_reasoning_effort,
     "low",
   );
+});
+
+test("accepts the official CLI vscode session source", async () => {
+  const result = await runCodexAppServerProtocol(
+    new SyntheticConnection("vscode-source"),
+    request(),
+  );
+  assert.deepEqual(result.document, syntheticDocument());
 });
 
 test("omits the thread effort override when the request leaves it unknown", async () => {
@@ -202,6 +215,7 @@ test("fails closed on requests, tools, files, identity drift, and trailing event
     "thread-notification-before-response",
     "missing-thread-started",
     "thread-snapshot-mismatch",
+    "unexpected-thread-source",
     "active-thread",
     "missing-project-id",
     "persistent-thread",
@@ -210,6 +224,7 @@ test("fails closed on requests, tools, files, identity drift, and trailing event
     "approval-request",
     "tool-request",
     "file-change",
+    "mcp-startup-notification",
     "unexpected-event",
     "trailing-event",
     "raw-response",
@@ -748,6 +763,8 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
       if (this.mode === "cli-version-mismatch") thread.cliVersion = "0.149.0";
       if (this.mode === "missing-project-id") delete thread.projectId;
       if (this.mode === "persistent-thread") thread.ephemeral = false;
+      if (this.mode === "vscode-source") thread.source = "vscode";
+      if (this.mode === "unexpected-thread-source") thread.source = "cli";
       const response = {
         id: requiredValue(message.id),
         result: {
@@ -860,6 +877,9 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
             ? { method: "warning", params: { message: "synthetic" } }
             : notification,
         );
+      }
+      if (this.mode === "mcp-startup-notification") {
+        this.enqueue({ method: "mcpServer/startupStatus/updated", params: {} });
       }
       if (this.mode === "timeout") return;
       if (this.mode === "approval-request") {

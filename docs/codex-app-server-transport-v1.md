@@ -102,6 +102,9 @@ once. The connection reports each raw message byte length; accounting uses at le
 JSON size so an in-memory connection cannot under-report it. Active-item tracking retains only the
 bounded item ID and allowed type, not the item value. The process client additionally owns the raw
 JSONL line, stdout, and stderr limits before parsing.
+The fixed CLI may identify the session source as `appServer` or `vscode`; the client still requires
+the exact caller-selected `threadSource`, private workspace, and ephemeral thread on both snapshots.
+
 Server-initiated requests,
 tool items, command items, file-change items, MCP calls, dynamic tools, collaboration items, web
 search, image generation, unexpected notifications, extra final messages, protocol errors, and
@@ -113,8 +116,9 @@ that same cleanup operation so it cannot close input ahead of the interrupt. The
 byte framing, timeout, process termination, and workspace cleanup.
 
 The thread config requests that shell tools, shell snapshot collection, view-image, code-mode host,
-multi-agent, web search, MCP entries, hooks, and legacy notify commands are disabled. It also opts
-out of fixed remote-control, account rate-limit, and generic warning notifications. Warning
+multi-agent, web search, MCP entries, hooks, and legacy notify commands are disabled. It also opts out
+of notifications for fixed remote-control, account rate limits, MCP startup status, and generic
+warnings. Warning
 conditions that affect the no-host-tool settings are rejected before startup rather than inferred
 from value-bearing warning text. These settings reduce the exposed tool surface; any tool or
 server-request event that still reaches the protocol is rejected.
