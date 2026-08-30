@@ -12,7 +12,7 @@ import {
   createCodexAppServerProvider,
   type CodexAppServerTransportRevalidator,
 } from "../src/provider/codex-app-server-provider.js";
-import { CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION } from "../src/provider/codex-app-server-process.js";
+import { CODEX_APP_SERVER_PROTOCOL_VERSION } from "../src/provider/codex-app-server.js";
 import { readAttempt } from "../src/runner/attempt.js";
 import { RunnerError } from "../src/runner/errors.js";
 import {
@@ -58,7 +58,7 @@ test("runs one approved app-server transport and preserves upstream metadata", a
       provider.implementationVersion,
       CODEX_APP_SERVER_PROVIDER_IMPLEMENTATION_VERSION,
     );
-    assert.equal(provider.protocolVersion, CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION);
+    assert.equal(provider.protocolVersion, CODEX_APP_SERVER_PROTOCOL_VERSION);
 
     const prepared = await provider.prepareTransport!(direct.approval);
     const response = await provider.invoke(direct.request, direct.context);
@@ -1286,7 +1286,7 @@ test("publishes one schema-valid policy-free runner attempt", async () => {
     );
     assert.equal(
       attempt.manifest.run.protocolVersion,
-      CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION,
+      CODEX_APP_SERVER_PROTOCOL_VERSION,
     );
     assert.equal(attempt.manifest.run.responded.model, "synthetic-model");
     assert.equal(attempt.manifest.run.responded.effort, "medium");

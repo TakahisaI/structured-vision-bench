@@ -409,7 +409,7 @@ test("runs one approval-bound Codex app-server attempt from the public CLI", asy
     );
     assert.equal(
       attempt.manifest.run.protocolVersion,
-      "codex-app-server-isolation-v1",
+      "codex-app-server-v2-9b3de71a5a2ffc98",
     );
     assert.deepEqual(attempt.manifest.run.requested, {
       model: "synthetic-model",

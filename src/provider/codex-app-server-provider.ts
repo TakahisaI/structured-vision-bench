@@ -9,12 +9,12 @@ import {
   removeAbortSignalListener,
 } from "./abort-signal-intrinsics.js";
 import {
-  CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION,
   runCodexAppServerProcess,
   type CodexAppServerProcessOptions,
   type CodexAppServerProcessRequest,
   type CodexAppServerProcessStartAuthorization,
 } from "./codex-app-server-process.js";
+import { CODEX_APP_SERVER_PROTOCOL_VERSION } from "./codex-app-server.js";
 import {
   createIntrinsicPromise,
   invokeIntrinsicPromiseCallback,
@@ -101,7 +101,7 @@ export function createCodexAppServerProvider(
     id: CODEX_APP_SERVER_PROVIDER_ID,
     route: CODEX_APP_SERVER_PROVIDER_ROUTE,
     implementationVersion: CODEX_APP_SERVER_PROVIDER_IMPLEMENTATION_VERSION,
-    protocolVersion: CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION,
+    protocolVersion: CODEX_APP_SERVER_PROTOCOL_VERSION,
     async prepareTransport(
       approvalValue: ApprovalResponse,
       signal?: AbortSignal,

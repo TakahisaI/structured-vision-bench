@@ -196,12 +196,15 @@ test("fails closed on requests, tools, files, identity drift, and trailing event
   for (const mode of [
     "bad-response-id",
     "bad-sandbox",
+    "bad-thread-cwd",
+    "cli-version-mismatch",
     "instruction-source",
     "thread-notification-before-response",
     "missing-thread-started",
     "thread-snapshot-mismatch",
     "active-thread",
     "missing-project-id",
+    "persistent-thread",
     "turn-started-before-status",
     "missing-turn-started",
     "approval-request",
@@ -741,7 +744,10 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
         thread.status = { type: "active", activeFlags: [] };
         thread.path = "/synthetic/persisted-thread";
       }
+      if (this.mode === "bad-thread-cwd") thread.cwd = "/synthetic/other";
+      if (this.mode === "cli-version-mismatch") thread.cliVersion = "0.149.0";
       if (this.mode === "missing-project-id") delete thread.projectId;
+      if (this.mode === "persistent-thread") thread.ephemeral = false;
       const response = {
         id: requiredValue(message.id),
         result: {

@@ -23,51 +23,6 @@ if (command[0] === "app-server") {
     await writeFile(path.join(root, "AGENTS.md"), "synthetic ancestor instruction\n");
   }
   const overrides = await captureProcessBoundary(command);
-  if (
-    mode === "isolation-success-descendant" ||
-    mode === "isolation-failure-descendant" ||
-    mode === "isolation-hang-descendant"
-  ) {
-    const descendant = spawnDescendant();
-    await appendCapture({ isolationDescendantPid: descendant.pid });
-  }
-  if (mode === "isolation-hang" || mode === "isolation-hang-descendant") {
-    await hangForever();
-  }
-  if (mode === "isolation-failure-descendant") process.exit(7);
-  const readiness = {
-    method: "svbench/isolation/ready",
-    params: {
-      protocol:
-        mode === "isolation-mismatch"
-          ? "codex-app-server-isolation-invalid"
-          : "codex-app-server-isolation-v1",
-      codexCliVersion: mode === "version-mismatch" ? "0.149.0" : "0.149.1",
-      managedConfig: "disabled",
-      pluginStartupTasks: "disabled",
-      accountPromptContributors:
-        mode === "prompt-contract-mismatch" ? "enabled" : "disabled",
-      telemetry: "disabled",
-      startupPrewarm: "disabled",
-      hostedRequestPolicy: "single-no-retry-no-fallback",
-      promptContract: "fixed-extraction-only",
-      processModel: "single-process",
-    },
-  };
-  if (mode === "fragmented-ready") {
-    for (const byte of Buffer.from(`${JSON.stringify(readiness)}\n`)) {
-      process.stdout.write(Buffer.of(byte));
-    }
-  } else {
-    send(readiness);
-  }
-  if (
-    mode === "isolation-mismatch" ||
-    mode === "version-mismatch" ||
-    mode === "prompt-contract-mismatch"
-  ) {
-    await hangForever();
-  }
   if (mode === "crash-descendant") {
     const descendant = spawnDescendant();
     await appendCapture({ descendantPid: descendant.pid });
@@ -185,7 +140,7 @@ async function runProtocol(overrides: ReadonlyMap<string, string>): Promise<void
   for await (const line of lines) {
     const message = JSON.parse(line) as JsonObject;
     if (message.method === "initialize") {
-      send({
+      const response = {
         id: message.id,
         result: {
           userAgent: "synthetic-codex-app-server/0.149.1",
@@ -193,7 +148,14 @@ async function runProtocol(overrides: ReadonlyMap<string, string>): Promise<void
           platformFamily: "synthetic",
           platformOs: "synthetic",
         },
-      });
+      };
+      if (mode === "fragmented-initialize") {
+        for (const byte of Buffer.from(`${JSON.stringify(response)}\n`)) {
+          process.stdout.write(Buffer.of(byte));
+        }
+      } else {
+        send(response);
+      }
     } else if (message.method === "thread/start") {
       const params = object(message.params);
       await appendCapture({ threadStart: params });
@@ -362,7 +324,7 @@ function syntheticThread(cwd: string): JsonObject {
     status: { type: "idle" },
     path: null,
     cwd,
-    cliVersion: "0.149.1",
+    cliVersion: mode === "version-mismatch" ? "0.149.0" : "0.149.1",
     source: "appServer",
     threadSource: "structured_vision_bench",
     agentNickname: null,

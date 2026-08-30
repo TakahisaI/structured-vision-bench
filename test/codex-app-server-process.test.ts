@@ -13,7 +13,6 @@ import {
   CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES,
 } from "../src/provider/codex-app-server.js";
 import {
-  CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION,
   CODEX_APP_SERVER_TOOL_PROFILE_VERSION,
   DEFAULT_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES,
   awaitProcessCleanup,
@@ -376,7 +375,7 @@ test(
   "uses captured timeout scheduling after the synchronous finalizer",
   { timeout: 5_000 },
   async () => {
-    await withFixture("isolation-hang-descendant", async ({ options, capture }) => {
+    await withFixture("hang", async ({ options, capture }) => {
       const setTimeoutDescriptor = Object.getOwnPropertyDescriptor(globalThis, "setTimeout");
       assert.ok(setTimeoutDescriptor);
       const originalSetTimeout = setTimeout;
@@ -414,12 +413,12 @@ test(
       const records = await readCapture(capture);
       const boundary = records.find((record) => record.phase === "app-server");
       const descendant = records.find(
-        (record) => record.isolationDescendantPid !== undefined,
+        (record) => record.descendantPid !== undefined,
       );
       assert.ok(boundary);
       assert.ok(descendant);
       await assertMissing(String(boundary.root));
-      await assertProcessStopped(Number(descendant.isolationDescendantPid));
+      await assertProcessStopped(Number(descendant.descendantPid));
     });
   },
 );
@@ -516,8 +515,7 @@ test(
   "keeps cancellation and cleanup independent of a replaced Array iterator",
   { timeout: 5_000 },
   async () => {
-    await withFixture("isolation-hang-descendant", async ({ options, capture }) => {
-      const reads = readCounter();
+    await withFixture("hang", async ({ options, capture }) => {
       const controller = new AbortController();
       const iteratorDescriptor = Object.getOwnPropertyDescriptor(
         Array.prototype,
@@ -534,7 +532,7 @@ test(
       try {
         const running = runCodexAppServerProcess(
           { ...options, timeoutMs: 10_000 },
-          request(reads),
+          request(readCounter()),
           controller.signal,
           async () => ({
             allowedEnvironment: [],
@@ -564,7 +562,7 @@ test(
           capture,
           (values) =>
             values.some((value) => value.phase === "app-server") &&
-            values.some((value) => value.isolationDescendantPid !== undefined),
+            values.some((value) => value.descendantPid !== undefined),
         );
         controller.abort();
         await assert.rejects(running, stableProcessError);
@@ -574,16 +572,15 @@ test(
         process.off("unhandledRejection", recordUnhandledRejection);
       }
 
-      assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
       assert.deepEqual(unhandledRejections, []);
       const boundary = records.find((record) => record.phase === "app-server");
       const descendant = records.find(
-        (record) => record.isolationDescendantPid !== undefined,
+        (record) => record.descendantPid !== undefined,
       );
       assert.ok(boundary);
       assert.ok(descendant);
       await assertMissing(String(boundary.root));
-      await assertProcessStopped(Number(descendant.isolationDescendantPid));
+      await assertProcessStopped(Number(descendant.descendantPid));
     });
   },
 );
@@ -592,7 +589,7 @@ test(
   "restores EventEmitter on/once/emit before spawn and cleanup",
   { timeout: 5_000 },
   async () => {
-    await withFixture("isolation-hang-descendant", async ({ options, capture }) => {
+    await withFixture("hang", async ({ options, capture }) => {
       const onceDescriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, "once");
       const onDescriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, "on");
       const emitDescriptor = Object.getOwnPropertyDescriptor(EventEmitter.prototype, "emit");
@@ -627,7 +624,7 @@ test(
           capture,
           (values) =>
             values.some((value) => value.phase === "app-server") &&
-            values.some((value) => value.isolationDescendantPid !== undefined),
+            values.some((value) => value.descendantPid !== undefined),
         );
         controller.abort();
         await assert.rejects(running, stableProcessError);
@@ -639,12 +636,12 @@ test(
 
       const boundary = records.find((record) => record.phase === "app-server");
       const descendant = records.find(
-        (record) => record.isolationDescendantPid !== undefined,
+        (record) => record.descendantPid !== undefined,
       );
       assert.ok(boundary);
       assert.ok(descendant);
       await assertMissing(String(boundary.root));
-      await assertProcessStopped(Number(descendant.isolationDescendantPid));
+      await assertProcessStopped(Number(descendant.descendantPid));
     });
   },
 );
@@ -761,45 +758,37 @@ test("does not use a replaced Object.create for the spawn environment", async ()
   });
 });
 
-test("does not read provider inputs before request and in-process isolation proof", async () => {
-  for (const scenario of [
-    { mode: "success", mutate: (value: CodexAppServerProcessRequest) => ({
-      ...value,
-      requested: { ...value.requested, maxTokens: 1 },
-    }) },
-    { mode: "version-mismatch", mutate: (value: CodexAppServerProcessRequest) => value },
-    { mode: "isolation-mismatch", mutate: (value: CodexAppServerProcessRequest) => value },
-    {
-      mode: "prompt-contract-mismatch",
-      mutate: (value: CodexAppServerProcessRequest) => value,
-    },
-    { mode: "isolation-hang", mutate: (value: CodexAppServerProcessRequest) => value },
-  ]) {
-    await withFixture(scenario.mode, async ({ options }) => {
-      const reads = readCounter();
-      const startedAt = Date.now();
-      await assert.rejects(
-        runCodexAppServerProcess(
-          { ...options, timeoutMs: 100 },
-          scenario.mutate(request(reads)),
-        ),
-        stableProcessError,
-        scenario.mode,
-      );
-      if (scenario.mode === "isolation-hang") {
-        assert.ok(Date.now() - startedAt >= 75, "isolation proof must reach its timeout");
-      }
-      assert.deepEqual(
-        reads,
-        { image: 0, schema: 0, system: 0, instruction: 0 },
-        scenario.mode,
-      );
-    });
-  }
+test("rejects invalid requests before reading provider inputs", async () => {
+  await withFixture("success", async ({ options }) => {
+    const reads = readCounter();
+    const value = request(reads);
+    await assert.rejects(
+      runCodexAppServerProcess(options, {
+        ...value,
+        requested: { ...value.requested, maxTokens: 1 },
+      }),
+      stableProcessError,
+    );
+    assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
+  });
 });
 
-test("accepts a readiness value fragmented into single-byte writes", async () => {
-  await withFixture("fragmented-ready", async ({ options }) => {
+test("rejects a mismatched live CLI version before starting the turn", async () => {
+  await withFixture("version-mismatch", async ({ options, capture }) => {
+    const reads = readCounter();
+    await assert.rejects(
+      runCodexAppServerProcess(options, request(reads)),
+      stableProcessError,
+    );
+    assert.deepEqual(reads, { image: 1, schema: 1, system: 1, instruction: 1 });
+    const records = await readCapture(capture);
+    assert.ok(records.some((record) => record.threadStart !== undefined));
+    assert.equal(records.some((record) => record.turnStart !== undefined), false);
+  });
+});
+
+test("accepts an initialize response fragmented into single-byte writes", async () => {
+  await withFixture("fragmented-initialize", async ({ options }) => {
     const reads = readCounter();
     const result = await runCodexAppServerProcess(options, request(reads));
     assert.equal(result.respondedModel, "synthetic-model");
@@ -818,7 +807,6 @@ test("verifies every lazy input digest before process transport", async () => {
     await assert.rejects(runCodexAppServerProcess(options, invalid), stableProcessError);
     assert.deepEqual(reads, { image: 1, schema: 0, system: 0, instruction: 0 });
     const records = await readCapture(capture);
-    assert.ok(records.some((record) => record.phase === "app-server"));
     assert.equal(records.some((record) => record.threadStart !== undefined), false);
   });
 });
@@ -1144,37 +1132,15 @@ test("accepts JSON-escaped control text within the byte contract", async () => {
   });
 });
 
-test("reclaims descendants after successful app-server and isolation prelude", async (t) => {
-  for (const mode of ["success-descendant", "isolation-success-descendant"]) {
-    await t.test(mode, async () => {
-      await withFixture(mode, async ({ options, capture }) => {
-        const result = await runCodexAppServerProcess(options, request(readCounter()));
-        assert.equal(result.respondedModel, "synthetic-model");
-        const descendant = (await readCapture(capture)).find(
-          (record) =>
-            record.descendantPid !== undefined ||
-            record.isolationDescendantPid !== undefined,
-        );
-        assert.ok(descendant);
-        await assertProcessStopped(
-          Number(descendant.descendantPid ?? descendant.isolationDescendantPid),
-        );
-      });
-    });
-  }
-});
-
-test("reclaims isolation descendants after a nonzero leader exit", async () => {
-  await withFixture("isolation-failure-descendant", async ({ options, capture }) => {
-    await assert.rejects(
-      runCodexAppServerProcess(options, request(readCounter())),
-      stableProcessError,
-    );
+test("reclaims descendants after successful app-server", async () => {
+  await withFixture("success-descendant", async ({ options, capture }) => {
+    const result = await runCodexAppServerProcess(options, request(readCounter()));
+    assert.equal(result.respondedModel, "synthetic-model");
     const descendant = (await readCapture(capture)).find(
-      (record) => record.isolationDescendantPid !== undefined,
+      (record) => record.descendantPid !== undefined,
     );
     assert.ok(descendant);
-    await assertProcessStopped(Number(descendant.isolationDescendantPid));
+    await assertProcessStopped(Number(descendant.descendantPid));
   });
 });
 
@@ -1232,10 +1198,6 @@ test("never executes host tools requested by the fake app-server", async (t) => 
 
 test("pins the process tool profile identity", () => {
   assert.equal(CODEX_APP_SERVER_TOOL_PROFILE_VERSION, "codex-no-host-tools-v1");
-  assert.equal(
-    CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION,
-    "codex-app-server-isolation-v1",
-  );
   const maximumEscapedTextBytes = 6 * MAX_PROVIDER_INPUT_BYTES + 2;
   const maximumUserItemBytes =
     Math.ceil(MAX_PROVIDER_INPUT_BYTES / 3) * 4 + maximumEscapedTextBytes;

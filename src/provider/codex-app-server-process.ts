@@ -32,7 +32,6 @@ import {
 } from "./abort-signal-intrinsics.js";
 import {
   CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES,
-  CODEX_APP_SERVER_CLI_VERSION,
   runCodexAppServerProtocol,
   type CodexAppServerProtocolConnection,
   type CodexAppServerProtocolReceivedMessage,
@@ -51,8 +50,6 @@ import {
 import type { RequestedExecutionSettings } from "../runner/types.js";
 
 export const CODEX_APP_SERVER_TOOL_PROFILE_VERSION = "codex-no-host-tools-v1";
-export const CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION =
-  "codex-app-server-isolation-v1";
 export const DEFAULT_CODEX_APP_SERVER_TIMEOUT_MS = 120_000;
 export const DEFAULT_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 384 * 1024 * 1024;
 
@@ -819,8 +816,6 @@ async function runConnectedProcess(
       close,
       terminate,
     );
-    const ready = await raceAbort(processConnection.receive(), controllerSignal);
-    assertIsolationReady(ready?.message);
     const request = await prepareRequest(controllerSignal);
     const result = await runCodexAppServerProtocol(
       processConnection,
@@ -847,38 +842,6 @@ async function runConnectedProcess(
     clearTimeoutIntrinsic(timer);
     removeAbortSignalListener(parentSignal, abort);
     if (child !== undefined) destroyChildStreams(child);
-  }
-}
-
-function assertIsolationReady(value: JsonValue | undefined): void {
-  if (
-    value === undefined ||
-    value === null ||
-    arrayIsArrayIntrinsic(value) ||
-    typeof value !== "object" ||
-    objectKeysIntrinsic(value).length !== 2 ||
-    value.method !== "svbench/isolation/ready"
-  ) {
-    throw new Error();
-  }
-  const params = value.params;
-  if (
-    params === null ||
-    arrayIsArrayIntrinsic(params) ||
-    typeof params !== "object" ||
-    objectKeysIntrinsic(params).length !== 10 ||
-    params.protocol !== CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION ||
-    params.codexCliVersion !== CODEX_APP_SERVER_CLI_VERSION ||
-    params.managedConfig !== "disabled" ||
-    params.pluginStartupTasks !== "disabled" ||
-    params.accountPromptContributors !== "disabled" ||
-    params.telemetry !== "disabled" ||
-    params.startupPrewarm !== "disabled" ||
-    params.hostedRequestPolicy !== "single-no-retry-no-fallback" ||
-    params.promptContract !== "fixed-extraction-only" ||
-    params.processModel !== "single-process"
-  ) {
-    throw new Error();
   }
 }
 
