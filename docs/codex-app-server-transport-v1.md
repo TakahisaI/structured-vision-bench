@@ -175,7 +175,9 @@ parallel invocation, or fallback.
 `svbench run` selects this Provider only with `--provider codex-app-server`. The selection requires
 `--provider-command` to name an absolute pinned Codex executable, at least one explicit
 `--model`, and a command approval configuration from approval v1. `--provider-arg` and
-`--provider-env` are repeatable bounded process-prefix and environment-name settings. The Provider
+`--provider-env` are repeatable bounded process-prefix and environment-name settings. An optional
+`--provider-codex-home` selects one absolute, consumer-owned Codex state directory; when omitted,
+the Provider uses a new empty private directory and never inherits ambient `CODEX_HOME`. The Provider
 ID, route, implementation version, Codex CLI version, and hosted protocol are fixed by the
 implementation rather than caller options. `--effort` is optional and limited to the
 fixed supported effort labels. The hosted contract has no maximum-token field, so a non-null
@@ -194,6 +196,7 @@ node scripts/svbench.mjs run \
   --bundle fixtures/synthetic/invoice-basic \
   --provider codex-app-server \
   --provider-command "$SVBENCH_CODEX_EXECUTABLE" \
+  --provider-codex-home "$SVBENCH_CODEX_HOME" \
   --model synthetic-smoke-model \
   --effort medium \
   --attempt-root .tmp/synthetic-codex-smoke-attempts \
@@ -209,10 +212,12 @@ node scripts/svbench.mjs run \
   --json
 ```
 
-Both executable variables must resolve to absolute paths. The Codex executable is invoked with the
-official app-server JSONL lifecycle described above; no custom readiness prelude is required. Smoke
-output stays under `.tmp`, uses no confidential corpus content, and must never be committed or
-attached to an Issue, pull request, log, or Actions artifact.
+Both executable variables and `SVBENCH_CODEX_HOME` must resolve to absolute paths. The consumer
+prepares that dedicated state directory with an official Codex login and binds its selection and
+runtime audit into the approval decision. The harness neither logs in nor copies credentials. The
+Codex executable is invoked with the official app-server JSONL lifecycle described above; no custom
+readiness prelude is required. Smoke output stays under `.tmp`, uses no confidential corpus content,
+and must never be committed or attached to an Issue, pull request, log, or Actions artifact.
 
 ## Metadata
 
@@ -241,7 +246,8 @@ bounded IDs and types rather than buffered item values. Protocol value and total
 JSON control-character escaping, base64 expansion, the user-message envelope, repeated lifecycle
 items, and a maximum-sized final document. The process client adds executable, argv, environment,
 JSONL line, stdout, and stderr limits. The harness does not copy, migrate, refresh, or print Codex
-credentials; the consumer-owned approval gate owns authentication and runtime acceptance.
+credentials. It can only pass an explicitly selected state directory to the official executable;
+the consumer-owned approval gate owns authentication and runtime acceptance.
 
 ## Private process boundary
 
@@ -271,13 +277,17 @@ not implement retries or fallback. Its results are development evidence for this
 claim of production API equivalence.
 
 Each invocation creates one mode-0700 temporary root under the canonical system `/tmp`, ignoring
-ambient temporary-directory variables, with separate empty workspace, home,
-`CODEX_HOME`, config home, cache, temporary directory, and executable search path. The child cwd is
-the empty workspace, never a consumer repository, bundle directory, or their parent. The child
-environment starts empty. Temporary-root containment and all derived private paths use path
-operations captured before consumer code can run. A caller may explicitly allowlist bounded environment names needed by an
-upstream-supported logged-in process boundary. Configuration snapshots and validates only those
-names. The final revalidation continuation captures their values into an immutable spawn
+ambient temporary-directory variables, with separate empty workspace, home, config home, cache,
+temporary directory, executable search path, and a default empty `CODEX_HOME`. An explicitly
+supplied absolute `--provider-codex-home` replaces only the child `CODEX_HOME`; ambient
+`CODEX_HOME` is never inherited and every other path remains private. The selected directory is
+consumer-owned: the harness does not create, inspect, clean, or prove its state invariant, and the
+official executable may update it. The child cwd is the empty workspace, never a consumer
+repository, bundle directory, or their parent. The child environment starts empty. Temporary-root
+containment and all derived private paths use path operations captured before consumer code can run.
+A caller may explicitly allowlist bounded environment names needed by an upstream-supported
+logged-in process boundary. Configuration snapshots and validates only those names. The final
+revalidation continuation captures their values into an immutable spawn
 authorization only after abort, usability, exact-identity, and generation checks succeed;
 prepare-only and failed revalidation paths do not read the values. After the process client awaits
 that authorization, it synchronously reads the current allowlisted values, then rechecks approval
@@ -287,10 +297,9 @@ rejected before process start. Every native Promise created while invoking a con
 rejection sink at creation time, before the callback can make its own constructor metadata non-configurable; invalid
 revalidation and finalizer returns therefore cannot strand an exposed rejection. The client then
 checks only its private primitive abort state and calls spawn without another callback or await. The process client
-always replaces home, config,
-cache, path, and temporary-directory
-variables with its private paths. It does not locate, read, copy, transform, refresh, or print a
-credential file.
+always replaces home, config, cache, path, and temporary-directory variables with its private paths.
+It replaces `CODEX_HOME` as well unless the caller explicitly selected the consumer-owned directory.
+It does not locate, read, copy, transform, refresh, or print a credential file.
 
 The fixed tool profile identity is `codex-no-host-tools-v1`. The client starts app-server with
 strict config and disables code mode, code-mode host, shell and unified exec, shell snapshot,

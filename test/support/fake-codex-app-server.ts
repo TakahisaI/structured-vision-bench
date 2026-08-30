@@ -94,6 +94,13 @@ async function captureProcessBoundary(arguments_: string[]): Promise<Map<string,
     environmentKeys: Object.keys(process.env).sort(),
     parentCanary: process.env.SVBENCH_PARENT_CANARY ?? null,
     allowedCanary: process.env.SVBENCH_ALLOWED_CANARY ?? null,
+    codexHomeMarker:
+      process.env.CODEX_HOME === undefined
+        ? null
+        : await readFile(
+            path.join(process.env.CODEX_HOME, "synthetic-auth-marker"),
+            "utf8",
+          ).catch(() => null),
     ancestorCanary:
       await readFile(path.join(root, "AGENTS.md"), "utf8").catch(() => null),
     isolation: {

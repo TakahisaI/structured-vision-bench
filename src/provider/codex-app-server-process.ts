@@ -208,6 +208,7 @@ export type CodexAppServerProcessOptions = Readonly<{
   executable: string;
   executableArguments?: readonly string[];
   envAllowlist?: readonly string[];
+  codexHome?: string;
   timeoutMs?: number;
   outputLimitBytes?: number;
 }>;
@@ -230,6 +231,7 @@ type ValidatedOptions = Readonly<{
   executable: string;
   executableArguments: readonly string[];
   envAllowlist: readonly string[];
+  codexHome: string | null;
   timeoutMs: number;
   outputLimitBytes: number;
 }>;
@@ -263,7 +265,7 @@ export async function runCodexAppServerProcess(
     const request = snapshotRequest(requestValue);
     if (startGuard !== undefined && typeof startGuard !== "function") throw new Error();
     assertActive(signal);
-    workspace = await createPrivateWorkspace();
+    workspace = await createPrivateWorkspace(options.codexHome);
     const activeWorkspace = workspace;
     await writeFileIntrinsic(activeWorkspace.catalog, createToolCatalog(request.requested), {
       encoding: "utf8",
@@ -347,6 +349,16 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
   if (typeof executable !== "string" || !pathIsAbsoluteIntrinsic(executable)) throw new Error();
   const executableArguments = snapshotStrings(value.executableArguments ?? [], MAX_ARGUMENTS);
   const names = snapshotStrings(value.envAllowlist ?? [], 64);
+  const codexHome = value.codexHome;
+  if (
+    codexHome !== undefined &&
+    (typeof codexHome !== "string" ||
+      !pathIsAbsoluteIntrinsic(codexHome) ||
+      bufferByteLengthIntrinsic(codexHome, "utf8") > MAX_ARGUMENT_BYTES ||
+      codexHome.includes("\0"))
+  ) {
+    throw new Error();
+  }
   const seen: string[] = [];
   for (let index = 0; index < names.length; index += 1) {
     const name = names[index]!;
@@ -376,6 +388,7 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
     executable,
     executableArguments: freezeIntrinsic(executableArguments),
     envAllowlist: freezeIntrinsic(names),
+    codexHome: codexHome ?? null,
     timeoutMs,
     outputLimitBytes,
   });
@@ -453,7 +466,7 @@ function snapshotInput(
   });
 }
 
-async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
+async function createPrivateWorkspace(codexHome: string | null): Promise<PrivateWorkspace> {
   const temporaryParent = await realpathIntrinsic(PRIVATE_TEMP_PARENT);
   if (!pathIsAbsoluteIntrinsic(temporaryParent)) throw new Error();
   const root = await mkdtempIntrinsic(pathJoinIntrinsic(temporaryParent, "svbench-codex-"));
@@ -477,7 +490,7 @@ async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
     const environment = objectCreateIntrinsic(null) as NodeJS.ProcessEnv;
     environment.HOME = directories.home;
     environment.USERPROFILE = directories.home;
-    environment.CODEX_HOME = directories.codexHome;
+    environment.CODEX_HOME = codexHome ?? directories.codexHome;
     environment.XDG_CONFIG_HOME = directories.config;
     environment.XDG_CACHE_HOME = directories.cache;
     environment.APPDATA = directories.config;

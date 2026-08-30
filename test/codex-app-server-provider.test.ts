@@ -104,6 +104,10 @@ test("validates and snapshots the public factory configuration", async () => {
     null,
     {},
     { process: { executable: "relative" }, revalidateTransport: async () => syntheticApproval() },
+    {
+      process: { executable: process.execPath, codexHome: "relative" },
+      revalidateTransport: async () => syntheticApproval(),
+    },
     { process: { executable: process.execPath }, revalidateTransport: null },
     {
       process: { executable: process.execPath, envAllowlist: ["HOME"] },

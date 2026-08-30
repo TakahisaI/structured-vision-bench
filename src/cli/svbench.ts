@@ -54,7 +54,7 @@ import type {
 } from "../runner/types.js";
 
 const RUN_USAGE =
-  "usage: svbench run --bundle <bundle-directory> --provider mock|command|codex-app-server [--phase <label>] [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--provider-command <absolute-executable> <provider options>] [--approval required|optional --approval-command <executable> <approval identity options>] [--sanitizer required --sanitizer-command <absolute-executable> <sanitizer identity, policy, and failure-code options>] [--json]";
+  "usage: svbench run --bundle <bundle-directory> --provider mock|command|codex-app-server [--phase <label>] [--model <id>] [--effort <level>] [--max-tokens <n>] [--attempt-key <label>] [--attempt-root <directory>] [--provider-command <absolute-executable> <provider options>] [--provider-codex-home <absolute-directory>] [--approval required|optional --approval-command <executable> <approval identity options>] [--sanitizer required --sanitizer-command <absolute-executable> <sanitizer identity, policy, and failure-code options>] [--json]";
 const COMPARE_USAGE =
   "usage: svbench compare --bundle <bundle-directory> --attempt <attempt-directory> [--rescore --rescore-reason <code>] [--json]";
 const asJson = process.argv.slice(2).includes("--json");
@@ -234,6 +234,7 @@ function parseRunArguments(): RunArguments {
       "provider-command": { type: "string" },
       "provider-arg": { type: "string", multiple: true },
       "provider-env": { type: "string", multiple: true },
+      "provider-codex-home": { type: "string" },
       "provider-id": { type: "string" },
       "provider-route": { type: "string" },
       "provider-version": { type: "string" },
@@ -347,6 +348,7 @@ function parseRunArguments(): RunArguments {
       executable: values["provider-command"],
       argv: values["provider-arg"],
       envAllowlist: values["provider-env"],
+      codexHome: values["provider-codex-home"],
       providerId: values["provider-id"],
       route: values["provider-route"],
       implementationVersion: values["provider-version"],
@@ -381,6 +383,7 @@ function parseProvider(input: {
   executable: string | undefined;
   argv: string[] | undefined;
   envAllowlist: string[] | undefined;
+  codexHome: string | undefined;
   providerId: string | undefined;
   route: string | undefined;
   implementationVersion: string | undefined;
@@ -406,6 +409,10 @@ function parseProvider(input: {
       input.providerId !== undefined ||
       input.route !== undefined ||
       input.implementationVersion !== undefined ||
+      (input.codexHome !== undefined &&
+        (!path.isAbsolute(input.codexHome) ||
+          Buffer.byteLength(input.codexHome, "utf8") > 4096 ||
+          input.codexHome.includes("\0"))) ||
       run.revalidateTransport === undefined ||
       run.model === null ||
       run.maxTokens !== null ||
@@ -430,6 +437,7 @@ function parseProvider(input: {
         executable: input.executable,
         executableArguments,
         envAllowlist,
+        ...(input.codexHome === undefined ? {} : { codexHome: input.codexHome }),
         ...(run.timeoutMs === undefined ? {} : { timeoutMs: run.timeoutMs }),
         ...(input.outputLimitBytes === undefined
           ? {}
@@ -444,6 +452,7 @@ function parseProvider(input: {
   }
   if (input.kind !== "command" || input.executable === undefined) throw new Error();
   if (
+    input.codexHome !== undefined ||
     input.executable.length === 0 ||
     input.executable.length > 240 ||
     !path.isAbsolute(input.executable)

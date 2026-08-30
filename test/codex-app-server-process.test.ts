@@ -3,7 +3,15 @@ import childProcess from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import fsPromises from "node:fs/promises";
-import { mkdtemp, readFile, rm, stat, watch, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  watch,
+  writeFile,
+} from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -104,8 +112,17 @@ test("runs one fixed app-server process in an isolated empty workspace", async (
   await withFixture("success", async ({ options, capture, canary }) => {
     const previousParent = process.env.SVBENCH_PARENT_CANARY;
     const previousAllowed = process.env.SVBENCH_ALLOWED_CANARY;
+    const previousCodexHome = process.env.CODEX_HOME;
+    const ambientCodexHome = path.join(path.dirname(capture), "ambient-codex-home");
+    await mkdir(ambientCodexHome, { mode: 0o700 });
+    await writeFile(
+      path.join(ambientCodexHome, "synthetic-auth-marker"),
+      "synthetic ambient auth state\n",
+      { mode: 0o600 },
+    );
     process.env.SVBENCH_PARENT_CANARY = "synthetic-parent-secret-canary";
     process.env.SVBENCH_ALLOWED_CANARY = "synthetic-explicit-canary";
+    process.env.CODEX_HOME = ambientCodexHome;
     try {
       const reads = readCounter();
       const result = await runCodexAppServerProcess(
@@ -137,6 +154,7 @@ test("runs one fixed app-server process in an isolated empty workspace", async (
       assert.deepEqual(boundary.workspaceEntries, []);
       assert.equal(boundary.parentCanary, null);
       assert.equal(boundary.allowedCanary, "synthetic-explicit-canary");
+      assert.equal(boundary.codexHomeMarker, null);
       assert.deepEqual(boundary.isolation, {
         home: true,
         codexHome: true,
@@ -173,7 +191,32 @@ test("runs one fixed app-server process in an isolated empty workspace", async (
     } finally {
       restoreEnvironment("SVBENCH_PARENT_CANARY", previousParent);
       restoreEnvironment("SVBENCH_ALLOWED_CANARY", previousAllowed);
+      restoreEnvironment("CODEX_HOME", previousCodexHome);
     }
+  });
+});
+
+test("uses and preserves only an explicitly selected consumer CODEX_HOME", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    const codexHome = path.join(path.dirname(capture), "selected-codex-home");
+    const marker = path.join(codexHome, "synthetic-auth-marker");
+    await mkdir(codexHome, { mode: 0o700 });
+    await writeFile(marker, "synthetic selected auth state\n", { mode: 0o600 });
+
+    const result = await runCodexAppServerProcess(
+      { ...options, codexHome },
+      request(readCounter()),
+    );
+    assert.equal(result.respondedModel, "synthetic-model");
+
+    const boundary = (await readCapture(capture)).find(
+      (record) => record.phase === "app-server",
+    );
+    assert.ok(boundary);
+    assert.equal(object(boundary.isolation).codexHome, false);
+    assert.equal(boundary.codexHomeMarker, "synthetic selected auth state\n");
+    await assertMissing(String(boundary.root));
+    assert.equal(await readFile(marker, "utf8"), "synthetic selected auth state\n");
   });
 });
 
@@ -770,6 +813,23 @@ test("rejects invalid requests before reading provider inputs", async () => {
       stableProcessError,
     );
     assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
+  });
+});
+
+test("rejects an invalid consumer CODEX_HOME before reading provider inputs", async () => {
+  await withFixture("success", async ({ options, capture }) => {
+    for (const codexHome of ["synthetic-relative-codex-home", null]) {
+      const reads = readCounter();
+      await assert.rejects(
+        runCodexAppServerProcess(
+          { ...options, codexHome } as CodexAppServerProcessOptions,
+          request(reads),
+        ),
+        stableProcessError,
+      );
+      assert.deepEqual(reads, { image: 0, schema: 0, system: 0, instruction: 0 });
+    }
+    assert.deepEqual(await readCapture(capture), []);
   });
 });
 
