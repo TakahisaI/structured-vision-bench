@@ -381,6 +381,7 @@ function initializeRequest(): JsonValue {
         optOutNotificationMethods: [
           "account/rateLimits/updated",
           "mcpServer/startupStatus/updated",
+          "model/safetyBuffering/updated",
           "remoteControl/status/changed",
           "warning",
           "item/agentMessage/delta",

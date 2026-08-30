@@ -117,8 +117,8 @@ byte framing, timeout, process termination, and workspace cleanup.
 
 The thread config requests that shell tools, shell snapshot collection, view-image, code-mode host,
 multi-agent, web search, MCP entries, hooks, and legacy notify commands are disabled. It also opts out
-of notifications for fixed remote-control, account rate limits, MCP startup status, and generic
-warnings. Warning
+of notifications for fixed remote-control, account rate limits, MCP startup status, model safety
+buffering status, and generic warnings. Warning
 conditions that affect the no-host-tool settings are rejected before startup rather than inferred
 from value-bearing warning text. These settings reduce the exposed tool surface; any tool or
 server-request event that still reaches the protocol is rejected.
