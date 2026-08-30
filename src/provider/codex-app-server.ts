@@ -380,6 +380,7 @@ function initializeRequest(): JsonValue {
         mcpServerOpenaiFormElicitation: false,
         optOutNotificationMethods: [
           "account/rateLimits/updated",
+          "mcpServer/startupStatus/updated",
           "remoteControl/status/changed",
           "warning",
           "item/agentMessage/delta",
@@ -779,7 +780,7 @@ function validateThreadSnapshot(value: unknown, workspace: string): JsonValue {
     thread.cwd !== workspace ||
     thread.ephemeral !== true ||
     thread.cliVersion !== CODEX_APP_SERVER_CLI_VERSION ||
-    thread.source !== "appServer" ||
+    (thread.source !== "appServer" && thread.source !== "vscode") ||
     thread.threadSource !== CLIENT_NAME ||
     typeof thread.preview !== "string" ||
     bufferByteLengthIntrinsic(thread.preview, "utf8") > MAX_PROVIDER_INPUT_BYTES ||
