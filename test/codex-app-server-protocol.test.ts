@@ -83,6 +83,11 @@ test("sends only four extraction inputs and supported requested settings", async
     ),
   );
   assert.ok(
+    requiredArray(capabilities.optOutNotificationMethods).includes(
+      "model/safetyBuffering/updated",
+    ),
+  );
+  assert.ok(
     requiredArray(capabilities.optOutNotificationMethods).includes("warning"),
   );
   assert.deepEqual(turn.params.sandboxPolicy, {
