@@ -102,10 +102,12 @@ sanitizer command is run configuration, not bundle content.
 
 Providers are transport adapters, not autonomous agents. The Codex app-server protocol uses one
 fixed-version ephemeral turn and fails rather than answer tool, shell, file-change, workspace, or
-approval requests. Its process client requires an isolation-capable app-server to disable managed
-configuration and plugin startup before an in-process readiness proof, runs it in an isolated empty
-workspace with a fixed no-host-tool catalog, excludes account and extension prompt contributors,
-and tears down its single process before settlement. The stock CLI fails closed at this boundary.
+approval requests. Its process client starts the pinned official app-server directly, runs it in an
+isolated empty workspace with a fixed reduced-tool catalog, verifies the live thread's CLI version,
+instruction sources, cwd, ephemeral state, and sandbox, and tears down the process group before
+settlement. It does not claim that the official executable makes managed configuration, plugin
+startup, account-derived prompt contributors, telemetry, prewarm, internal retries, or detached
+descendants impossible.
 The public Provider wrapper requires a consumer-owned revalidator, binds one exact approval
 attestation to only the next invocation, and revalidates again through a process start guard after
 private workspace/catalog preparation and immediately before app-server spawn. Allowlisted runtime
@@ -115,7 +117,7 @@ same-owner child group cannot bypass leader-close waiting. A later prepare inval
 one-shot authorization. A policy-required authorization carries only the exact consumer decision;
 the policy and binding remain outside app-server and are applied by the runner's sanitizer boundary.
 The public CLI selects this boundary explicitly as `codex-app-server`, requires an absolute
-isolation-capable executable, explicit model, and applied command approval, and fixes all Provider
+Codex executable, explicit model, and applied command approval, and fixes all Provider
 and protocol identity labels. It rejects non-null maximum tokens before runner execution.
 The protocol lifecycle and fixed identity are in
 [`docs/codex-app-server-transport-v1.md`](codex-app-server-transport-v1.md).

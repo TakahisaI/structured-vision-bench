@@ -5,6 +5,7 @@ import {
   appendFile,
   chmod,
   cp,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -381,7 +382,11 @@ test("runs one approval-bound Codex app-server attempt from the public CLI", asy
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-cli-codex-"));
   const attempts = path.join(temporary, "attempts");
   const capture = path.join(temporary, "capture.jsonl");
+  const codexHome = path.join(temporary, "selected-codex-home");
+  const codexHomeMarker = path.join(codexHome, "synthetic-auth-marker");
   try {
+    await mkdir(codexHome, { mode: 0o700 });
+    await writeFile(codexHomeMarker, "synthetic CLI auth state\n", { mode: 0o600 });
     const result = spawnSync(
       process.execPath,
       [
@@ -390,6 +395,8 @@ test("runs one approval-bound Codex app-server attempt from the public CLI", asy
         "--bundle",
         FIXTURE,
         ...codexAppServerArguments("provider-success", capture),
+        "--provider-codex-home",
+        codexHome,
         "--attempt-root",
         attempts,
         ...approvalArguments("codex-stable"),
@@ -409,7 +416,7 @@ test("runs one approval-bound Codex app-server attempt from the public CLI", asy
     );
     assert.equal(
       attempt.manifest.run.protocolVersion,
-      "codex-app-server-isolation-v1",
+      "codex-app-server-v2-9b3de71a5a2ffc98",
     );
     assert.deepEqual(attempt.manifest.run.requested, {
       model: "synthetic-model",
@@ -431,10 +438,14 @@ test("runs one approval-bound Codex app-server attempt from the public CLI", asy
     assert.equal(attempt.manifest.sanitizer, undefined);
 
     const records = await readJsonLines(capture);
+    const boundary = records.find((record) => record.phase === "app-server");
     const threadStart = records.find((record) => record.threadStart !== undefined);
     const turnStart = records.find((record) => record.turnStart !== undefined);
+    assert.ok(boundary);
     assert.ok(threadStart);
     assert.ok(turnStart);
+    assert.equal(boundary.codexHomeMarker, "synthetic CLI auth state\n");
+    assert.equal(object(boundary.isolation).codexHome, false);
     const hostedWire = JSON.stringify([threadStart, turnStart]);
     for (const prohibited of [
       "synthetic-invoice-basic",
@@ -453,6 +464,7 @@ test("runs one approval-bound Codex app-server attempt from the public CLI", asy
     assert.equal(turn.effort, "medium");
     assert.equal(typeof turn.outputSchema, "object");
     assert.equal(array(turn.input).length, 2);
+    assert.equal(await readFile(codexHomeMarker, "utf8"), "synthetic CLI auth state\n");
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -761,6 +773,12 @@ test("rejects incomplete Codex app-server CLI configuration before runner execut
       base,
       [...base, ...approvalArguments("codex-stable"), "--max-tokens", "1"],
       [...base, ...approvalArguments("codex-stable"), "--provider-id", "synthetic"],
+      [
+        ...base,
+        ...approvalArguments("codex-stable"),
+        "--provider-codex-home",
+        "synthetic-relative-codex-home",
+      ],
       base
         .map((value) => (value === process.execPath ? "./synthetic-codex" : value))
         .concat(approvalArguments("codex-stable")),
@@ -1216,6 +1234,11 @@ test("rejects invalid command provider CLI configuration before runner execution
         "PATH",
         "--provider-env",
         "Path",
+      ],
+      [
+        ...commandProviderArguments(),
+        "--provider-codex-home",
+        path.join(temporary, "synthetic-codex-home"),
       ],
       [
         ...commandProviderArguments(),

@@ -25,7 +25,7 @@ import {
   CODEX_APP_SERVER_PROVIDER_ROUTE,
   isAbortSettlingCodexAppServerProvider,
 } from "../provider/codex-app-server-provider.js";
-import { CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION } from "../provider/codex-app-server-process.js";
+import { CODEX_APP_SERVER_PROTOCOL_VERSION } from "../provider/codex-app-server.js";
 import {
   computeCaseInputIdentity,
   computeAttemptIdentity,
@@ -780,7 +780,7 @@ function validateProvider(provider: Provider): ValidatedProvider {
         (id !== CODEX_APP_SERVER_PROVIDER_ID ||
           route !== CODEX_APP_SERVER_PROVIDER_ROUTE ||
           implementationVersion !== CODEX_APP_SERVER_PROVIDER_IMPLEMENTATION_VERSION ||
-          protocolVersion !== CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION))
+          protocolVersion !== CODEX_APP_SERVER_PROTOCOL_VERSION))
     ) {
       throw new Error();
     }

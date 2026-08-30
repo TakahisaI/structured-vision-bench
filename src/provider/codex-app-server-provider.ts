@@ -9,12 +9,12 @@ import {
   removeAbortSignalListener,
 } from "./abort-signal-intrinsics.js";
 import {
-  CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION,
   runCodexAppServerProcess,
   type CodexAppServerProcessOptions,
   type CodexAppServerProcessRequest,
   type CodexAppServerProcessStartAuthorization,
 } from "./codex-app-server-process.js";
+import { CODEX_APP_SERVER_PROTOCOL_VERSION } from "./codex-app-server.js";
 import {
   createIntrinsicPromise,
   invokeIntrinsicPromiseCallback,
@@ -101,7 +101,7 @@ export function createCodexAppServerProvider(
     id: CODEX_APP_SERVER_PROVIDER_ID,
     route: CODEX_APP_SERVER_PROVIDER_ROUTE,
     implementationVersion: CODEX_APP_SERVER_PROVIDER_IMPLEMENTATION_VERSION,
-    protocolVersion: CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION,
+    protocolVersion: CODEX_APP_SERVER_PROTOCOL_VERSION,
     async prepareTransport(
       approvalValue: ApprovalResponse,
       signal?: AbortSignal,
@@ -248,6 +248,16 @@ function validateOptions(value: CodexAppServerProviderOptions): ValidatedOptions
       processOptions.envAllowlist ?? [],
       MAX_OPTION_STRINGS,
     );
+    const codexHome = processOptions.codexHome;
+    if (
+      codexHome !== undefined &&
+      (typeof codexHome !== "string" ||
+        !pathIsAbsoluteIntrinsic(codexHome) ||
+        Buffer.byteLength(codexHome, "utf8") > MAX_OPTION_STRING_BYTES ||
+        codexHome.includes("\0"))
+    ) {
+      throw new Error();
+    }
     const seenEnvironmentNames: string[] = [];
     for (let index = 0; index < envAllowlist.length; index += 1) {
       const name = envAllowlist[index]!;
@@ -277,6 +287,7 @@ function validateOptions(value: CodexAppServerProviderOptions): ValidatedOptions
         executable: processOptions.executable,
         executableArguments: freezeIntrinsic(executableArguments),
         envAllowlist: freezeIntrinsic(envAllowlist),
+        ...(codexHome === undefined ? {} : { codexHome }),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(outputLimitBytes === undefined ? {} : { outputLimitBytes }),
       }),

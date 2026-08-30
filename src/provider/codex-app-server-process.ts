@@ -32,7 +32,6 @@ import {
 } from "./abort-signal-intrinsics.js";
 import {
   CODEX_APP_SERVER_PROTOCOL_VALUE_LIMIT_BYTES,
-  CODEX_APP_SERVER_CLI_VERSION,
   runCodexAppServerProtocol,
   type CodexAppServerProtocolConnection,
   type CodexAppServerProtocolReceivedMessage,
@@ -51,8 +50,6 @@ import {
 import type { RequestedExecutionSettings } from "../runner/types.js";
 
 export const CODEX_APP_SERVER_TOOL_PROFILE_VERSION = "codex-no-host-tools-v1";
-export const CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION =
-  "codex-app-server-isolation-v1";
 export const DEFAULT_CODEX_APP_SERVER_TIMEOUT_MS = 120_000;
 export const DEFAULT_CODEX_APP_SERVER_OUTPUT_LIMIT_BYTES = 384 * 1024 * 1024;
 
@@ -211,6 +208,7 @@ export type CodexAppServerProcessOptions = Readonly<{
   executable: string;
   executableArguments?: readonly string[];
   envAllowlist?: readonly string[];
+  codexHome?: string;
   timeoutMs?: number;
   outputLimitBytes?: number;
 }>;
@@ -233,6 +231,7 @@ type ValidatedOptions = Readonly<{
   executable: string;
   executableArguments: readonly string[];
   envAllowlist: readonly string[];
+  codexHome: string | null;
   timeoutMs: number;
   outputLimitBytes: number;
 }>;
@@ -266,7 +265,7 @@ export async function runCodexAppServerProcess(
     const request = snapshotRequest(requestValue);
     if (startGuard !== undefined && typeof startGuard !== "function") throw new Error();
     assertActive(signal);
-    workspace = await createPrivateWorkspace();
+    workspace = await createPrivateWorkspace(options.codexHome);
     const activeWorkspace = workspace;
     await writeFileIntrinsic(activeWorkspace.catalog, createToolCatalog(request.requested), {
       encoding: "utf8",
@@ -350,6 +349,16 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
   if (typeof executable !== "string" || !pathIsAbsoluteIntrinsic(executable)) throw new Error();
   const executableArguments = snapshotStrings(value.executableArguments ?? [], MAX_ARGUMENTS);
   const names = snapshotStrings(value.envAllowlist ?? [], 64);
+  const codexHome = value.codexHome;
+  if (
+    codexHome !== undefined &&
+    (typeof codexHome !== "string" ||
+      !pathIsAbsoluteIntrinsic(codexHome) ||
+      bufferByteLengthIntrinsic(codexHome, "utf8") > MAX_ARGUMENT_BYTES ||
+      codexHome.includes("\0"))
+  ) {
+    throw new Error();
+  }
   const seen: string[] = [];
   for (let index = 0; index < names.length; index += 1) {
     const name = names[index]!;
@@ -379,6 +388,7 @@ function validateOptions(value: CodexAppServerProcessOptions): ValidatedOptions 
     executable,
     executableArguments: freezeIntrinsic(executableArguments),
     envAllowlist: freezeIntrinsic(names),
+    codexHome: codexHome ?? null,
     timeoutMs,
     outputLimitBytes,
   });
@@ -456,7 +466,7 @@ function snapshotInput(
   });
 }
 
-async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
+async function createPrivateWorkspace(codexHome: string | null): Promise<PrivateWorkspace> {
   const temporaryParent = await realpathIntrinsic(PRIVATE_TEMP_PARENT);
   if (!pathIsAbsoluteIntrinsic(temporaryParent)) throw new Error();
   const root = await mkdtempIntrinsic(pathJoinIntrinsic(temporaryParent, "svbench-codex-"));
@@ -480,7 +490,7 @@ async function createPrivateWorkspace(): Promise<PrivateWorkspace> {
     const environment = objectCreateIntrinsic(null) as NodeJS.ProcessEnv;
     environment.HOME = directories.home;
     environment.USERPROFILE = directories.home;
-    environment.CODEX_HOME = directories.codexHome;
+    environment.CODEX_HOME = codexHome ?? directories.codexHome;
     environment.XDG_CONFIG_HOME = directories.config;
     environment.XDG_CACHE_HOME = directories.cache;
     environment.APPDATA = directories.config;
@@ -819,8 +829,6 @@ async function runConnectedProcess(
       close,
       terminate,
     );
-    const ready = await raceAbort(processConnection.receive(), controllerSignal);
-    assertIsolationReady(ready?.message);
     const request = await prepareRequest(controllerSignal);
     const result = await runCodexAppServerProtocol(
       processConnection,
@@ -847,38 +855,6 @@ async function runConnectedProcess(
     clearTimeoutIntrinsic(timer);
     removeAbortSignalListener(parentSignal, abort);
     if (child !== undefined) destroyChildStreams(child);
-  }
-}
-
-function assertIsolationReady(value: JsonValue | undefined): void {
-  if (
-    value === undefined ||
-    value === null ||
-    arrayIsArrayIntrinsic(value) ||
-    typeof value !== "object" ||
-    objectKeysIntrinsic(value).length !== 2 ||
-    value.method !== "svbench/isolation/ready"
-  ) {
-    throw new Error();
-  }
-  const params = value.params;
-  if (
-    params === null ||
-    arrayIsArrayIntrinsic(params) ||
-    typeof params !== "object" ||
-    objectKeysIntrinsic(params).length !== 10 ||
-    params.protocol !== CODEX_APP_SERVER_ISOLATION_PROTOCOL_VERSION ||
-    params.codexCliVersion !== CODEX_APP_SERVER_CLI_VERSION ||
-    params.managedConfig !== "disabled" ||
-    params.pluginStartupTasks !== "disabled" ||
-    params.accountPromptContributors !== "disabled" ||
-    params.telemetry !== "disabled" ||
-    params.startupPrewarm !== "disabled" ||
-    params.hostedRequestPolicy !== "single-no-retry-no-fallback" ||
-    params.promptContract !== "fixed-extraction-only" ||
-    params.processModel !== "single-process"
-  ) {
-    throw new Error();
   }
 }
 
