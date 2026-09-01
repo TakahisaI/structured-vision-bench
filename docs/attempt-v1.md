@@ -306,6 +306,12 @@ bytes, policy content, policy path, endpoint, account, secret, or failure traceb
 formal document is a strict canonical JSON value, not the raw provider serialization; sanitizer
 findings never persist a path outside the consumer-owned allowlist.
 
+When usage is available, `inputTokens`, `cachedInputTokens`, `cacheWriteInputTokens`,
+`outputTokens`, and `totalTokens` are optional non-negative integer or `null` metadata fields. A
+provider that does not expose either cache detail leaves that field absent or `null`; the runner does
+not substitute zero. `cachedInputTokens` and `cacheWriteInputTokens` are supplemental input-cache
+details and do not change the existing meanings of `inputTokens`, `outputTokens`, or `totalTokens`.
+
 `readAttempt()` treats the files as untrusted. It rejects symlinks, size violations, invalid strict
 JSON, unknown manifest fields or directory entries, non-private modes, document digest changes, case
 identity changes, attempt key/ID changes, run identity changes, attempt-directory name mismatches,

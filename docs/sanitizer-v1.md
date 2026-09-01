@@ -53,6 +53,10 @@ re-encodes the parsed envelope, so the receiver must not claim to recompute that
 from the framed object. It verifies the envelope target, current case-input identity, declared policy
 identity, and policy-binding digest before applying private rules.
 
+The provider usage snapshot preserves optional `cachedInputTokens` and `cacheWriteInputTokens` along
+with the existing input, output, and total counts. An unavailable cache detail stays absent or
+`null`; this private boundary does not synthesize zero.
+
 The request excludes truth, comparison policy/results, prior attempts, bundle/attempt roots,
 approval data, attempt keys, attempt IDs, and run IDs.
 

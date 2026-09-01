@@ -541,6 +541,31 @@ test("runs a policy-free command provider through a private five-file request di
   }
 });
 
+test("preserves optional cache usage from a command provider in the formal attempt", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const result = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: path.join(temporary, "attempts"),
+      provider: commandProvider("cache-usage"),
+      sanitizerRequirement: syntheticRequirement(),
+    });
+    const attempt = await readAttempt(result.attemptDirectory);
+    assert.deepEqual(attempt.manifest.run.responded.usage, {
+      available: true,
+      inputTokens: 23,
+      cachedInputTokens: 13,
+      cacheWriteInputTokens: 4,
+      outputTokens: 8,
+      totalTokens: 31,
+    });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("binds command responses to phase, input identity, requirement, and approval", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
   const bundle = path.join(temporary, "bundle");

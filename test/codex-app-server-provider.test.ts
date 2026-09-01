@@ -69,6 +69,8 @@ test("runs one approved app-server transport and preserves upstream metadata", a
     assert.deepEqual(response.usage, {
       available: true,
       inputTokens: 11,
+      cachedInputTokens: 5,
+      cacheWriteInputTokens: 3,
       outputTokens: 7,
       totalTokens: 18,
     });

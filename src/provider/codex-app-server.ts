@@ -104,6 +104,8 @@ export type CodexAppServerProtocolResult = {
 
 type ProtocolUsage = {
   inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
   outputTokens: number;
   totalTokens: number;
 };
@@ -498,6 +500,8 @@ function applyTurnNotification(
           : {
               available: true,
               inputTokens: accumulator.usage.inputTokens,
+              cachedInputTokens: accumulator.usage.cachedInputTokens,
+              cacheWriteInputTokens: accumulator.usage.cacheWriteInputTokens,
               outputTokens: accumulator.usage.outputTokens,
               totalTokens: accumulator.usage.totalTokens,
             },
@@ -1103,7 +1107,13 @@ function snapshotProtocolUsage(value: unknown): ProtocolUsage {
   ) {
     throw new Error();
   }
-  return { inputTokens, outputTokens, totalTokens };
+  return {
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens,
+    outputTokens,
+    totalTokens,
+  };
 }
 
 function assertTurnIdentity(

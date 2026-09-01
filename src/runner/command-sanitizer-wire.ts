@@ -294,14 +294,26 @@ function snapshotProvider(value: JsonValue | undefined): SanitizerRequest["provi
 
 function snapshotUsage(value: JsonValue | undefined): ProviderUsage {
   const usage = requiredObject(value);
-  assertKeys(usage, ["available"], ["inputTokens", "outputTokens", "totalTokens"]);
+  assertKeys(usage, ["available"], [
+    "inputTokens",
+    "cachedInputTokens",
+    "cacheWriteInputTokens",
+    "outputTokens",
+    "totalTokens",
+  ]);
   if (typeof usage.available !== "boolean") throw new Error();
   if (!usage.available) {
     if (Object.keys(usage).length !== 1) throw new Error();
     return { available: false };
   }
   const result: ProviderUsage = { available: true };
-  for (const key of ["inputTokens", "outputTokens", "totalTokens"] as const) {
+  for (const key of [
+    "inputTokens",
+    "cachedInputTokens",
+    "cacheWriteInputTokens",
+    "outputTokens",
+    "totalTokens",
+  ] as const) {
     const tokenCount = usage[key];
     if (tokenCount === undefined) continue;
     if (

@@ -273,6 +273,16 @@ if (mode === "approval-mismatch" && response.approval !== null) {
 }
 if (mode === "unknown-field") response.syntheticUnknown = true;
 if (mode === "echo-phase") response.document.syntheticPhase = request.phase;
+if (mode === "cache-usage") {
+  response.responded.usage = {
+    available: true,
+    inputTokens: 23,
+    cachedInputTokens: 13,
+    cacheWriteInputTokens: 4,
+    outputTokens: 8,
+    totalTokens: 31,
+  };
+}
 if (mode === "echo-contract") {
   response.document.syntheticRequestedModel = request.requested.model;
   response.document.syntheticCaseId = request.case.id;

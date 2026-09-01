@@ -39,6 +39,8 @@ test("sends only four extraction inputs and supported requested settings", async
     usage: {
       available: true,
       inputTokens: 11,
+      cachedInputTokens: 5,
+      cacheWriteInputTokens: 3,
       outputTokens: 7,
       totalTokens: 18,
     },
@@ -1330,8 +1332,8 @@ function reasoningItem(id: string, summary = "synthetic reasoning"): Record<stri
 function tokenUsage(inputTokens: number, outputTokens: number): JsonValue {
   return {
     inputTokens,
-    cachedInputTokens: 0,
-    cacheWriteInputTokens: 0,
+    cachedInputTokens: 5,
+    cacheWriteInputTokens: 3,
     outputTokens,
     reasoningOutputTokens: 0,
     totalTokens: inputTokens + outputTokens,
