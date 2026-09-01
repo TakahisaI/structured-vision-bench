@@ -104,8 +104,8 @@ export type CodexAppServerProtocolResult = {
 
 type ProtocolUsage = {
   inputTokens: number;
-  cachedInputTokens: number;
-  cacheWriteInputTokens: number;
+  cachedInputTokens: number | null;
+  cacheWriteInputTokens: number | null;
   outputTokens: number;
   totalTokens: number;
 };
@@ -1084,22 +1084,20 @@ function snapshotProtocolUsage(value: unknown): ProtocolUsage {
   const usage = requiredObject(value);
   assertRequiredKeys(usage, [
     "inputTokens",
-    "cachedInputTokens",
-    "cacheWriteInputTokens",
     "outputTokens",
     "reasoningOutputTokens",
     "totalTokens",
   ]);
   const inputTokens = usage.inputTokens;
-  const cachedInputTokens = usage.cachedInputTokens;
-  const cacheWriteInputTokens = usage.cacheWriteInputTokens;
+  const cachedInputTokens = usage.cachedInputTokens ?? null;
+  const cacheWriteInputTokens = usage.cacheWriteInputTokens ?? null;
   const outputTokens = usage.outputTokens;
   const reasoningOutputTokens = usage.reasoningOutputTokens;
   const totalTokens = usage.totalTokens;
   if (
     !isTokenCount(inputTokens) ||
-    !isTokenCount(cachedInputTokens) ||
-    !isTokenCount(cacheWriteInputTokens) ||
+    (cachedInputTokens !== null && !isTokenCount(cachedInputTokens)) ||
+    (cacheWriteInputTokens !== null && !isTokenCount(cacheWriteInputTokens)) ||
     !isTokenCount(outputTokens) ||
     !isTokenCount(reasoningOutputTokens) ||
     !isTokenCount(totalTokens) ||
