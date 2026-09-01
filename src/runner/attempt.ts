@@ -1532,7 +1532,7 @@ function parseUsage(value: JsonValue | undefined): void {
     "outputTokens",
     "totalTokens",
   ] as const) {
-    const tokenValue = usage[key];
+    const tokenValue = Object.hasOwn(usage, key) ? usage[key] : undefined;
     if (tokenValue !== undefined && tokenValue !== null) {
       if (typeof tokenValue !== "number" || !Number.isSafeInteger(tokenValue) || tokenValue < 0) {
         invalid();

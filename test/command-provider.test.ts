@@ -580,12 +580,12 @@ test("does not inherit cache usage omitted by a command provider", async () => {
   try {
     Object.defineProperty(Object.prototype, "cachedInputTokens", {
       configurable: true,
-      value: 9,
+      value: "synthetic-invalid",
       writable: true,
     });
     Object.defineProperty(Object.prototype, "cacheWriteInputTokens", {
       configurable: true,
-      value: 4,
+      value: "synthetic-invalid",
       writable: true,
     });
     await cp(FIXTURE, bundle, { recursive: true });
