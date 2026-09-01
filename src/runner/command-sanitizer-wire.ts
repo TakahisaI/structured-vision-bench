@@ -314,8 +314,8 @@ function snapshotUsage(value: JsonValue | undefined): ProviderUsage {
     "outputTokens",
     "totalTokens",
   ] as const) {
+    if (!Object.hasOwn(usage, key)) continue;
     const tokenCount = usage[key];
-    if (tokenCount === undefined) continue;
     if (
       tokenCount !== null &&
       (typeof tokenCount !== "number" || !Number.isSafeInteger(tokenCount) || tokenCount < 0)

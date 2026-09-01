@@ -1702,8 +1702,8 @@ function snapshotUsage(value: JsonValue | undefined): ProviderUsage {
     "outputTokens",
     "totalTokens",
   ] as const) {
+    if (!Object.hasOwn(usage, key)) continue;
     const entry = usage[key];
-    if (entry === undefined) continue;
     if (entry !== null && (typeof entry !== "number" || !Number.isSafeInteger(entry) || entry < 0)) {
       throw new Error();
     }

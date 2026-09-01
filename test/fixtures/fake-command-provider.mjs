@@ -283,6 +283,14 @@ if (mode === "cache-usage") {
     totalTokens: 31,
   };
 }
+if (mode === "usage-without-cache") {
+  response.responded.usage = {
+    available: true,
+    inputTokens: 23,
+    outputTokens: 8,
+    totalTokens: 31,
+  };
+}
 if (mode === "echo-contract") {
   response.document.syntheticRequestedModel = request.requested.model;
   response.document.syntheticCaseId = request.case.id;

@@ -710,18 +710,54 @@ test("keeps unavailable cache usage details unknown", async () => {
     totalTokens: 18,
   });
 
-  const missingCacheDetails = await runCodexAppServerProtocol(
-    new SyntheticConnection("missing-cache-usage"),
-    request(),
+  const inheritedCachedInput = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "cachedInputTokens",
   );
-  assert.deepEqual(missingCacheDetails.usage, {
-    available: true,
-    inputTokens: 11,
-    cachedInputTokens: null,
-    cacheWriteInputTokens: null,
-    outputTokens: 7,
-    totalTokens: 18,
-  });
+  const inheritedCacheWriteInput = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "cacheWriteInputTokens",
+  );
+  try {
+    Object.defineProperty(Object.prototype, "cachedInputTokens", {
+      configurable: true,
+      value: 9,
+      writable: true,
+    });
+    Object.defineProperty(Object.prototype, "cacheWriteInputTokens", {
+      configurable: true,
+      value: 4,
+      writable: true,
+    });
+    const missingCacheDetails = await runCodexAppServerProtocol(
+      new SyntheticConnection("missing-cache-usage"),
+      request(),
+    );
+    assert.deepEqual(missingCacheDetails.usage, {
+      available: true,
+      inputTokens: 11,
+      cachedInputTokens: null,
+      cacheWriteInputTokens: null,
+      outputTokens: 7,
+      totalTokens: 18,
+    });
+  } finally {
+    if (inheritedCachedInput === undefined) {
+      delete (Object.prototype as { cachedInputTokens?: unknown }).cachedInputTokens;
+    } else {
+      Object.defineProperty(Object.prototype, "cachedInputTokens", inheritedCachedInput);
+    }
+    if (inheritedCacheWriteInput === undefined) {
+      delete (Object.prototype as { cacheWriteInputTokens?: unknown })
+        .cacheWriteInputTokens;
+    } else {
+      Object.defineProperty(
+        Object.prototype,
+        "cacheWriteInputTokens",
+        inheritedCacheWriteInput,
+      );
+    }
+  }
 });
 
 function request(

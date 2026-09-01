@@ -1089,8 +1089,12 @@ function snapshotProtocolUsage(value: unknown): ProtocolUsage {
     "totalTokens",
   ]);
   const inputTokens = usage.inputTokens;
-  const cachedInputTokens = usage.cachedInputTokens ?? null;
-  const cacheWriteInputTokens = usage.cacheWriteInputTokens ?? null;
+  const cachedInputTokens = objectHasOwnIntrinsic(usage, "cachedInputTokens")
+    ? (usage.cachedInputTokens ?? null)
+    : null;
+  const cacheWriteInputTokens = objectHasOwnIntrinsic(usage, "cacheWriteInputTokens")
+    ? (usage.cacheWriteInputTokens ?? null)
+    : null;
   const outputTokens = usage.outputTokens;
   const reasoningOutputTokens = usage.reasoningOutputTokens;
   const totalTokens = usage.totalTokens;

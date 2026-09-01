@@ -135,12 +135,48 @@ test("does not invent unavailable cache details on the sanitizer boundary", () =
     outputTokens: 8,
     totalTokens: 31,
   };
-  assert.deepEqual(snapshotCommandSanitizerRequest(source).provider.usage, {
-    available: true,
-    inputTokens: 23,
-    outputTokens: 8,
-    totalTokens: 31,
-  });
+  const inheritedCachedInput = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "cachedInputTokens",
+  );
+  const inheritedCacheWriteInput = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "cacheWriteInputTokens",
+  );
+  try {
+    Object.defineProperty(Object.prototype, "cachedInputTokens", {
+      configurable: true,
+      value: 9,
+      writable: true,
+    });
+    Object.defineProperty(Object.prototype, "cacheWriteInputTokens", {
+      configurable: true,
+      value: 4,
+      writable: true,
+    });
+    assert.deepEqual(snapshotCommandSanitizerRequest(source).provider.usage, {
+      available: true,
+      inputTokens: 23,
+      outputTokens: 8,
+      totalTokens: 31,
+    });
+  } finally {
+    if (inheritedCachedInput === undefined) {
+      delete (Object.prototype as { cachedInputTokens?: unknown }).cachedInputTokens;
+    } else {
+      Object.defineProperty(Object.prototype, "cachedInputTokens", inheritedCachedInput);
+    }
+    if (inheritedCacheWriteInput === undefined) {
+      delete (Object.prototype as { cacheWriteInputTokens?: unknown })
+        .cacheWriteInputTokens;
+    } else {
+      Object.defineProperty(
+        Object.prototype,
+        "cacheWriteInputTokens",
+        inheritedCacheWriteInput,
+      );
+    }
+  }
 });
 
 test("rejects unbound, incomplete, unknown, and hostile requests", () => {
