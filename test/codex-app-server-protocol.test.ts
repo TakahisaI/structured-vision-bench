@@ -39,6 +39,8 @@ test("sends only four extraction inputs and supported requested settings", async
     usage: {
       available: true,
       inputTokens: 11,
+      cachedInputTokens: 5,
+      cacheWriteInputTokens: 3,
       outputTokens: 7,
       totalTokens: 18,
     },
@@ -239,7 +241,6 @@ test("fails closed on requests, tools, files, identity drift, and trailing event
     "completion-tool-item",
     "invalid-user-content",
     "agent-before-user",
-    "null-cache-write-usage",
     "event-flood",
     "invalid-json-document",
   ]) {
@@ -304,11 +305,6 @@ test("rejects missing required nullable generated-schema fields", async () => {
       mode: "reasoning-success",
       keys: ["summary", "content"],
       select: itemTarget("reasoning"),
-    },
-    {
-      mode: "success",
-      keys: ["cacheWriteInputTokens"],
-      select: tokenUsageTotalTarget,
     },
     {
       mode: "success",
@@ -700,6 +696,70 @@ test("keeps unavailable usage unknown and leaves schema validation to its caller
   assert.deepEqual(schemaInvalid.document, { unexpected: true });
 });
 
+test("keeps unavailable cache usage details unknown", async () => {
+  const nullCacheWrite = await runCodexAppServerProtocol(
+    new SyntheticConnection("null-cache-write-usage"),
+    request(),
+  );
+  assert.deepEqual(nullCacheWrite.usage, {
+    available: true,
+    inputTokens: 11,
+    cachedInputTokens: 5,
+    cacheWriteInputTokens: null,
+    outputTokens: 7,
+    totalTokens: 18,
+  });
+
+  const inheritedCachedInput = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "cachedInputTokens",
+  );
+  const inheritedCacheWriteInput = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "cacheWriteInputTokens",
+  );
+  try {
+    Object.defineProperty(Object.prototype, "cachedInputTokens", {
+      configurable: true,
+      value: 9,
+      writable: true,
+    });
+    Object.defineProperty(Object.prototype, "cacheWriteInputTokens", {
+      configurable: true,
+      value: 4,
+      writable: true,
+    });
+    const missingCacheDetails = await runCodexAppServerProtocol(
+      new SyntheticConnection("missing-cache-usage"),
+      request(),
+    );
+    assert.deepEqual(missingCacheDetails.usage, {
+      available: true,
+      inputTokens: 11,
+      cachedInputTokens: null,
+      cacheWriteInputTokens: null,
+      outputTokens: 7,
+      totalTokens: 18,
+    });
+  } finally {
+    if (inheritedCachedInput === undefined) {
+      delete (Object.prototype as { cachedInputTokens?: unknown }).cachedInputTokens;
+    } else {
+      Object.defineProperty(Object.prototype, "cachedInputTokens", inheritedCachedInput);
+    }
+    if (inheritedCacheWriteInput === undefined) {
+      delete (Object.prototype as { cacheWriteInputTokens?: unknown })
+        .cacheWriteInputTokens;
+    } else {
+      Object.defineProperty(
+        Object.prototype,
+        "cacheWriteInputTokens",
+        inheritedCacheWriteInput,
+      );
+    }
+  }
+});
+
 function request(
   overrides: Partial<RequestedExecutionSettings> = {},
 ): CodexAppServerProtocolRequest {
@@ -983,6 +1043,11 @@ class SyntheticConnection implements CodexAppServerProtocolConnection {
                       ...object(tokenUsage(11, 7)),
                       cacheWriteInputTokens: null,
                     }
+                  : this.mode === "missing-cache-usage"
+                    ? withoutKeys(tokenUsage(11, 7), [
+                        "cachedInputTokens",
+                        "cacheWriteInputTokens",
+                      ])
                   : tokenUsage(11, 7),
               last: tokenUsage(11, 7),
               modelContextWindow: 1024,
@@ -1330,12 +1395,18 @@ function reasoningItem(id: string, summary = "synthetic reasoning"): Record<stri
 function tokenUsage(inputTokens: number, outputTokens: number): JsonValue {
   return {
     inputTokens,
-    cachedInputTokens: 0,
-    cacheWriteInputTokens: 0,
+    cachedInputTokens: 5,
+    cacheWriteInputTokens: 3,
     outputTokens,
     reasoningOutputTokens: 0,
     totalTokens: inputTokens + outputTokens,
   };
+}
+
+function withoutKeys(value: JsonValue, keys: readonly string[]): JsonValue {
+  const copy = cloneObject(value);
+  for (const key of keys) delete copy[key];
+  return copy;
 }
 
 function syntheticDocument(): JsonValue {
@@ -1376,12 +1447,6 @@ function itemTarget(
     const item = nestedObject(message, ["params", "item"]);
     return item?.type === type ? item : undefined;
   };
-}
-
-function tokenUsageTotalTarget(
-  message: Record<string, JsonValue>,
-): Record<string, JsonValue> | undefined {
-  return nestedObject(message, ["params", "tokenUsage", "total"]);
 }
 
 function threadTokenUsageTarget(

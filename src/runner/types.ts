@@ -66,6 +66,8 @@ export type ProviderAdapterContext = {
 export type ProviderUsage = {
   available: boolean;
   inputTokens?: number | null;
+  cachedInputTokens?: number | null;
+  cacheWriteInputTokens?: number | null;
   outputTokens?: number | null;
   totalTokens?: number | null;
 };

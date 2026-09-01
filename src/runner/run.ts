@@ -1779,7 +1779,13 @@ function normalizeUsage(usage: unknown): ProviderUsage {
   if (!isJsonObject(usage) || !Object.hasOwn(usage, "available") || typeof usage.available !== "boolean") throw new Error();
   if (!usage.available) return { available: false };
   const result: ProviderUsage = { available: true };
-  for (const key of ["inputTokens", "outputTokens", "totalTokens"] as const) {
+  for (const key of [
+    "inputTokens",
+    "cachedInputTokens",
+    "cacheWriteInputTokens",
+    "outputTokens",
+    "totalTokens",
+  ] as const) {
     const value = Object.hasOwn(usage, key) ? usage[key] : undefined;
     if (value !== undefined && value !== null) {
       if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {

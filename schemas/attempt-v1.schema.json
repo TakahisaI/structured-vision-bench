@@ -519,6 +519,22 @@
           "minimum": 0,
           "maximum": 9007199254740991
         },
+        "cachedInputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "cacheWriteInputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
         "outputTokens": {
           "type": [
             "integer",

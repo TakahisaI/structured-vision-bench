@@ -229,12 +229,15 @@ The transport result contains only values exposed by the fixed protocol:
 
 - the required model and optional reasoning effort returned by `thread/start`, when they are
   bounded safe labels;
-- token usage from a matching one-turn `thread/tokenUsage/updated` notification, when present;
+- input, cached-input, cache-write-input, output, and total token usage from a matching one-turn
+  `thread/tokenUsage/updated` notification, when present;
 - unavailable stop reason as null.
 
 Missing optional effort, usage, or stop-reason values are not synthesized. A missing required model
-is a protocol failure. The Provider carries its fixed implementation and hosted-protocol identities
-into approval, run, and attempt identity.
+is a protocol failure. Missing cache details remain unavailable rather than becoming zero. Cache
+subcounts do not change the protocol's existing input, output, or total token values. The Provider
+carries its fixed implementation and hosted-protocol identities into approval, run, and attempt
+identity.
 
 ## Limits
 

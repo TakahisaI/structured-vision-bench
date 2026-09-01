@@ -541,6 +541,87 @@ test("runs a policy-free command provider through a private five-file request di
   }
 });
 
+test("preserves optional cache usage from a command provider in the formal attempt", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  try {
+    await cp(FIXTURE, bundle, { recursive: true });
+    const result = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: path.join(temporary, "attempts"),
+      provider: commandProvider("cache-usage"),
+      sanitizerRequirement: syntheticRequirement(),
+    });
+    const attempt = await readAttempt(result.attemptDirectory);
+    assert.deepEqual(attempt.manifest.run.responded.usage, {
+      available: true,
+      inputTokens: 23,
+      cachedInputTokens: 13,
+      cacheWriteInputTokens: 4,
+      outputTokens: 8,
+      totalTokens: 31,
+    });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("does not inherit cache usage omitted by a command provider", async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
+  const bundle = path.join(temporary, "bundle");
+  const inheritedCachedInput = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "cachedInputTokens",
+  );
+  const inheritedCacheWriteInput = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "cacheWriteInputTokens",
+  );
+  try {
+    Object.defineProperty(Object.prototype, "cachedInputTokens", {
+      configurable: true,
+      value: "synthetic-invalid",
+      writable: true,
+    });
+    Object.defineProperty(Object.prototype, "cacheWriteInputTokens", {
+      configurable: true,
+      value: "synthetic-invalid",
+      writable: true,
+    });
+    await cp(FIXTURE, bundle, { recursive: true });
+    const result = await runBundle({
+      bundleDirectory: bundle,
+      attemptRoot: path.join(temporary, "attempts"),
+      provider: commandProvider("usage-without-cache"),
+      sanitizerRequirement: syntheticRequirement(),
+    });
+    const attempt = await readAttempt(result.attemptDirectory);
+    assert.deepEqual(attempt.manifest.run.responded.usage, {
+      available: true,
+      inputTokens: 23,
+      outputTokens: 8,
+      totalTokens: 31,
+    });
+  } finally {
+    if (inheritedCachedInput === undefined) {
+      delete (Object.prototype as { cachedInputTokens?: unknown }).cachedInputTokens;
+    } else {
+      Object.defineProperty(Object.prototype, "cachedInputTokens", inheritedCachedInput);
+    }
+    if (inheritedCacheWriteInput === undefined) {
+      delete (Object.prototype as { cacheWriteInputTokens?: unknown })
+        .cacheWriteInputTokens;
+    } else {
+      Object.defineProperty(
+        Object.prototype,
+        "cacheWriteInputTokens",
+        inheritedCacheWriteInput,
+      );
+    }
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("binds command responses to phase, input identity, requirement, and approval", async () => {
   const temporary = await mkdtemp(path.join(os.tmpdir(), "svbench-command-test-"));
   const bundle = path.join(temporary, "bundle");

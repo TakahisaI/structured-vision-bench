@@ -55,7 +55,14 @@ function validRequest(): SanitizerRequest {
       requested: { model: null, effort: null, maxTokens: null },
       respondedModel: null,
       effectiveEffort: null,
-      usage: { available: false },
+      usage: {
+        available: true,
+        inputTokens: 23,
+        cachedInputTokens: 13,
+        cacheWriteInputTokens: 4,
+        outputTokens: 8,
+        totalTokens: 31,
+      },
       stopReason: null,
     },
     provenance: {
@@ -103,12 +110,72 @@ test("snapshots and encodes one target-bound sanitizer request", () => {
   assert.deepEqual(snapshot.document, { syntheticPrivateField: "SYNTHETIC-PRIVATE-VALUE" });
   assert.equal(Object.isFrozen(snapshot), true);
   assert.equal(Object.isFrozen(snapshot.caseInputIdentity), true);
+  assert.deepEqual(snapshot.provider.usage, {
+    available: true,
+    inputTokens: 23,
+    cachedInputTokens: 13,
+    cacheWriteInputTokens: 4,
+    outputTokens: 8,
+    totalTokens: 31,
+  });
   const encoded = encodeCommandSanitizerRequest(snapshot);
   try {
     assert.equal(encoded.at(-1), 0x0a);
     assert.deepEqual(JSON.parse(encoded.toString("utf8")), snapshot);
   } finally {
     encoded.fill(0);
+  }
+});
+
+test("does not invent unavailable cache details on the sanitizer boundary", () => {
+  const source = validRequest();
+  source.provider.usage = {
+    available: true,
+    inputTokens: 23,
+    outputTokens: 8,
+    totalTokens: 31,
+  };
+  const inheritedCachedInput = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "cachedInputTokens",
+  );
+  const inheritedCacheWriteInput = Object.getOwnPropertyDescriptor(
+    Object.prototype,
+    "cacheWriteInputTokens",
+  );
+  try {
+    Object.defineProperty(Object.prototype, "cachedInputTokens", {
+      configurable: true,
+      value: 9,
+      writable: true,
+    });
+    Object.defineProperty(Object.prototype, "cacheWriteInputTokens", {
+      configurable: true,
+      value: 4,
+      writable: true,
+    });
+    assert.deepEqual(snapshotCommandSanitizerRequest(source).provider.usage, {
+      available: true,
+      inputTokens: 23,
+      outputTokens: 8,
+      totalTokens: 31,
+    });
+  } finally {
+    if (inheritedCachedInput === undefined) {
+      delete (Object.prototype as { cachedInputTokens?: unknown }).cachedInputTokens;
+    } else {
+      Object.defineProperty(Object.prototype, "cachedInputTokens", inheritedCachedInput);
+    }
+    if (inheritedCacheWriteInput === undefined) {
+      delete (Object.prototype as { cacheWriteInputTokens?: unknown })
+        .cacheWriteInputTokens;
+    } else {
+      Object.defineProperty(
+        Object.prototype,
+        "cacheWriteInputTokens",
+        inheritedCacheWriteInput,
+      );
+    }
   }
 });
 

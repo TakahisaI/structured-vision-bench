@@ -375,8 +375,8 @@ function itemEvent(state: "started" | "completed", item: JsonObject): JsonObject
 function usage(): JsonObject {
   return {
     inputTokens: 11,
-    cachedInputTokens: 0,
-    cacheWriteInputTokens: 0,
+    cachedInputTokens: 5,
+    cacheWriteInputTokens: 3,
     outputTokens: 7,
     reasoningOutputTokens: 0,
     totalTokens: 18,

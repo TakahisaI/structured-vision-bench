@@ -166,6 +166,11 @@ applied approval cannot be omitted or replaced by a process's self-assertion. Me
 adapter did not obtain remains null or unavailable; requested values must not be copied into
 responded metadata merely to fill a field.
 
+`responded.usage` has required boolean `available` and, when available, optional non-negative integer
+or `null` fields `inputTokens`, `cachedInputTokens`, `cacheWriteInputTokens`, `outputTokens`, and
+`totalTokens`. Missing cache details remain absent or `null`; the boundary does not replace them with
+zero. The cache fields are supplemental and do not redefine the three existing token totals.
+
 Stdout may carry the parsed structured document for a policy-not-required run. It must never
 carry the raw upstream HTTP/app-server body, raw document digest, exact endpoint/account, policy,
 credential, or unbounded diagnostic. A policy-required run is outside this protocol and must not start the

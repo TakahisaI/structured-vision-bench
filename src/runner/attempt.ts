@@ -1516,10 +1516,23 @@ function parseResponded(value: JsonValue | undefined): void {
 
 function parseUsage(value: JsonValue | undefined): void {
   const usage = requiredObject(value);
-  assertKeys(usage, ["available", "inputTokens", "outputTokens", "totalTokens"]);
+  assertKeys(usage, [
+    "available",
+    "inputTokens",
+    "cachedInputTokens",
+    "cacheWriteInputTokens",
+    "outputTokens",
+    "totalTokens",
+  ]);
   if (typeof usage.available !== "boolean") invalid();
-  for (const key of ["inputTokens", "outputTokens", "totalTokens"] as const) {
-    const tokenValue = usage[key];
+  for (const key of [
+    "inputTokens",
+    "cachedInputTokens",
+    "cacheWriteInputTokens",
+    "outputTokens",
+    "totalTokens",
+  ] as const) {
+    const tokenValue = Object.hasOwn(usage, key) ? usage[key] : undefined;
     if (tokenValue !== undefined && tokenValue !== null) {
       if (typeof tokenValue !== "number" || !Number.isSafeInteger(tokenValue) || tokenValue < 0) {
         invalid();

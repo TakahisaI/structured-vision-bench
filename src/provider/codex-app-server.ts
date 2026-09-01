@@ -104,6 +104,8 @@ export type CodexAppServerProtocolResult = {
 
 type ProtocolUsage = {
   inputTokens: number;
+  cachedInputTokens: number | null;
+  cacheWriteInputTokens: number | null;
   outputTokens: number;
   totalTokens: number;
 };
@@ -498,6 +500,8 @@ function applyTurnNotification(
           : {
               available: true,
               inputTokens: accumulator.usage.inputTokens,
+              cachedInputTokens: accumulator.usage.cachedInputTokens,
+              cacheWriteInputTokens: accumulator.usage.cacheWriteInputTokens,
               outputTokens: accumulator.usage.outputTokens,
               totalTokens: accumulator.usage.totalTokens,
             },
@@ -1080,22 +1084,24 @@ function snapshotProtocolUsage(value: unknown): ProtocolUsage {
   const usage = requiredObject(value);
   assertRequiredKeys(usage, [
     "inputTokens",
-    "cachedInputTokens",
-    "cacheWriteInputTokens",
     "outputTokens",
     "reasoningOutputTokens",
     "totalTokens",
   ]);
   const inputTokens = usage.inputTokens;
-  const cachedInputTokens = usage.cachedInputTokens;
-  const cacheWriteInputTokens = usage.cacheWriteInputTokens;
+  const cachedInputTokens = objectHasOwnIntrinsic(usage, "cachedInputTokens")
+    ? (usage.cachedInputTokens ?? null)
+    : null;
+  const cacheWriteInputTokens = objectHasOwnIntrinsic(usage, "cacheWriteInputTokens")
+    ? (usage.cacheWriteInputTokens ?? null)
+    : null;
   const outputTokens = usage.outputTokens;
   const reasoningOutputTokens = usage.reasoningOutputTokens;
   const totalTokens = usage.totalTokens;
   if (
     !isTokenCount(inputTokens) ||
-    !isTokenCount(cachedInputTokens) ||
-    !isTokenCount(cacheWriteInputTokens) ||
+    (cachedInputTokens !== null && !isTokenCount(cachedInputTokens)) ||
+    (cacheWriteInputTokens !== null && !isTokenCount(cacheWriteInputTokens)) ||
     !isTokenCount(outputTokens) ||
     !isTokenCount(reasoningOutputTokens) ||
     !isTokenCount(totalTokens) ||
@@ -1103,7 +1109,13 @@ function snapshotProtocolUsage(value: unknown): ProtocolUsage {
   ) {
     throw new Error();
   }
-  return { inputTokens, outputTokens, totalTokens };
+  return {
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens,
+    outputTokens,
+    totalTokens,
+  };
 }
 
 function assertTurnIdentity(
